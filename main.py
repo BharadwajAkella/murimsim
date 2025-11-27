@@ -1,11 +1,18 @@
 """
-Murim Simulation - M1 Architecture
+Murim Simulation - M1.5 Architecture
 
 M1 Features:
 - Single monk with hunger/stamina/skill stats
 - Three action tiles: kitchen, rest area, training grounds
 - Observe → Reflect → Plan → Act brain loop
 - Memory module with trend detection and adaptive behavior
+
+M1.5 Features (Multi-Monk):
+- Multiple monks in shared world
+- Tile occupancy tracking
+- Conflict detection (blocking and waiting)
+- Per-monk conflict counters
+- Clean separation: World manages positions, Monks manage behavior
 """
 
 
@@ -19,17 +26,45 @@ class World:
         self.rest_pos = (0, 4)
         self.training_pos = (4, 0)
 
-        # Monk position
-        self.monk_pos = (0, 0)
+        # Multi-monk support (M1.5)
+        self.monks = {}  # {monk_id: position}
+        self.tile_occupants = {}  # {position: monk_id}
 
     def is_inside(self, x, y):
         return 0 <= x < self.width and 0 <= y < self.height
 
-    def move_monk(self, x, y):
-        """Move the monk to a new position."""
+    def register_monk(self, monk_id, start_pos=(0, 0)):
+        """Register a monk in the world."""
+        if not self.is_inside(*start_pos):
+            raise ValueError(f"Invalid position: {start_pos}")
+        self.monks[monk_id] = start_pos
+        self.tile_occupants[start_pos] = monk_id
+
+    def move_monk(self, monk_id, x, y):
+        """Move a monk to a new position."""
         if not self.is_inside(x, y):
             raise ValueError(f"Invalid move: {(x, y)} outside grid.")
-        self.monk_pos = (x, y)
+        
+        # Clear old position
+        old_pos = self.monks.get(monk_id)
+        if old_pos and old_pos in self.tile_occupants:
+            del self.tile_occupants[old_pos]
+        
+        # Set new position
+        self.monks[monk_id] = (x, y)
+        self.tile_occupants[(x, y)] = monk_id
+
+    def get_monk_position(self, monk_id):
+        """Get a monk's current position."""
+        return self.monks.get(monk_id)
+
+    def is_tile_occupied(self, pos):
+        """Check if a tile is occupied by any monk."""
+        return pos in self.tile_occupants
+
+    def get_occupant(self, pos):
+        """Get the monk_id occupying a tile, or None."""
+        return self.tile_occupants.get(pos)
 
     def show_world(self):
         grid = [[" ." for _ in range(self.width)] for _ in range(self.height)]
@@ -37,20 +72,24 @@ class World:
         kx, ky = self.kitchen_pos
         rx, ry = self.rest_pos
         tx, ty = self.training_pos
-        mx, my = self.monk_pos
 
         grid[ky][kx] = " K"
         grid[ry][rx] = " R"
         grid[ty][tx] = " T"
-        grid[my][mx] = " M"
+
+        # Display all monks
+        for monk_id, (mx, my) in self.monks.items():
+            # Use numbers for monk IDs (1, 2, etc.)
+            grid[my][mx] = f" {monk_id}"
 
         for row in grid:
             print("".join(row))
 
 
 class Monk:
-    def __init__(self, name="Zhang Wei"):
-        self.name = name
+    def __init__(self, monk_id, name=None):
+        self.monk_id = monk_id
+        self.name = name or f"Monk {monk_id}"
         
         self.hunger = 0
         self.stamina = 100
@@ -63,6 +102,10 @@ class Monk:
 
         self.last_thought = ""
         self.position = (0, 0)
+        
+        # M1.5 conflict tracking
+        self.blocked_by = None  # monk_id of blocker
+        self.conflict_count = 0
 
         # Memory module
         self.memory = {
@@ -77,7 +120,7 @@ class Monk:
     # ------------------ MONK BRAIN ------------------
 
     def observe(self, world):
-        self.position = world.monk_pos
+        self.position = world.get_monk_position(self.monk_id)
 
     def update_memory(self):
         """Update memory at the start of each tick, based on last tick."""
@@ -169,9 +212,17 @@ class Monk:
 
             return f"I continue {self.current_action}."
 
-        # If already at the target tile, start the action
+        # If already at the target tile, check for conflict
         if (x, y) == (tx, ty):
+            # M1.5: Check if tile is occupied by another monk
+            occupant = world.get_occupant((tx, ty))
+            if occupant and occupant != self.monk_id:
+                self.blocked_by = occupant
+                self.conflict_count += 1
+                return f"Another monk occupies this place. I must wait."
+            
             if self.current_action is None:
+                self.blocked_by = None  # Clear any previous blocking
                 return self.start_action()
 
         # Otherwise, move one step toward target
@@ -182,8 +233,16 @@ class Monk:
         else:
             new_y += 1 if ty > y else -1
 
-        world.move_monk(new_x, new_y)
+        # M1.5: Check if destination is blocked
+        if world.is_tile_occupied((new_x, new_y)):
+            occupant = world.get_occupant((new_x, new_y))
+            self.blocked_by = occupant
+            self.conflict_count += 1
+            return f"Another monk blocks my path. I wait."
+
+        world.move_monk(self.monk_id, new_x, new_y)
         self.stamina = max(0, self.stamina - 1)
+        self.blocked_by = None  # Clear blocking
 
         direction = self.direction_to_target((new_x, new_y), self.target_tile)
         return (
@@ -288,33 +347,48 @@ class Monk:
 
 # ------------------ MAIN LOOP ------------------
 
-def game_loop(ticks=50):
+def game_loop(ticks=50, num_monks=1):
     world = World()
-    monk = Monk()
+    monks = []
+    
+    # Create monks with different starting positions
+    start_positions = [(0, 0), (4, 4), (0, 4), (4, 0)]
+    for i in range(num_monks):
+        monk_id = i + 1
+        monk = Monk(monk_id, name=f"Zhang {['Wei', 'Li', 'Chen', 'Wu'][i % 4]}")
+        start_pos = start_positions[i % len(start_positions)]
+        world.register_monk(monk_id, start_pos)
+        monks.append(monk)
 
     for tick in range(1, ticks + 1):
         print(f"\n--- Tick {tick} ---")
 
-        monk.observe(world)
-        monk.update_memory()
-        desire = monk.reflect()
-        monk.plan(desire, world)
-        log = monk.act(world)
+        # Each monk acts
+        for monk in monks:
+            monk.observe(world)
+            monk.update_memory()
+            desire = monk.reflect()
+            monk.plan(desire, world)
+            log = monk.act(world)
 
-        # Passive hunger increase
-        monk.hunger = min(100, monk.hunger + 1)
+            # Passive hunger increase
+            monk.hunger = min(100, monk.hunger + 1)
 
-        print(f"[{monk.name}] {log}")
-        print(
-            f"  Stats: hunger={monk.hunger}, stamina={monk.stamina}, "
-            f"skill={monk.skill}"
-        )
+            print(f"[{monk.name}] {log}")
+            print(
+                f"  Stats: hunger={monk.hunger}, stamina={monk.stamina}, "
+                f"skill={monk.skill}, conflicts={monk.conflict_count}"
+            )
         
-        # Show grid every 10 ticks
-        if tick % 10 == 0:
+        # Show grid every 5 ticks or when conflicts occur
+        if tick % 5 == 0 or any(m.conflict_count > 0 and m.blocked_by for m in monks):
             print()
             world.show_world()
 
 
 if __name__ == "__main__":
-    game_loop(ticks=50)
+    # M1: Single monk
+    # game_loop(ticks=50, num_monks=1)
+    
+    # M1.5: Two monks with conflict
+    game_loop(ticks=50, num_monks=2)
