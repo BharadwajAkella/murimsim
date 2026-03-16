@@ -69,14 +69,20 @@ F_WEIGHT_SURVIVAL: float = 0.6
 F_WEIGHT_FOOD: float = 0.3
 F_WEIGHT_STAT_GAIN: float = 0.1
 
-# Reward shaping coefficients — single source of truth
+# Reward shaping coefficients — Stage 5 potential-based shaping
 REWARD_ALIVE: float = 0.02
 REWARD_HUNGER_RELIEF_SCALE: float = 0.20
-REWARD_FOOD_GATHERED_SCALE: float = 0.05
+REWARD_FOOD_GATHERED_SCALE: float = 0.10           # raised from 0.05
 REWARD_POISON_DAMAGE_SCALE: float = -0.30
 REWARD_TRAVERSAL_DAMAGE_SCALE: float = -0.30
 REWARD_DEATH: float = -1.00
-REWARD_EXPLORE_BASE: float = 0.25   # scaled by agent.adventure_spirit per new tile
+REWARD_EXPLORE_BASE: float = 0.25                  # multiplied by (1-hunger) in step
+# Potential-based inventory security shaping
+REWARD_INV_SECURITY_SCALE: float = 0.12
+INV_SECURITY_CAP: float = 5.0
+# Starvation proximity penalty
+PENALTY_STARVATION_APPROACH: float = -0.08
+STARVATION_THRESHOLD: float = 0.70
 
 # Stash action rewards
 REWARD_DEPOSIT: float = 0.01                 # small reward for depositing (encourages planning)
@@ -192,6 +198,7 @@ class SurvivalEnv(gym.Env):
 
         agent = self._agent
         hunger_prev = agent.hunger
+        inv_food_prev = agent.inventory.food
         food_gathered = 0
         poison_damage = 0.0
         reward_deposit = 0.0
@@ -256,11 +263,12 @@ class SurvivalEnv(gym.Env):
         if agent.alive:
             self._ep_ticks_alive += self._action_ticks
 
-        # --- Exploration bonus: reward visiting tiles not seen this episode ---
+        # --- Exploration bonus: survival-gated — less reward when hungry ---
         exploration_reward = 0.0
         if agent.alive and agent.position not in self._visited_tiles:
             self._visited_tiles.add(agent.position)
-            exploration_reward = REWARD_EXPLORE_BASE * agent.adventure_spirit
+            survival_gate = max(0.0, 1.0 - agent.hunger)
+            exploration_reward = REWARD_EXPLORE_BASE * agent.adventure_spirit * survival_gate
 
         food_density = self._local_food_density(agent.position)
 
@@ -273,6 +281,7 @@ class SurvivalEnv(gym.Env):
             exploration_reward,
             action_enum,
             food_density,
+            inv_food_prev,
         )
         reward += reward_deposit + reward_withdraw + reward_steal
 
@@ -385,6 +394,7 @@ class SurvivalEnv(gym.Env):
         exploration_reward: float = 0.0,
         action_enum: Action | None = None,
         food_density: float = 0.0,
+        inv_food_prev: int = 0,
     ) -> float:
         reward = REWARD_ALIVE
         hunger_relief = hunger_prev - agent.hunger
@@ -393,6 +403,12 @@ class SurvivalEnv(gym.Env):
         reward += REWARD_FOOD_GATHERED_SCALE * food_gathered
         reward += REWARD_POISON_DAMAGE_SCALE * poison_damage
         reward += exploration_reward
+        # Potential-based inventory security shaping
+        inv_delta = (agent.inventory.food - inv_food_prev) / INV_SECURITY_CAP
+        reward += REWARD_INV_SECURITY_SCALE * inv_delta
+        # Starvation proximity penalty
+        if agent.hunger > STARVATION_THRESHOLD:
+            reward += PENALTY_STARVATION_APPROACH * (agent.hunger - STARVATION_THRESHOLD)
         if action_enum is not None:
             hunger_low = agent.hunger < 0.3
             hunger_high = agent.hunger > 0.7

@@ -58,13 +58,19 @@ REWARD_EMA_SCALE: float = 0.5      # EMA normalised: 0 = −scale, 1 = +scale
 HEURISTIC_HUNGER_EAT: float = 0.5   # eat when hunger exceeds this
 HEURISTIC_SCAN_RADIUS: int = 3      # Manhattan radius for food scan
 
-# ── Reward shaping (mirrors SurvivalEnv) ─────────────────────────────────────
+# ── Reward shaping (Stage 5: potential-based) ────────────────────────────────
 REWARD_ALIVE: float = 0.02
 REWARD_HUNGER_RELIEF_SCALE: float = 0.20
-REWARD_FOOD_GATHERED_SCALE: float = 0.05
+REWARD_FOOD_GATHERED_SCALE: float = 0.10           # raised from 0.05 — gather was undervalued
 REWARD_POISON_DAMAGE_SCALE: float = -0.30
 REWARD_DEATH: float = -1.00
-REWARD_EXPLORE_BASE: float = 0.25
+REWARD_EXPLORE_BASE: float = 0.25                  # multiplied by (1-hunger) in step
+# Potential-based inventory security shaping: reward Δ(food_in_hand / INV_CAP)
+REWARD_INV_SECURITY_SCALE: float = 0.12
+INV_SECURITY_CAP: float = 5.0                      # normalise over first 5 food items
+# Starvation proximity penalty: discourages approaching the danger zone
+PENALTY_STARVATION_APPROACH: float = -0.08
+STARVATION_THRESHOLD: float = 0.70
 
 
 class MultiAgentEnv(gym.Env):
@@ -183,6 +189,7 @@ class MultiAgentEnv(gym.Env):
 
         focal = self._agents[self._focal_idx]
         hunger_prev = focal.hunger
+        inv_food_prev = focal.inventory.food
         food_gathered = 0
         poison_damage = 0.0
 
@@ -202,10 +209,12 @@ class MultiAgentEnv(gym.Env):
                 agent.tick()
 
         # 4. Update history for focal agent
+        # Exploration reward is survival-gated: full reward when well-fed, zero when starving
         exploration_reward = 0.0
         if focal.alive and focal.position not in self._visited_tiles[self._focal_idx]:
             self._visited_tiles[self._focal_idx].add(focal.position)
-            exploration_reward = REWARD_EXPLORE_BASE * focal.adventure_spirit
+            survival_gate = max(0.0, 1.0 - focal.hunger)
+            exploration_reward = REWARD_EXPLORE_BASE * focal.adventure_spirit * survival_gate
 
         if focal.alive:
             food_view = self._world.get_grid_view("food")
@@ -218,7 +227,7 @@ class MultiAgentEnv(gym.Env):
                 self._ticks_near_food[self._focal_idx] += 1.0
 
         # 5. Compute reward for focal agent's action
-        reward = self._compute_reward(hunger_prev, food_gathered, poison_damage, focal, exploration_reward)
+        reward = self._compute_reward(hunger_prev, food_gathered, poison_damage, focal, exploration_reward, inv_food_prev)
         ema = self._reward_ema[self._focal_idx]
         self._reward_ema[self._focal_idx] = (1.0 - REWARD_EMA_ALPHA) * ema + REWARD_EMA_ALPHA * reward
 
@@ -324,7 +333,17 @@ class MultiAgentEnv(gym.Env):
         poison_damage: float,
         agent: Agent,
         exploration_reward: float = 0.0,
+        inv_food_prev: int = 0,
     ) -> float:
+        """Compute shaped per-step reward.
+
+        Stage 5 additions:
+        - Potential-based inventory security: reward Δ(food_in_hand) so gathering
+          is worth more than the raw food-gathered bonus alone.
+        - Starvation proximity penalty: discourages drifting into the danger zone
+          rather than waiting until death.
+        - Exploration is survival-gated (passed in pre-scaled by caller).
+        """
         reward = REWARD_ALIVE
         hunger_relief = hunger_prev - agent.hunger
         if hunger_relief > 0:
@@ -332,6 +351,12 @@ class MultiAgentEnv(gym.Env):
         reward += REWARD_FOOD_GATHERED_SCALE * food_gathered
         reward += REWARD_POISON_DAMAGE_SCALE * poison_damage
         reward += exploration_reward
+        # Potential-based inventory shaping: φ(s) = food_in_hand / INV_SECURITY_CAP
+        inv_delta = (agent.inventory.food - inv_food_prev) / INV_SECURITY_CAP
+        reward += REWARD_INV_SECURITY_SCALE * inv_delta
+        # Starvation proximity penalty
+        if agent.hunger > STARVATION_THRESHOLD:
+            reward += PENALTY_STARVATION_APPROACH * (agent.hunger - STARVATION_THRESHOLD)
         if not agent.alive:
             reward += REWARD_DEATH
         return float(reward)
@@ -517,6 +542,7 @@ class CombatEnv(MultiAgentEnv):
 
         focal = self._agents[self._focal_idx]
         hunger_prev = focal.hunger
+        inv_food_prev = focal.inventory.food
         food_gathered = 0
         poison_damage = 0.0
         damage_dealt = 0.0
@@ -546,10 +572,12 @@ class CombatEnv(MultiAgentEnv):
                 agent.tick()
 
         # 4. Update history for focal agent
+        # Exploration reward is survival-gated: full reward when well-fed, zero when starving
         exploration_reward = 0.0
         if focal.alive and focal.position not in self._visited_tiles[self._focal_idx]:
             self._visited_tiles[self._focal_idx].add(focal.position)
-            exploration_reward = REWARD_EXPLORE_BASE * focal.adventure_spirit
+            survival_gate = max(0.0, 1.0 - focal.hunger)
+            exploration_reward = REWARD_EXPLORE_BASE * focal.adventure_spirit * survival_gate
 
         if focal.alive:
             food_view = self._world.get_grid_view("food")
@@ -569,6 +597,7 @@ class CombatEnv(MultiAgentEnv):
         reward = self._compute_combat_reward(
             hunger_prev, food_gathered, poison_damage, focal,
             exploration_reward, damage_dealt, damage_taken, defeat_bonus,
+            inv_food_prev,
         )
         ema = self._reward_ema[self._focal_idx]
         self._reward_ema[self._focal_idx] = (1.0 - REWARD_EMA_ALPHA) * ema + REWARD_EMA_ALPHA * reward
@@ -667,9 +696,10 @@ class CombatEnv(MultiAgentEnv):
         damage_dealt: float,
         damage_taken: float,
         defeat_bonus: float,
+        inv_food_prev: int = 0,
     ) -> float:
         """Phase 3c reward: Phase 3b reward + combat shaping."""
-        reward = self._compute_reward(hunger_prev, food_gathered, poison_damage, agent, exploration_reward)
+        reward = self._compute_reward(hunger_prev, food_gathered, poison_damage, agent, exploration_reward, inv_food_prev)
         reward += REWARD_DAMAGE_TAKEN_SCALE * damage_taken
         reward += defeat_bonus
         return reward
