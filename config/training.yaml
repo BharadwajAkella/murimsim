@@ -60,7 +60,7 @@ domain_randomization:
 # Replaces MlpPolicy with MlpLstmPolicy. All other env settings identical to phase3c.
 lstm:
   total_timesteps: 600_000
-  checkpoint_dir: checkpoints/limbic_lstm_v1
+  checkpoint_dir: checkpoints/limbic_lstm_v2
   checkpoint_freq: 100_000
   n_envs: 4
   curriculum_ramp_steps: 300_000
