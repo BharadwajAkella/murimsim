@@ -55,3 +55,17 @@ domain_randomization:
   food_regen_ticks: [50, 250]      # world ticks range
   food_spawn_density: [0.03, 0.08] # spawn density range
   action_ticks: [3, 8]             # world ticks per agent action range
+
+# LSTM / Recurrent PPO — Stage 4 training
+# Replaces MlpPolicy with MlpLstmPolicy. All other env settings identical to phase3c.
+lstm:
+  total_timesteps: 600_000
+  checkpoint_dir: checkpoints/limbic_lstm_v1
+  checkpoint_freq: 100_000
+  n_envs: 4
+  curriculum_ramp_steps: 300_000
+  lstm_hidden_size: 64        # size of the hidden state vector (the "notepad")
+  n_lstm_layers: 1            # 1 is sufficient; 2 gives more capacity at higher cost
+  shared_lstm: false          # if true, actor and critic share the LSTM
+  n_steps: 512                # shorter rollout chunks suit recurrent training
+  batch_size: 64              # must divide n_steps * n_envs evenly

@@ -289,7 +289,84 @@ An LSTM agent should shift the whole table: lower revisit rate, more unique tile
 
 ---
 
-## Where We Are: Stage 4 (Complete)
+## Stage 4 — Complete ✅
+
+### LSTM vs MLP: Before/After Results
+
+LSTM v1 trained for 600k steps using `RecurrentPPO` (sb3-contrib), warm-started from MLP v3 trunk (8/20 layers transferred, LSTM gates random init).
+
+| Metric | MLP v3 (Before) | LSTM v1 (After) | Delta |
+|---|---|---|---|
+| Avg lifespan | 534.6 ticks | 441.4 ticks | -17.4% 😬 |
+| Avg unique tiles | 193.5 | 160.6 | -17.0% |
+| Avg revisit rate | 0.631 | 0.630 | ≈ same |
+| Avg action entropy | 2.251 | 2.561 | +13.8% ✅ |
+| North movement bias | **44.7%** | 12.8% | **cured** ✅ |
+| Gather rate | 2.4% | **20.1%** | **+8x** ✅ |
+| Combat actions | 0% | 9.9% (attack+defend) | new behavior ✅ |
+
+**Interpretation:**
+- The north-movement bias is gone — LSTM learned directional diversity
+- Gather rate jumped 8x — memory lets it plan "I need to stockpile"
+- Action entropy increased — more diverse behavior overall
+- But lifespan dropped 17% — LSTM is still learning; 600k steps is not enough for a model that starts with random memory gates
+- Revisit rate barely changed — exploration shaping (Stage 5) is the next lever
+
+**Key takeaway:** The LSTM learned *better behaviors* (gathering, combat) but shorter survival. This is typical of warm-starting with random gates — the memory module destabilizes the MLP trunk initially. More training or a longer warm-up would likely recover lifespan.
+
+---
+
+## Stage 5 — Reward Shaping (In Progress 🔶)
+
+### The Problem: Gather Rate Was Only 2.4%
+
+The agent *could* gather. The action existed and had a small reward (+0.05). But eating gave +0.20 immediately. Due to **temporal discounting** (γ = 0.99), rewards further in the future are worth less:
+
+```
+Value of reward R arriving t steps later = γᵗ × R
++0.20 eat now  = 0.20
++0.20 from stashed food 50 ticks later = 0.99⁵⁰ × 0.20 ≈ 0.12
+```
+
+The agent is mathematically rational — eating now IS better. This is the **sparse/delayed reward** problem.
+
+### What Is Reward Shaping?
+
+Adding intermediate rewards to guide an agent toward behaviors that *lead to* good outcomes, without waiting for the final payoff. You're illuminating the path.
+
+**The catch:** naive shaping can be gamed. If gather = +0.50 and food respawns, the agent becomes a farmer glued to one tile, looping gather→wait→gather forever.
+
+### Potential-Based Shaping (the safe version)
+
+Due to Ng et al. (1999). Instead of rewarding the action, reward **progress toward a goal**:
+
+```
+shaping_reward = φ(new_state) - φ(old_state)
+```
+
+where φ (phi) is a **potential function** — a measure of how "good" a state is.
+
+Example: φ = stash_fullness + (1 - hunger)
+
+- Gather food: φ goes up → positive reward ✅
+- Stand still: φ stays same → zero reward ✅ (can't be farmed)
+- Stash fills up: φ can't increase further → reward drops to zero ✅
+
+**Formal guarantee:** potential-based shaping never changes the *optimal* policy, only how fast the agent finds it.
+
+### Types of shaping signals for MurimSim
+
+| Type | Signal | φ |
+|---|---|---|
+| Inventory shaping | Reward progress toward full stash | stash_fullness |
+| Hunger shaping | Reward staying well-fed | 1 - hunger |
+| Exploration shaping | Reward visiting new tiles | unique_tiles_visited |
+
+⚠️ **Exploration shaping is special** — φ only ever goes up (can't revisit a "new" tile twice). This makes it non-potential-based and exploitable. **Paused here — to be continued next session.**
+
+---
+
+## Where We Are
 
 **Completed:**
 - ✅ Rewards and returns (Stage 1/2)
@@ -298,16 +375,14 @@ An LSTM agent should shift the whole table: lower revisit rate, more unique tile
 - ✅ Evo vs PPO decision (Stage 3.5)
 - ✅ Limbic system trained (v1→v3 checkpoints)
 - ✅ Multi-agent combat environment (M4 sim features)
-- ✅ Stage 4 theory: LSTM, gates, recurrent PPO, BPTT
-
-**Parked / incomplete:**
-- 🔶 LSTM implementation in MurimSim (theory done, code next)
-- 🔶 Multi-sect specialization (3-grid training, see `plan_for_rl_arch.md`)
+- ✅ Stage 4 theory + implementation: LSTM, gates, recurrent PPO, BPTT
+- ✅ LSTM v1 trained (600k steps) — before/after comparison done
+- 🔶 Stage 5: Reward shaping — paused at exploration shaping / curiosity bonus
 
 **Planned curriculum order (teacher's choice):**
-1. **Stage 4 (current):** Recurrent policies — implement LSTM in MurimSim, compare exploration vs memoryless baseline
-2. **Stage 5:** Reward shaping — how to guide learning without corrupting the signal (intrinsic motivation, curiosity, potential-based shaping)
-3. **Stage 6:** Multi-agent dynamics — cooperative vs competitive, emergent communication, credit assignment in teams
+1. ✅ **Stage 4:** Recurrent policies
+2. 🔶 **Stage 5 (current):** Reward shaping — finish exploration shaping, curiosity bonus, intrinsic motivation
+3. **Stage 6:** Multi-agent dynamics — cooperative vs competitive, team credit assignment
 4. **Stage 7:** Population-based training and specialization — the 3-sect experiment
 
 ---
