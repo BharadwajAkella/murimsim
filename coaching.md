@@ -316,7 +316,7 @@ LSTM v1 trained for 600k steps using `RecurrentPPO` (sb3-contrib), warm-started 
 
 ---
 
-## Stage 5 — Reward Shaping (In Progress 🔶)
+## Stage 5 — Reward Shaping ✅
 
 ### The Problem: Gather Rate Was Only 2.4%
 
@@ -354,15 +354,48 @@ Example: φ = stash_fullness + (1 - hunger)
 
 **Formal guarantee:** potential-based shaping never changes the *optimal* policy, only how fast the agent finds it.
 
-### Types of shaping signals for MurimSim
+### What We Implemented (LSTM v2 — 1.5M steps)
 
-| Type | Signal | φ |
-|---|---|---|
-| Inventory shaping | Reward progress toward full stash | stash_fullness |
-| Hunger shaping | Reward staying well-fed | 1 - hunger |
-| Exploration shaping | Reward visiting new tiles | unique_tiles_visited |
+Three changes on top of LSTM v1:
+1. **Gather reward doubled**: 0.05 → 0.10
+2. **Inventory security potential**: reward Δ(food_in_hand / 5) × 0.12
+3. **Starvation proximity penalty**: −0.08 per unit hunger above 0.70
+4. **Survival-gated exploration**: explore bonus × (1 − hunger)
 
-⚠️ **Exploration shaping is special** — φ only ever goes up (can't revisit a "new" tile twice). This makes it non-potential-based and exploitable. **Paused here — to be continued next session.**
+### 3-Way Results: MLP v3 → LSTM v1 → LSTM v2
+
+```
+                        MLP v3     LSTM v1    LSTM v2
+                       baseline  no shaping  Stage 5
+────────────────────────────────────────────────────
+Avg lifespan (ticks)    534.6      441.4      449.6   ▲1.9%
+Avg unique tiles        193.5      160.6      164.8   ▲2.6%
+Avg revisit rate        0.631      0.630      0.629   ≈ same
+Action entropy          2.251      2.561      2.394   more focused
+
+North movement bias      44.7%     12.8%       1.9%   ✅ nearly eliminated
+Gather rate               2.4%     20.1%      12.1%   ⚠️  dropped!
+Eat rate                 15.2%     35.4%      43.4%   starvation shaping working
+Defend                    0.0%      3.7%       8.7%   ✅ combat behavior evolved
+```
+
+### What Went Wrong (and Why It's a Great Lesson)
+
+**The gather rate dropped from 20% → 12%** between v1 and v2. The starvation penalty backfired.
+
+Here's why: the starvation penalty made agents fear hunger so much that they switched to eating *immediately from the ground* whenever hungry, rather than gathering into inventory first. In our env, eating from the ground gives `+0.20 × hunger_relief` *right now*. Gathering gives `+0.10 + Δφ_inventory` — spread across future ticks when inventory food gets used.
+
+The starvation penalty increased the *urgency* to resolve hunger — but the *fastest* way to resolve hunger is still `eat`, not `gather`. So the agent optimised even harder for immediate eating.
+
+**This is a classic reward interaction bug**: two well-intentioned signals that *individually* make sense, but *together* push the agent toward the wrong behavior. The starvation penalty and inventory shaping are fighting each other.
+
+**The fix** (not yet implemented): decouple the signals. Instead of penalising hunger level, penalise *running out of inventory* when food is available nearby. That would make gathering the rational response, not eating.
+
+### Exploration Shaping — Why It's Different
+
+Exploration bonus (reward per new tile) is **not** potential-based because φ (unique tiles) only ever goes up. An agent that ignores food and sprints across the map could exploit this forever.
+
+The fix used here: multiply exploration reward by `(1 − hunger)`. A starving agent gets zero exploration reward. A well-fed agent gets full reward. This is not potential-based either, but it's **bounded** (max one new-tile reward per tile, and tiles are finite) and **survival-safe** (can't explore at the cost of dying).
 
 ---
 
@@ -377,11 +410,13 @@ Example: φ = stash_fullness + (1 - hunger)
 - ✅ Multi-agent combat environment (M4 sim features)
 - ✅ Stage 4 theory + implementation: LSTM, gates, recurrent PPO, BPTT
 - ✅ LSTM v1 trained (600k steps) — before/after comparison done
-- 🔶 Stage 5: Reward shaping — paused at exploration shaping / curiosity bonus
+- ✅ Stage 5: Reward shaping theory + implementation + 3-way comparison
+
+**Open question for next session:** fix the gather vs eat interaction — decouple starvation urgency from inventory shaping so they don't fight each other.
 
 **Planned curriculum order (teacher's choice):**
 1. ✅ **Stage 4:** Recurrent policies
-2. 🔶 **Stage 5 (current):** Reward shaping — finish exploration shaping, curiosity bonus, intrinsic motivation
+2. ✅ **Stage 5:** Reward shaping — potential-based shaping, interaction bugs, gated exploration
 3. **Stage 6:** Multi-agent dynamics — cooperative vs competitive, team credit assignment
 4. **Stage 7:** Population-based training and specialization — the 3-sect experiment
 
