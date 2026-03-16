@@ -1,0 +1,118 @@
+# World configuration — canonical values; all agent traits are floats in [0.0, 1.0]
+world:
+  grid_size: 30
+  seed: 42
+  action_ticks: 5        # world ticks consumed by one agent action (slows the agent down)
+
+# Data-driven resource registry.
+# To add a new resource: append an entry here. No code changes required.
+#
+# Fields:
+#   id               — unique string identifier used throughout the codebase
+#   display_name     — human-readable label (viewer + logs)
+#   regen_ticks      — ticks until a depleted tile respawns
+#   spawn_density    — base probability [0,1] each tile has this resource at init
+#   effect           — 'positive' | 'negative' | 'neutral'
+#   effect_params    — resource-specific payload consumed by agent logic
+#   spawn_clusters   — if true, tiles are grouped spatially on init (e.g. poison)
+#   cluster_count    — number of cluster centres (only if spawn_clusters: true)
+#   cluster_radius   — radius in tiles for each cluster
+#   cluster_fill_prob — probability a tile within cluster radius is filled [0,1]
+
+resources:
+  - id: food
+    display_name: "Food"
+    regen_ticks: 200
+    gatherable: true
+    spawn_density: 0.05
+    effect: positive
+    effect_params:
+      hunger_restore: 0.3
+    traversal_effects: []
+
+  - id: qi
+    display_name: "Qi Crystal"
+    regen_ticks: 400
+    gatherable: true
+    spawn_density: 0.02
+    effect: positive
+    effect_params:
+      qi_restore: 0.5
+    traversal_effects: []
+
+  - id: materials
+    display_name: "Materials"
+    regen_ticks: 300
+    gatherable: true
+    spawn_density: 0.03
+    effect: neutral
+    effect_params: {}
+    traversal_effects: []
+
+  - id: poison
+    display_name: "Poison"
+    regen_ticks: 150
+    gatherable: true
+    spawn_density: 0.03
+    effect: negative
+    spawn_clusters: true
+    cluster_count: 3
+    cluster_radius: 3
+    cluster_fill_prob: 0.55
+    effect_params:
+      potency: 0.4
+    traversal_effects: []
+
+  - id: mountain
+    display_name: "Mountain Pass"
+    regen_ticks: 0
+    gatherable: false
+    spawn_density: 0.0
+    spawn_clusters: true
+    cluster_count: 3
+    cluster_radius: 6
+    cluster_fill_prob: 0.55
+    effect: negative
+    effect_params: {}
+    traversal_effects:
+      - trigger: on_enter
+        attribute: health
+        delta: -0.04
+        resistance_stat: qi_drain
+
+  - id: flame
+    display_name: "Flame Zone"
+    regen_ticks: 0
+    gatherable: false
+    spawn_density: 0.0
+    spawn_clusters: true
+    cluster_count: 2
+    cluster_radius: 3
+    cluster_fill_prob: 0.65
+    effect: negative
+    effect_params: {}
+    traversal_effects:
+      - trigger: on_enter
+        attribute: health
+        delta: -0.08
+        resistance_stat: flame
+
+# Agent trait ranges — randomised at spawn time.
+agent:
+  poison_resistance_min: 0.05
+  poison_resistance_max: 0.30
+  flame_resistance_min: 0.0
+  flame_resistance_max: 0.10
+  qi_drain_resistance_min: 0.0
+  qi_drain_resistance_max: 0.20
+  strength_min: 0.2
+  strength_max: 0.8
+  adventure_spirit_min: 0.1
+  adventure_spirit_max: 0.9
+
+# Domain randomisation — disabled here; enabled via training.yaml during RL training.
+domain_randomization:
+  enabled: false
+  food_regen_ticks: [50, 250]      # world ticks range per episode
+  food_spawn_density: [0.03, 0.08] # fraction of tiles range per episode
+  action_ticks: [3, 8]             # world ticks per agent action range

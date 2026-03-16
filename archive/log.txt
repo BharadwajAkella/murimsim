@@ -1,0 +1,316 @@
+
+==== TICK 1 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li walks.
+Zhang Wei walks.
+
+==== TICK 2 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li walks.
+Zhang Wei walks.
+
+==== TICK 3 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li walks.
+Zhang Wei walks.
+
+==== TICK 4 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li walks.
+Zhang Wei walks.
+
+==== TICK 5 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 6 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 7 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 8 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 9 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 10 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 11 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 12 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 13 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 14 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 15 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 16 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 17 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 18 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 19 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 20 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 21 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 22 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 23 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 24 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 25 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 26 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 27 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 28 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 29 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 30 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 31 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 32 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 33 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 34 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 35 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 36 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 37 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 38 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 39 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== TICK 40 ====
+Zhang Li says: "If I don’t push harder, I fall behind."
+Zhang Wei says: "This body sharpens only through pain."
+Zhang Li says: "If you want the spot, take it from me."
+Zhang Li enters combat!
+Zhang Wei says: "If you want the spot, take it from me."
+Zhang Wei enters combat!
+
+==== FINAL STATS ====
+Zhang Wei: HP=100, Stamina=96, Hunger=40, Skill=0, State=combat
+Zhang Li: HP=100, Stamina=96, Hunger=40, Skill=0, State=combat

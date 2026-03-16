@@ -1,0 +1,7 @@
+# Env override: resource-dense
+# Food is abundant and regenerates quickly — agents learn the "camping" strategy:
+# when obs shows high local food density + low hunger, prefer REST over movement.
+resource_overrides:
+  - id: food
+    spawn_density: 0.10
+    regen_ticks: 80

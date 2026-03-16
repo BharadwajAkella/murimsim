@@ -1,0 +1,7 @@
+# Env override: resource-scarce
+# Food is rare and regenerates slowly — agents must learn to range further
+# (low food values in obs → explore) and resist starving during long forages.
+resource_overrides:
+  - id: food
+    spawn_density: 0.02
+    regen_ticks: 400

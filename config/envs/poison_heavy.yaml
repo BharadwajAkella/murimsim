@@ -1,0 +1,10 @@
+# Env override: poison-heavy
+# Clusters are larger and more numerous — agents must learn to read
+# poison density in their 5x5 obs and weigh it against their resistance.
+# No env label is passed to the policy; behavior emerges from what the obs shows.
+resource_overrides:
+  - id: poison
+    cluster_count: 8
+    cluster_radius: 4
+    cluster_fill_prob: 0.65
+    regen_ticks: 120

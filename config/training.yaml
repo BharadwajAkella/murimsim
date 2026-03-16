@@ -1,0 +1,57 @@
+# RL training configuration — Phase 2
+training:
+  total_timesteps: 500_000
+  checkpoint_dir: checkpoints/limbic_v1
+  checkpoint_freq: 100_000   # save every N steps
+  log_dir: logs/ppo
+
+# SB3 PPO hyperparameters
+ppo:
+  policy: MlpPolicy
+  device: cpu   # MlpPolicy is faster on CPU than GPU
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  learning_rate: 0.0003
+  clip_range: 0.2
+  ent_coef: 0.01
+  policy_kwargs:
+    net_arch: [64, 64]   # 2×64 MLP as specified in the plan
+
+# Logging
+wandb:
+  enabled: false         # always false in tests; enable manually for training runs
+  project: murimsim
+  entity: null
+
+# Phase 3c: combat training with curriculum (ATTACK/DEFEND, fight/flight)
+phase3c:
+  total_timesteps: 500_000
+  checkpoint_dir: checkpoints/limbic_v2
+  checkpoint_freq: 100_000
+  n_envs: 4
+  curriculum_ramp_steps: 300_000
+
+# Phase 3b: multi-agent coexistence (N agents sharing one World, round-robin policy)
+phase3b:
+  total_timesteps: 200_000
+  checkpoint_dir: checkpoints/limbic_v1c
+  checkpoint_freq: 50_000
+  n_envs: 4
+
+# Phase 3a: multi-environment training (3 env types × 8 parallel envs, shared policy)
+phase3a:
+  total_timesteps: 300_000
+  checkpoint_dir: checkpoints/limbic_v1b
+  checkpoint_freq: 100_000
+
+# Domain randomisation — applied per episode in SurvivalEnv.reset().
+# Each episode samples world params uniformly from these ranges so the policy
+# learns to survive across a spectrum of environments, not just one fixed config.
+domain_randomization:
+  enabled: true
+  food_regen_ticks: [50, 250]      # world ticks range
+  food_spawn_density: [0.03, 0.08] # spawn density range
+  action_ticks: [3, 8]             # world ticks per agent action range

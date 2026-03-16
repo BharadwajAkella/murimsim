@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MurimSim Replay Viewer</title>
+  <style>
+    /* -----------------------------------------------------------------------
+       Reset & base
+    ----------------------------------------------------------------------- */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0f0f1a;
+      color: #e0e0e0;
+      font-family: "Segoe UI", system-ui, monospace;
+      font-size: 13px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* -----------------------------------------------------------------------
+       Top bar
+    ----------------------------------------------------------------------- */
+    #topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 16px;
+      background: #16162a;
+      border-bottom: 1px solid #2a2a4a;
+      flex-shrink: 0;
+    }
+
+    #topbar h1 {
+      font-size: 15px;
+      font-weight: 700;
+      color: #a78bfa;
+      letter-spacing: 0.05em;
+    }
+
+    #topbar label.file-btn {
+      cursor: pointer;
+      background: #4f46e5;
+      color: #fff;
+      padding: 5px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 600;
+      transition: background 0.15s;
+    }
+    #topbar label.file-btn:hover { background: #6d60f0; }
+    #file-input { display: none; }
+
+    #tick-label, #gen-label {
+      font-family: monospace;
+      font-size: 12px;
+      color: #94a3b8;
+    }
+
+    /* -----------------------------------------------------------------------
+       Main layout: canvas + right sidebar
+    ----------------------------------------------------------------------- */
+    #main {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    #canvas-wrap {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+      position: relative;
+    }
+
+    #sim-canvas {
+      background: #1a1a2e;
+      border: 1px solid #2a2a4a;
+      cursor: crosshair;
+      max-width: 100%;
+      max-height: 100%;
+      image-rendering: pixelated;
+    }
+
+    #drop-hint {
+      position: absolute;
+      color: rgba(255,255,255,0.15);
+      font-size: 14px;
+      pointer-events: none;
+      text-align: center;
+    }
+
+    /* -----------------------------------------------------------------------
+       Right sidebar
+    ----------------------------------------------------------------------- */
+    #sidebar {
+      width: 240px;
+      min-width: 200px;
+      background: #12121f;
+      border-left: 1px solid #2a2a4a;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .sidebar-section {
+      padding: 10px 12px;
+      border-bottom: 1px solid #2a2a4a;
+      overflow-y: auto;
+    }
+    .sidebar-section h2 {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #64748b;
+      margin-bottom: 8px;
+    }
+
+    /* Agent inspector */
+    #agent-panel { flex: 1; overflow-y: auto; padding: 10px 12px; }
+    #agent-panel h3 {
+      font-size: 12px;
+      font-weight: 700;
+      color: #e2e8f0;
+      margin-bottom: 8px;
+      word-break: break-all;
+    }
+
+    .stat-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .stat-table th {
+      text-align: left;
+      color: #64748b;
+      width: 80px;
+      padding: 3px 4px 3px 0;
+      vertical-align: top;
+    }
+    .stat-table td { padding: 3px 0; color: #cbd5e1; vertical-align: top; }
+
+    .bar-wrap {
+      background: #1e293b;
+      height: 6px;
+      border-radius: 3px;
+      margin-bottom: 2px;
+      overflow: hidden;
+    }
+    .bar { height: 100%; border-radius: 3px; transition: width 0.1s; }
+    .health-bar  { background: #22c55e; }
+    .hunger-bar  { background: #f59e0b; }
+    .poison-bar  { background: #ef4444; }
+
+    /* Event log */
+    #event-log-wrap {
+      height: 130px;
+      border-top: 1px solid #2a2a4a;
+      padding: 8px 12px;
+      overflow-y: auto;
+    }
+    #event-log-wrap h2 {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #64748b;
+      margin-bottom: 6px;
+    }
+    .event { font-size: 11px; padding: 2px 0; border-bottom: 1px solid #1e293b; }
+    .event.combat { color: #f87171; }
+    .event.death  { color: #94a3b8; }
+    .muted { color: #334155; font-size: 11px; }
+
+    /* Legend */
+    #legend { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; border-bottom: 1px solid #2a2a4a; }
+    .legend-item { display: flex; align-items: center; gap: 4px; font-size: 10px; }
+    .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .legend-sq  { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+
+    /* -----------------------------------------------------------------------
+       Bottom controls
+    ----------------------------------------------------------------------- */
+    #controls {
+      display: none;
+      flex-direction: column;
+      gap: 6px;
+      padding: 8px 16px;
+      background: #16162a;
+      border-top: 1px solid #2a2a4a;
+      flex-shrink: 0;
+    }
+
+    #controls-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      background: #1e293b;
+      color: #e2e8f0;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      padding: 5px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+    button:hover { background: #293548; }
+
+    #scrub {
+      flex: 1;
+      min-width: 120px;
+      accent-color: #4f46e5;
+    }
+
+    label.ctrl-label {
+      font-size: 11px;
+      color: #64748b;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    #fps-slider { width: 80px; accent-color: #4f46e5; }
+    #fps-display { font-family: monospace; font-size: 11px; color: #94a3b8; width: 24px; }
+
+    #gen-markers { font-size: 10px; color: #475569; font-family: monospace; }
+  </style>
+</head>
+<body>
+
+  <!-- Top bar -->
+  <div id="topbar">
+    <h1>⚔ MurimSim Replay</h1>
+    <label class="file-btn" for="file-input">📂 Load replay</label>
+    <input type="file" id="file-input" accept=".jsonl,.txt" />
+    <span id="tick-label">Tick: —</span>
+    <span id="gen-label">Generation: —</span>
+  </div>
+
+  <!-- Main -->
+  <div id="main">
+
+    <!-- Canvas area -->
+    <div id="canvas-wrap">
+      <div id="drop-hint">Load a run_*.jsonl file to begin</div>
+      <canvas id="sim-canvas" width="600" height="600"></canvas>
+    </div>
+
+    <!-- Right sidebar -->
+    <div id="sidebar">
+
+      <!-- Legend -->
+      <div id="legend">
+        <div class="legend-item"><div class="legend-sq" style="background:rgba(52,168,83,0.85)"></div>Food</div>
+        <div class="legend-item"><div class="legend-sq" style="background:rgba(66,133,244,0.85)"></div>Qi</div>
+        <div class="legend-item"><div class="legend-sq" style="background:rgba(234,179,8,0.85)"></div>Materials</div>
+        <div class="legend-item"><div class="legend-sq" style="background:rgba(239,68,68,0.85)"></div>Flame</div>
+        <div class="legend-item"><div class="legend-sq" style="background:rgba(147,51,234,0.85)"></div>Poison</div>
+        <div class="legend-item"><div class="legend-sq" style="background:rgba(120,80,40,0.85)"></div>Mountain</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#e74c3c"></div>Iron Fang</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#2ecc71"></div>Jade Lotus</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#9b59b6"></div>Shadow Root</div>
+      </div>
+
+      <!-- Agent inspector -->
+      <div id="agent-panel">
+        <p class="muted">Click a tile or agent to inspect</p>
+      </div>
+
+      <!-- Event log -->
+      <div id="event-log-wrap">
+        <h2>Events this tick</h2>
+        <div id="event-log"><p class="muted">No events this tick</p></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Bottom controls -->
+  <div id="controls">
+    <div id="controls-row">
+      <button id="btn-rewind">⏮ Rewind</button>
+      <button id="btn-play">▶ Play</button>
+      <button id="btn-step">⏭ Step</button>
+      <input type="range" id="scrub" min="0" max="0" value="0" />
+      <label class="ctrl-label">
+        Speed:
+        <input type="range" id="fps-slider" />
+        <span id="fps-display">8</span> fps
+      </label>
+    </div>
+    <div id="gen-markers"></div>
+  </div>
+
+  <script src="viewer.js"></script>
+</body>
+</html>
