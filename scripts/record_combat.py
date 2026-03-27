@@ -26,8 +26,8 @@ from murimsim.rl.multi_env import CombatEnv
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "default.yaml"
 TRAIN_CONFIG_PATH = Path(__file__).parent.parent / "config" / "training.yaml"
-OUTPUT_DIR = Path("/mnt/c/Users/bhara/Downloads/replays")
-DEFAULT_MODEL = Path(__file__).parent.parent / "checkpoints" / "limbic_v2" / "limbic_v2_final.zip"
+OUTPUT_DIR = Path(__file__).parent.parent / "logs" / "replays"
+DEFAULT_MODEL = Path(__file__).parent.parent / "checkpoints" / "limbic_lstm_v2" / "limbic_lstm_v2_final.zip"
 
 # Assign a distinct "sect" colour to each agent slot for the viewer
 _SECT_PALETTE = [
@@ -97,14 +97,23 @@ def main() -> None:
     model_path = args.model or DEFAULT_MODEL
     model = None
     model_obs_size: int | None = None
+    is_recurrent = False
     if model_path.exists():
         try:
-            from stable_baselines3 import PPO
-            model = PPO.load(str(model_path), device="cpu")
+            # Try RecurrentPPO first (LSTM checkpoints)
+            from sb3_contrib import RecurrentPPO
+            model = RecurrentPPO.load(str(model_path), device="cpu")
             model_obs_size = model.observation_space.shape[0]
-            policy_name = f"PPO ({model_path.name})"
-        except Exception as e:
-            print(f"[WARN] Could not load model ({e}). Using heuristic fallback.", file=sys.stderr)
+            policy_name = f"RecurrentPPO ({model_path.name})"
+            is_recurrent = True
+        except Exception:
+            try:
+                from stable_baselines3 import PPO
+                model = PPO.load(str(model_path), device="cpu")
+                model_obs_size = model.observation_space.shape[0]
+                policy_name = f"PPO ({model_path.name})"
+            except Exception as e:
+                print(f"[WARN] Could not load model ({e}). Using heuristic fallback.", file=sys.stderr)
     if model is None:
         policy_name = "heuristic"
 
@@ -162,6 +171,9 @@ def main() -> None:
     dead_agents: set[int] = set()
     step = 0
     generation = 0
+    # LSTM hidden states — reset on each new generation
+    lstm_states = None
+    ep_start = np.ones((1,), dtype=bool)
 
     with ReplayLogger(seed=args.seed, output_dir=out_path.parent, filename=out_filename) as replay:
         while step < args.ticks:
@@ -169,7 +181,16 @@ def main() -> None:
 
             if model is not None:
                 obs = env._build_obs(focal_idx)
-                action_int, _ = model.predict(_compat_obs(obs), deterministic=True)
+                if is_recurrent:
+                    action_int, lstm_states = model.predict(
+                        _compat_obs(obs),
+                        state=lstm_states,
+                        episode_start=ep_start,
+                        deterministic=True,
+                    )
+                    ep_start = np.zeros((1,), dtype=bool)
+                else:
+                    action_int, _ = model.predict(_compat_obs(obs), deterministic=True)
                 action_int = int(action_int)
             else:
                 action_int = env.action_space.sample()
@@ -210,10 +231,13 @@ def main() -> None:
                     last_actions = ["rest"] * args.agents
                     last_details = [""] * args.agents
                     dead_agents = set()
+                    lstm_states = None
+                    ep_start = np.ones((1,), dtype=bool)
                 else:
                     # Only focal died — continue in same world with next alive agent
                     env._focal_idx = env._next_live(env._focal_idx)
                     obs = env._build_obs(env._focal_idx)
+                    ep_start = np.ones((1,), dtype=bool)
 
     print(f"{'─'*55}")
     print(f"  Steps recorded : {step}")

@@ -13,16 +13,24 @@ Observation space:
 
 Action space: Discrete(7) — see murimsim.actions.Action
 
-Reward (per tick):
-    +0.02  alive bonus
+Reward (per step):
+    +0.02  alive bonus (per step)
     +0.20  * (hunger_prev - hunger_now)   hunger relief
-    +0.05  * food_gathered_this_step
+    +0.18  * food_gathered_this_step      ← gather reward (raised to match hunger relief value)
     -0.30  * poison_damage_taken
     -0.30  * traversal_damage_taken
+    +0.12  * Δ(inv_food / INV_SECURITY_CAP)   inventory security shaping (potential-based)
+    -0.08  when inv_food == 0 and food is nearby (empty-inventory penalty, decoupled from hunger)
+    +0.50  * Δ(sum(resistances))          resistance growth reward (potential-based)
+    +0.008 * sum(resistances)             continuous strength bonus — rewards being strong,
+                                          not just becoming strong; second priority after survival
+                                          (at full immunity: 3×1.0 → 0.024/step > alive bonus)
     -1.00  on death
 
+Priority order: survival > strength > food
+
 Episode fitness (F-metric, reported in info on termination):
-    F = 0.6 * survival_ratio + 0.3 * food_score + 0.1 * stat_gain
+    F = 0.6 * survival_ratio + 0.1 * food_score + 0.3 * stat_gain
     where:
         survival_ratio = ticks_alive / max_episode_ticks
         food_score     = net_food_eaten / (max_episode_ticks * HUNGER_PER_TICK / hunger_restore)
@@ -65,14 +73,15 @@ OBS_TOTAL_SIZE: int = OBS_GRID_SIZE + OBS_STATS_SIZE  # 209
 OBS_ACTION_TICKS_MAX: float = 10.0
 
 # F-metric weights (episode-level fitness score)
+# Priority: survival > strength > food
 F_WEIGHT_SURVIVAL: float = 0.6
-F_WEIGHT_FOOD: float = 0.3
-F_WEIGHT_STAT_GAIN: float = 0.1
+F_WEIGHT_FOOD: float = 0.1
+F_WEIGHT_STAT_GAIN: float = 0.3
 
-# Reward shaping coefficients — Stage 5 potential-based shaping
+# Reward shaping coefficients — Stage 6 potential-based shaping
 REWARD_ALIVE: float = 0.02
 REWARD_HUNGER_RELIEF_SCALE: float = 0.20
-REWARD_FOOD_GATHERED_SCALE: float = 0.10           # raised from 0.05
+REWARD_FOOD_GATHERED_SCALE: float = 0.18           # raised from 0.10 — gather now equals hunger relief
 REWARD_POISON_DAMAGE_SCALE: float = -0.30
 REWARD_TRAVERSAL_DAMAGE_SCALE: float = -0.30
 REWARD_DEATH: float = -1.00
@@ -81,8 +90,10 @@ REWARD_EXPLORE_BASE: float = 0.25                  # multiplied by (1-hunger) in
 REWARD_INV_SECURITY_SCALE: float = 0.12
 INV_SECURITY_CAP: float = 5.0
 # Starvation proximity penalty
-PENALTY_STARVATION_APPROACH: float = -0.08
-STARVATION_THRESHOLD: float = 0.70
+# Penalise carrying zero food when food is nearby (decoupled from hunger level).
+# This incentivises *gathering* rather than eating-from-ground urgency.
+PENALTY_EMPTY_INV_FOOD_NEARBY: float = -0.08       # tightened from -0.06
+FOOD_NEARBY_THRESHOLD: float = 0.10   # food_density >= this triggers the penalty
 
 # Stash action rewards
 REWARD_DEPOSIT: float = 0.01                 # small reward for depositing (encourages planning)
@@ -95,6 +106,16 @@ FOOD_DENSITY_HIGH: float = 0.08
 REWARD_CAMP_REST: float = 0.05
 PENALTY_MOVE_IN_FOOD: float = -0.03
 PENALTY_MOVE_WHEN_HUNGRY: float = -0.05
+
+# Strength rewards (priority 2 — second only to staying alive)
+# δ-reward: incentivises *becoming* stronger (exposure to hazards + surviving)
+REWARD_RESISTANCE_GAIN_SCALE: float = 0.50
+# Continuous reward: incentivises *being* strong (immunity pays every step)
+# At full immunity (3 stats × 1.0) → 0.008 × 3.0 = 0.024/step > REWARD_ALIVE
+REWARD_STRENGTH_SCALE: float = 0.008
+
+# Hazard resource IDs whose tiles are tracked for approach/flee metrics
+HAZARD_RESOURCE_IDS: tuple[str, ...] = ("poison", "flame")
 
 
 class SurvivalEnv(gym.Env):
@@ -141,6 +162,10 @@ class SurvivalEnv(gym.Env):
         self._ep_food_eaten: int = 0
         self._ep_resistance_start: dict[str, float] = {}
         self._ep_max_ticks: int = 500  # updated from config on reset
+        # Hazard approach/flee counters and resistance gain (reset each episode)
+        self._ep_hazard_approaches: dict[str, int] = {h: 0 for h in HAZARD_RESOURCE_IDS}
+        self._ep_hazard_flees: dict[str, int] = {h: 0 for h in HAZARD_RESOURCE_IDS}
+        self._ep_resistance_gained: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -189,6 +214,9 @@ class SurvivalEnv(gym.Env):
         self._ep_food_eaten = 0
         self._ep_resistance_start = dict(self._agent.resistances)
         self._ep_max_ticks = int(self._config.get("world", {}).get("max_ticks", 500))
+        self._ep_hazard_approaches = {h: 0 for h in HAZARD_RESOURCE_IDS}
+        self._ep_hazard_flees = {h: 0 for h in HAZARD_RESOURCE_IDS}
+        self._ep_resistance_gained = {}
 
         obs = self._build_obs()
         return obs, {}
@@ -199,6 +227,7 @@ class SurvivalEnv(gym.Env):
         agent = self._agent
         hunger_prev = agent.hunger
         inv_food_prev = agent.inventory.food
+        resistances_prev = dict(agent.resistances)
         food_gathered = 0
         poison_damage = 0.0
         reward_deposit = 0.0
@@ -206,6 +235,12 @@ class SurvivalEnv(gym.Env):
         reward_steal = 0.0
 
         action_enum = Action(action)
+
+        # --- Snapshot hazard distances before move (for approach/flee tracking) ---
+        prev_pos = agent.position
+        pre_hazard_dists = {
+            h: self._nearest_hazard_dist(prev_pos, h) for h in HAZARD_RESOURCE_IDS
+        }
 
         # --- Execute action ---
         if action_enum in MOVE_DELTAS:
@@ -215,6 +250,16 @@ class SurvivalEnv(gym.Env):
             if effects:
                 traversal_damage = agent.apply_traversal_effects(effects)
                 poison_damage += traversal_damage
+
+            # Update approach/flee counters based on distance change to each hazard
+            for h in HAZARD_RESOURCE_IDS:
+                post_dist = self._nearest_hazard_dist(agent.position, h)
+                pre_dist = pre_hazard_dists[h]
+                if pre_dist < float("inf"):  # only track if hazard exists on map
+                    if post_dist < pre_dist:
+                        self._ep_hazard_approaches[h] += 1
+                    elif post_dist > pre_dist:
+                        self._ep_hazard_flees[h] += 1
 
         elif action_enum == Action.GATHER:
             x, y = agent.position
@@ -263,6 +308,21 @@ class SurvivalEnv(gym.Env):
         if agent.alive:
             self._ep_ticks_alive += self._action_ticks
 
+        # --- Resistance gain: potential-based strength reward ---
+        # δ-reward: φ(s) = sum(resistances); reward = Δφ * scale (policy-invariant)
+        resistance_delta = sum(agent.resistances.values()) - sum(resistances_prev.values())
+        reward_resistance = REWARD_RESISTANCE_GAIN_SCALE * resistance_delta
+        # Continuous strength bonus: reward for current immunity level (every step)
+        # Makes "being strong" second priority after staying alive.
+        reward_strength = REWARD_STRENGTH_SCALE * sum(agent.resistances.values())
+        # Track per-stat gains for episode metrics
+        for stat, prev_val in resistances_prev.items():
+            gain = agent.resistances.get(stat, prev_val) - prev_val
+            if gain > 0:
+                self._ep_resistance_gained[stat] = (
+                    self._ep_resistance_gained.get(stat, 0.0) + gain
+                )
+
         # --- Exploration bonus: survival-gated — less reward when hungry ---
         exploration_reward = 0.0
         if agent.alive and agent.position not in self._visited_tiles:
@@ -283,7 +343,7 @@ class SurvivalEnv(gym.Env):
             food_density,
             inv_food_prev,
         )
-        reward += reward_deposit + reward_withdraw + reward_steal
+        reward += reward_deposit + reward_withdraw + reward_steal + reward_resistance + reward_strength
 
         # Track food eaten for F-metric
         hunger_after = agent.hunger
@@ -295,10 +355,16 @@ class SurvivalEnv(gym.Env):
         info = {
             "hunger": agent.hunger,
             "health": agent.health,
-            "resistances": agent.resistances,
+            "resistances": dict(agent.resistances),
+            "hazard_approaches": dict(self._ep_hazard_approaches),
+            "hazard_flees": dict(self._ep_hazard_flees),
+            "resistance_gained": dict(self._ep_resistance_gained),
         }
         if terminated:
             info["f_metric"] = self._compute_f_metric()
+            info["ep_hazard_approaches"] = dict(self._ep_hazard_approaches)
+            info["ep_hazard_flees"] = dict(self._ep_hazard_flees)
+            info["ep_resistance_gained"] = dict(self._ep_resistance_gained)
         return obs, reward, terminated, False, info
 
     def render(self) -> None:
@@ -406,9 +472,11 @@ class SurvivalEnv(gym.Env):
         # Potential-based inventory security shaping
         inv_delta = (agent.inventory.food - inv_food_prev) / INV_SECURITY_CAP
         reward += REWARD_INV_SECURITY_SCALE * inv_delta
-        # Starvation proximity penalty
-        if agent.hunger > STARVATION_THRESHOLD:
-            reward += PENALTY_STARVATION_APPROACH * (agent.hunger - STARVATION_THRESHOLD)
+        # Penalise empty inventory when food is available nearby — encourages gathering
+        # rather than eat-from-ground urgency. Decouples starvation pressure from the
+        # inventory-building signal so they no longer fight each other.
+        if agent.inventory.food == 0 and food_density >= FOOD_NEARBY_THRESHOLD:
+            reward += PENALTY_EMPTY_INV_FOOD_NEARBY
         if action_enum is not None:
             hunger_low = agent.hunger < 0.3
             hunger_high = agent.hunger > 0.7
@@ -473,3 +541,18 @@ class SurvivalEnv(gym.Env):
         if area <= 0:
             return 0.0
         return float(grid.sum() / area)
+
+    def _nearest_hazard_dist(self, pos: tuple[int, int], hazard_id: str) -> float:
+        """Return Manhattan distance to the nearest tile of hazard_id.
+
+        Returns float('inf') if no such tile exists on the current map.
+        """
+        assert self._world is not None
+        try:
+            grid = self._world.get_grid_view(hazard_id)
+        except KeyError:
+            return float("inf")
+        ys, xs = np.nonzero(grid)
+        if len(xs) == 0:
+            return float("inf")
+        return float(np.min(np.abs(xs - pos[0]) + np.abs(ys - pos[1])))

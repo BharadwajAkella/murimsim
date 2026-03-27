@@ -783,14 +783,39 @@ Keep as-is; no unit changes needed.
 
 | Phase                    | Status        | Key Milestone                                   | Exit Gate                       |
 | ------------------------ | ------------- | ----------------------------------------------- | ------------------------------- |
-| Phase 1: World           | ⬜ Not started | Deterministic grid + resource registry + poison | All **9** tests pass + heatmaps                  |
-| Phase 1.5: Viewer        | ⬜ Not started | Browser replay viewer + tick logger             | Logger tests pass + viewer renders recorded ticks |
-| Phase 2: RL Survival     | ⬜ Not started | Forage + poison survival                        | Probes pass + `limbic_v1.ckpt`                    |
-| Phase 3: RL Combat       | ⬜ Not started | Fight/flight w/o forgetting forage              | Probes pass + `limbic_v2.ckpt`  |
+| Phase 1: World           | ✅ Done        | Deterministic grid + resource registry + poison | All **9** tests pass + heatmaps                  |
+| Phase 1.5: Viewer        | ✅ Done        | Browser replay viewer + tick logger             | Logger tests pass + viewer renders recorded ticks |
+| Phase 2: RL Survival     | ✅ Done        | Forage + poison survival                        | Probes pass + `limbic_v1.ckpt`                    |
+| Phase 3: RL Combat       | ✅ Done        | Fight/flight w/o forgetting forage              | Probes pass + `limbic_v2.ckpt` + `limbic_lstm_v2.ckpt` |
 | Phase 4: Individual      | ⬜ Not started | Personality modulation                          | Determinism + monotonic tests   |
 | Phase 5: Sects + Culture | ⬜ Not started | Inheritance + LLM pressures                     | Differentiation + drift probes  |
 | Phase 6: Integration     | ⬜ Not started | Emergence observed                              | 1+ non-programmed strategy      |
 
+**Current test suite:** 70 passed, 3 skipped (as of 2026-03-27)
+**Latest checkpoint:** `checkpoints/limbic_lstm_v2/limbic_lstm_v2_final.zip`
+
 ---
 
-If you want the cleanest “feed-to-AI” version, tell me whether you want **(a)** the whole document (above) or **(b)** just the Phase 1 prompt + acceptance tests (so you start building immediately).
+## Fast Lane — Active Tickets
+
+> Coding tasks only. Run `pytest` before and after each ticket. No ticket is done until tests are green.
+
+| ID | Task | Status | Depends On |
+| -- | ---- | ------ | ---------- |
+| `fix-gather-eat` | Fix gather/eat reward interaction (decouple starvation from inventory shaping) | 🔲 Pending | — |
+| `lstm-v3-training` | Train LSTM v3 with decoupled signal, target gather rate >20% | 🔲 Pending | fix-gather-eat |
+| `sect-scaffold` | Scaffold 3-sect system: SectConfig, SectRegistry, 3 isolated envs | 🔲 Pending | — |
+| `multiagent-credit` | Per-agent reward tracking baseline in multi_env.py | 🔲 Pending | sect-scaffold |
+| `viewer-replay` | Verify web viewer renders LSTM v2 replay correctly | 🔲 Pending | — |
+
+---
+
+## Slow Lane — Coaching Topics
+
+> Theory and curriculum questions. Take these to ChatGPT/Gemini — not this repo.
+
+- Multi-agent credit assignment theory (before implementing `multiagent-credit` ticket)
+- Stage 6/7 curriculum design (when `sect-scaffold` is done)
+- Reward shaping theory for the gather/eat fix
+
+---

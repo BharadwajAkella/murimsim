@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MurimSim Training Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --panel: #1a1d27;
+      --border: #2a2d3e;
+      --text: #e2e8f0;
+      --muted: #64748b;
+      --accent: #7c3aed;
+      --green: #22c55e;
+      --red: #ef4444;
+      --amber: #f59e0b;
+      --blue: #3b82f6;
+      --cyan: #06b6d4;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 14px;
+      padding: 20px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+    }
+    header h1 { font-size: 20px; font-weight: 700; letter-spacing: 0.05em; }
+    header h1 span { color: var(--accent); }
+    #status-bar {
+      display: flex; gap: 16px; align-items: center;
+      font-size: 12px; color: var(--muted);
+    }
+    #live-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--green);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .card .label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .card .value {
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1;
+    }
+    .card .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .progress-track {
+      background: var(--border);
+      border-radius: 4px;
+      height: 6px;
+      margin-top: 8px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 4px;
+      transition: width 0.6s ease;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .row-3 {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .section-title {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      margin-bottom: 10px;
+      margin-top: 4px;
+    }
+    .bar-chart { padding: 4px 0; }
+    .bar-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .bar-label { width: 80px; font-size: 12px; color: var(--muted); text-align: right; flex-shrink: 0; }
+    .bar-track { flex: 1; background: var(--border); border-radius: 3px; height: 16px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 3px; transition: width 0.6s ease; }
+    .bar-val { width: 50px; font-size: 12px; text-align: right; flex-shrink: 0; }
+    .hazard-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .hazard-box {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      text-align: center;
+    }
+    .hazard-box .name { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+    .hazard-box .ratio { font-size: 24px; font-weight: 700; margin: 6px 0 2px; }
+    .hazard-box .detail { font-size: 11px; color: var(--muted); }
+    .pursuit { color: var(--amber); }
+    .avoidance { color: var(--blue); }
+    .sparkline-container { position: relative; height: 100px; }
+    canvas { width: 100%; height: 100%; }
+    #no-data {
+      display: none;
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--muted);
+      font-size: 16px;
+    }
+    #no-data code {
+      display: block;
+      margin-top: 8px;
+      font-size: 12px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      color: var(--accent);
+    }
+    /* ── Stage comparison ─────────────────────────────────────────────── */
+    #stage-comparison { margin-top: 32px; padding: 0 32px 40px; }
+    #stage-comparison h2 {
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      margin-bottom: 14px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+    }
+    .stage-table-wrap { overflow-x: auto; margin-bottom: 20px; }
+    .stage-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .stage-table th {
+      text-align: left;
+      padding: 6px 12px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    .stage-table td {
+      padding: 8px 12px;
+      border-bottom: 1px solid rgba(42,45,62,0.5);
+      vertical-align: middle;
+    }
+    .stage-table tr:last-child td { border-bottom: none; }
+    .stage-table tr:hover td { background: rgba(124,58,237,0.05); }
+    .stage-tag {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      background: var(--border);
+      color: var(--text);
+    }
+    .stage-tag.latest { background: #7c3aed33; color: var(--accent); border: 1px solid var(--accent); }
+    .stage-tag.best_mlp { background: #22c55e22; color: var(--green); border: 1px solid var(--green); }
+    .stage-tag.best_gather { background: #3b82f622; color: var(--blue); border: 1px solid var(--blue); }
+    .stage-tag.best_combat { background: #ef444422; color: var(--red); border: 1px solid var(--red); }
+    .delta-good { color: var(--green); font-size: 11px; }
+    .delta-bad  { color: var(--red);   font-size: 11px; }
+    .delta-neut { color: var(--muted); font-size: 11px; }
+    /* Expander cards */
+    .stage-cards { display: flex; flex-direction: column; gap: 8px; }
+    .stage-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .stage-card-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .stage-card-header:hover { background: rgba(124,58,237,0.06); }
+    .stage-card-chevron {
+      font-size: 10px;
+      color: var(--muted);
+      transition: transform 0.2s;
+      flex-shrink: 0;
+    }
+    .stage-card.open .stage-card-chevron { transform: rotate(90deg); }
+    .stage-card-title { font-weight: 600; font-size: 13px; }
+    .stage-card-phase { font-size: 11px; color: var(--muted); }
+    .stage-card-body {
+      display: none;
+      padding: 0 14px 14px;
+      border-top: 1px solid var(--border);
+    }
+    .stage-card.open .stage-card-body { display: block; }
+    .stage-desc { font-size: 13px; color: var(--text); line-height: 1.6; margin: 10px 0 8px; }
+    .stage-changes { padding-left: 16px; margin: 0; }
+    .stage-changes li { font-size: 12px; color: var(--muted); line-height: 1.8; }
+    .stage-changes li b { color: var(--text); }
+    .mini-metrics {
+      display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px;
+    }
+    .mini-kpi {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      min-width: 80px;
+      text-align: center;
+    }
+    .mini-kpi .mk-val { font-size: 16px; font-weight: 700; color: var(--accent); }
+    .mini-kpi .mk-label { font-size: 10px; color: var(--muted); text-transform: uppercase; margin-top: 2px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Murim<span>Sim</span> Training Dashboard</h1>
+    <div id="status-bar">
+      <div id="live-dot"></div>
+      <span id="run-label">—</span>
+      <span id="generated-at">—</span>
+      <span id="elapsed">—</span>
+    </div>
+  </header>
+
+  <div id="no-data">
+    No training data yet. Start a training run to see metrics here.
+    <code>python3 murimsim/rl/train_lstm_v2.py</code>
+  </div>
+
+  <div id="main-content">
+    <!-- Top KPIs -->
+    <div class="grid" id="kpi-grid"></div>
+
+    <!-- Progress bar -->
+    <div class="card" style="margin-bottom:20px">
+      <div class="label">Training Progress</div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+        <span id="step-label">—</span>
+        <span id="pct-label" style="color:var(--accent)">—</span>
+      </div>
+      <div class="progress-track"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
+    </div>
+
+    <!-- Action rates + hazard behaviour -->
+    <div class="row">
+      <div class="card">
+        <div class="section-title">Action Rates (rolling avg)</div>
+        <div class="bar-chart" id="action-bars"></div>
+      </div>
+      <div class="card">
+        <div class="section-title">Hazard Behaviour (approach ratio)</div>
+        <div class="hazard-grid" id="hazard-grid"></div>
+      </div>
+    </div>
+
+    <!-- Resistance gained + sparklines -->
+    <div class="row">
+      <div class="card">
+        <div class="section-title">Resistance Gained per Episode</div>
+        <div class="bar-chart" id="resistance-bars"></div>
+      </div>
+      <div class="card">
+        <div class="section-title">F-Metric History</div>
+        <div class="sparkline-container">
+          <canvas id="sparkline-f"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Per-agent credit assignment -->
+    <div class="row">
+      <div class="card" style="grid-column: span 2">
+        <div class="section-title">Per-Agent Credit (avg mean reward / step)</div>
+        <div class="bar-chart" id="credit-bars"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Stage Comparison ───────────────────────────────────────────────── -->
+  <section id="stage-comparison">
+    <h2>Stage Comparison — All Runs</h2>
+
+    <!-- Summary table -->
+    <div class="stage-table-wrap">
+      <table class="stage-table" id="stage-table">
+        <thead>
+          <tr>
+            <th>Stage</th>
+            <th>Phase</th>
+            <th>Steps</th>
+            <th>Avg Lifespan</th>
+            <th>Gather %</th>
+            <th>Eat %</th>
+            <th>Defend %</th>
+            <th>N-Bias %</th>
+            <th>Tag</th>
+          </tr>
+        </thead>
+        <tbody id="stage-table-body"></tbody>
+      </table>
+    </div>
+
+    <!-- Expandable stage cards -->
+    <div class="stage-cards" id="stage-cards"></div>
+  </section>
+
+  <!-- Stage history data (static, loaded via script tag for file:// compat) -->
+  <script src="../logs/stage_history.js"></script>
+
+  <script>
+    // Load data via <script> injection — works with file:// (no CORS/fetch restrictions).
+    // The JS file sets window.DASHBOARD_DATA.
+    const DATA_SCRIPT_SRC = "../logs/dashboard_data.js";
+    const REFRESH_MS = 10_000;
+
+    // --- colour palette for action bars ---
+    const ACTION_COLORS = {
+      gather: "#22c55e",
+      eat:    "#f59e0b",
+      rest:   "#64748b",
+      attack: "#ef4444",
+      defend: "#3b82f6",
+      move_n: "#a78bfa", move_s: "#a78bfa", move_e: "#a78bfa", move_w: "#a78bfa",
+      deposit:"#06b6d4", withdraw:"#06b6d4", steal:"#f97316",
+    };
+    const defaultColor = "#7c3aed";
+
+    function pct(v) {
+      if (v == null) return "—";
+      return (v * 100).toFixed(1) + "%";
+    }
+    function fmt(v, dp = 1) {
+      if (v == null) return "—";
+      return v.toFixed(dp);
+    }
+
+    function renderKPIs(d) {
+      const grid = document.getElementById("kpi-grid");
+      grid.innerHTML = "";
+      const kpis = [
+        { label: "Avg Lifespan", value: fmt(d.avg_lifespan, 0) + " steps", sub: "rolling " + d.rolling_window + " eps", color: "var(--green)" },
+        { label: "Avg F-Metric", value: fmt(d.avg_f_metric, 3), sub: "0 = dead, 1 = perfect", color: "var(--accent)" },
+        { label: "Episodes Seen", value: d.n_episodes_sampled?.toLocaleString() ?? "—", sub: "terminal episodes", color: "var(--cyan)" },
+        { label: "Gather Rate", value: pct(d.avg_action_rates?.gather), sub: "of focal actions", color: "var(--green)" },
+        { label: "Eat Rate", value: pct(d.avg_action_rates?.eat), sub: "of focal actions", color: "var(--amber)" },
+        { label: "Defend Rate", value: pct(d.avg_action_rates?.defend), sub: "of focal actions", color: "var(--blue)" },
+      ];
+      for (const k of kpis) {
+        grid.insertAdjacentHTML("beforeend", `
+          <div class="card">
+            <div class="label">${k.label}</div>
+            <div class="value" style="color:${k.color}">${k.value}</div>
+            <div class="sub">${k.sub}</div>
+          </div>`);
+      }
+    }
+
+    function renderProgress(d) {
+      document.getElementById("step-label").textContent =
+        (d.timestep?.toLocaleString() ?? "—") + " / " + (d.total_timesteps?.toLocaleString() ?? "—") + " steps";
+      document.getElementById("pct-label").textContent = (d.progress_pct ?? 0) + "%";
+      document.getElementById("progress-fill").style.width = (d.progress_pct ?? 0) + "%";
+    }
+
+    function renderBars(containerId, data, colorMap) {
+      const container = document.getElementById(containerId);
+      container.innerHTML = "";
+      if (!data || Object.keys(data).length === 0) {
+        container.innerHTML = '<span style="color:var(--muted);font-size:12px">No data yet</span>';
+        return;
+      }
+      const entries = Object.entries(data).sort((a, b) => b[1] - a[1]);
+      const max = entries[0]?.[1] || 1;
+      for (const [k, v] of entries) {
+        const color = colorMap?.[k] ?? defaultColor;
+        const widthPct = (v / max * 100).toFixed(1);
+        const display = typeof v === "number" && v < 1 ? pct(v) : fmt(v, 4);
+        container.insertAdjacentHTML("beforeend", `
+          <div class="bar-row">
+            <div class="bar-label">${k}</div>
+            <div class="bar-track">
+              <div class="bar-fill" style="width:${widthPct}%;background:${color}"></div>
+            </div>
+            <div class="bar-val">${display}</div>
+          </div>`);
+      }
+    }
+
+    function renderHazardGrid(d) {
+      const grid = document.getElementById("hazard-grid");
+      grid.innerHTML = "";
+      const ratio = d.hazard_approach_ratio ?? {};
+      const approaches = d.avg_hazard_approaches ?? {};
+      const flees = d.avg_hazard_flees ?? {};
+      const hazards = new Set([...Object.keys(ratio), ...Object.keys(approaches)]);
+      if (hazards.size === 0) {
+        grid.innerHTML = '<span style="color:var(--muted);font-size:12px">No hazard data yet</span>';
+        return;
+      }
+      for (const h of hazards) {
+        const r = ratio[h] ?? 0;
+        const isPursuit = r >= 0.5;
+        const cls = isPursuit ? "pursuit" : "avoidance";
+        const label = isPursuit ? "pursuit" : "avoidance";
+        const a = (approaches[h] ?? 0).toFixed(1);
+        const f = (flees[h] ?? 0).toFixed(1);
+        grid.insertAdjacentHTML("beforeend", `
+          <div class="hazard-box">
+            <div class="name">${h}</div>
+            <div class="ratio ${cls}">${(r * 100).toFixed(0)}%</div>
+            <div class="detail">${label}</div>
+            <div class="detail" style="margin-top:4px">→ ${a} avg / ← ${f} avg</div>
+          </div>`);
+      }
+    }
+
+    function renderSparkline(canvasId, history, key) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas || !history?.length) return;
+      const vals = history.map(h => h[key]).filter(v => v != null);
+      if (!vals.length) return;
+      const ctx = canvas.getContext("2d");
+      const W = canvas.offsetWidth || 400;
+      const H = canvas.offsetHeight || 100;
+      canvas.width = W;
+      canvas.height = H;
+      ctx.clearRect(0, 0, W, H);
+      const min = Math.min(...vals);
+      const max = Math.max(...vals) || 1;
+      const pad = 8;
+      ctx.strokeStyle = "#7c3aed";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      vals.forEach((v, i) => {
+        const x = pad + (i / (vals.length - 1 || 1)) * (W - pad * 2);
+        const y = H - pad - ((v - min) / (max - min || 1)) * (H - pad * 2);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      // Gradient fill
+      const grad = ctx.createLinearGradient(0, 0, 0, H);
+      grad.addColorStop(0, "rgba(124,58,237,0.3)");
+      grad.addColorStop(1, "rgba(124,58,237,0)");
+      ctx.lineTo(W - pad, H - pad);
+      ctx.lineTo(pad, H - pad);
+      ctx.fillStyle = grad;
+      ctx.fill();
+    }
+
+    function loadData() {
+      return new Promise((resolve, reject) => {
+        // Remove any previously injected data script
+        const old = document.getElementById("_data-script");
+        if (old) old.remove();
+        window.DASHBOARD_DATA = undefined;
+
+        const s = document.createElement("script");
+        s.id = "_data-script";
+        s.src = DATA_SCRIPT_SRC + "?t=" + Date.now();
+        s.onload = () => {
+          if (window.DASHBOARD_DATA) resolve(window.DASHBOARD_DATA);
+          else reject(new Error("DASHBOARD_DATA not set"));
+        };
+        s.onerror = () => reject(new Error("script load failed"));
+        document.head.appendChild(s);
+      });
+    }
+
+    function renderCreditBars(d) {
+      const container = document.getElementById("credit-bars");
+      container.innerHTML = "";
+      const credits = d.avg_agent_credit;
+      if (!credits || credits.length === 0) {
+        container.innerHTML = '<span style="color:var(--muted);font-size:12px">No credit data yet (requires new training run)</span>';
+        return;
+      }
+      const max = Math.max(...credits.map(Math.abs)) || 1;
+      const SECT_COLORS = ["#ef4444", "#22c55e", "#a78bfa", "#ef4444", "#22c55e", "#a78bfa",
+                           "#ef4444", "#22c55e", "#a78bfa", "#ef4444"];
+      credits.forEach((v, i) => {
+        const color = SECT_COLORS[i % SECT_COLORS.length];
+        const widthPct = (Math.abs(v) / max * 100).toFixed(1);
+        const display = v.toFixed(4);
+        container.insertAdjacentHTML("beforeend", `
+          <div class="bar-row">
+            <div class="bar-label">agent_${i}</div>
+            <div class="bar-track">
+              <div class="bar-fill" style="width:${widthPct}%;background:${color}"></div>
+            </div>
+            <div class="bar-val">${display}</div>
+          </div>`);
+      });
+    }
+
+    // ── Stage comparison ──────────────────────────────────────────────────────
+
+    function fmtPct(v) { return v == null ? "—" : v.toFixed(1) + "%"; }
+    function fmtSteps(v) { return v == null ? "—" : (v >= 1e6 ? (v/1e6).toFixed(1)+"M" : (v/1e3).toFixed(0)+"k"); }
+    const TICKS_PER_STEP = 5.5;
+    function toSteps(stage) {
+      if (stage.avg_lifespan == null) return null;
+      return stage.metric_unit === "ticks"
+        ? stage.avg_lifespan / TICKS_PER_STEP
+        : stage.avg_lifespan;
+    }
+    function fmtLife(stage) {
+      if (stage.avg_lifespan == null) return "—";
+      if (stage.metric_unit === "ticks") {
+        const approx = (stage.avg_lifespan / TICKS_PER_STEP).toFixed(0);
+        return `${stage.avg_lifespan.toFixed(0)} ticks <span style="font-size:11px;color:var(--muted)">(~${approx} steps)</span>`;
+      }
+      return `${stage.avg_lifespan.toFixed(0)} steps`;
+    }
+    function delta(cur, prev, goodDir = 1) {
+      if (cur == null || prev == null) return "";
+      const d = cur - prev;
+      const pct = prev !== 0 ? (d / Math.abs(prev) * 100) : 0;
+      const good = d * goodDir > 0;
+      const cls = Math.abs(pct) < 1 ? "delta-neut" : good ? "delta-good" : "delta-bad";
+      const sign = d > 0 ? "+" : "";
+      return `<span class="${cls}">${sign}${pct.toFixed(0)}%</span>`;
+    }
+
+    function renderStageComparison() {
+      const stages = window.STAGE_HISTORY;
+      if (!stages || stages.length === 0) return;
+
+      // Table
+      const tbody = document.getElementById("stage-table-body");
+      tbody.innerHTML = "";
+      stages.forEach((s, i) => {
+        const prev = i > 0 ? stages[i - 1] : null;
+        const tagCls = s.highlight ? ` ${s.highlight}` : "";
+        const tagLabel = { latest: "latest", best_mlp: "best MLP", best_gather: "best gather", best_combat: "best combat" }[s.highlight] || "";
+        tbody.insertAdjacentHTML("beforeend", `
+          <tr>
+            <td><strong>${s.label}</strong></td>
+            <td style="color:var(--muted);font-size:12px">${s.phase}</td>
+            <td>${fmtSteps(s.steps_trained)}</td>
+            <td>${fmtLife(s)} ${prev ? delta(toSteps(s), toSteps(prev), 1) : ""}</td>
+            <td>${fmtPct(s.gather_rate_pct)} ${prev ? delta(s.gather_rate_pct, prev.gather_rate_pct, 1) : ""}</td>
+            <td>${fmtPct(s.eat_rate_pct)} ${prev ? delta(s.eat_rate_pct, prev.eat_rate_pct, -1) : ""}</td>
+            <td>${fmtPct(s.defend_rate_pct)} ${prev ? delta(s.defend_rate_pct, prev.defend_rate_pct, 1) : ""}</td>
+            <td>${fmtPct(s.north_bias_pct)} ${prev ? delta(s.north_bias_pct, prev.north_bias_pct, -1) : ""}</td>
+            <td>${tagLabel ? `<span class="stage-tag${tagCls}">${tagLabel}</span>` : ""}</td>
+          </tr>`);
+      });
+
+      // Expandable cards
+      const cardsEl = document.getElementById("stage-cards");
+      cardsEl.innerHTML = "";
+      stages.forEach((s) => {
+        const tagCls = s.highlight ? ` ${s.highlight}` : "";
+        const tagHtml = s.highlight
+          ? `<span class="stage-tag${tagCls}" style="margin-left:auto">${({latest:"latest",best_mlp:"best MLP",best_gather:"best gather",best_combat:"best combat"})[s.highlight]||""}</span>`
+          : "";
+        const changesHtml = (s.changes || []).map(c => `<li>${c.replace(/✅|⚠️/g, m => `<b>${m}</b>`)}</li>`).join("");
+        const stepsVal = toSteps(s);
+        const miniMetrics = [
+          { label: "Lifespan", val: stepsVal != null ? `~${stepsVal.toFixed(0)} stp` : "—" },
+          { label: "Gather", val: fmtPct(s.gather_rate_pct) },
+          { label: "Eat", val: fmtPct(s.eat_rate_pct) },
+          { label: "Defend", val: fmtPct(s.defend_rate_pct) },
+          s.north_bias_pct != null ? { label: "N-Bias", val: fmtPct(s.north_bias_pct) } : null,
+        ].filter(Boolean);
+        const miniHtml = miniMetrics.map(m =>
+          `<div class="mini-kpi"><div class="mk-val">${m.val}</div><div class="mk-label">${m.label}</div></div>`
+        ).join("");
+        const id = `stage-card-${s.id}`;
+        cardsEl.insertAdjacentHTML("beforeend", `
+          <div class="stage-card" id="${id}">
+            <div class="stage-card-header" onclick="toggleCard('${id}')">
+              <span class="stage-card-chevron">▶</span>
+              <span class="stage-card-title">${s.label}</span>
+              <span class="stage-card-phase">${s.phase} · ${fmtSteps(s.steps_trained)} steps</span>
+              ${tagHtml}
+            </div>
+            <div class="stage-card-body">
+              <p class="stage-desc">${s.description}</p>
+              <div class="mini-metrics">${miniHtml}</div>
+              ${changesHtml ? `<ul class="stage-changes" style="margin-top:10px">${changesHtml}</ul>` : ""}
+            </div>
+          </div>`);
+      });
+
+      // Auto-open latest
+      const latest = stages.find(s => s.highlight === "latest");
+      if (latest) {
+        document.getElementById(`stage-card-${latest.id}`)?.classList.add("open");
+      }
+    }
+
+    function toggleCard(id) {
+      document.getElementById(id)?.classList.toggle("open");
+    }
+
+    async function load() {
+      try {
+        const d = await loadData();
+
+        document.getElementById("no-data").style.display = "none";
+        document.getElementById("main-content").style.display = "block";
+
+        document.getElementById("run-label").textContent = d.run_name ?? "—";
+        document.getElementById("generated-at").textContent = d.generated_at ?? "—";
+        const mins = Math.floor((d.elapsed_seconds ?? 0) / 60);
+        document.getElementById("elapsed").textContent = mins + "m elapsed";
+
+        renderKPIs(d);
+        renderProgress(d);
+        renderBars("action-bars", d.avg_action_rates, ACTION_COLORS);
+        renderHazardGrid(d);
+        renderBars("resistance-bars", d.avg_resistance_gained, { poison: "#ef4444", flame: "#f97316", qi_drain: "#3b82f6" });
+        renderSparkline("sparkline-f", d.history, "f_metric");
+        renderCreditBars(d);
+      } catch (e) {
+        document.getElementById("no-data").style.display = "block";
+        document.getElementById("main-content").style.display = "none";
+      }
+    }
+
+    document.getElementById("main-content").style.display = "none";
+    load();
+    setInterval(load, REFRESH_MS);
+    // Stage comparison is static data — render once at startup
+    renderStageComparison();
+  </script>
+</body>
+</html>

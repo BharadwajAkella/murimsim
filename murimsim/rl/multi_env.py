@@ -58,6 +58,9 @@ REWARD_EMA_SCALE: float = 0.5      # EMA normalised: 0 = −scale, 1 = +scale
 HEURISTIC_HUNGER_EAT: float = 0.5   # eat when hunger exceeds this
 HEURISTIC_SCAN_RADIUS: int = 3      # Manhattan radius for food scan
 
+# ── Hazard tracking ───────────────────────────────────────────────────────────
+HAZARD_RESOURCE_IDS: tuple[str, ...] = ("poison", "flame")
+
 # ── Reward shaping (Stage 5: potential-based) ────────────────────────────────
 REWARD_ALIVE: float = 0.02
 REWARD_HUNGER_RELIEF_SCALE: float = 0.20
@@ -180,6 +183,18 @@ class MultiAgentEnv(gym.Env):
         self._reward_ema = [0.0] * self._n_agents
         self._combat_experience = [0.0] * self._n_agents
 
+        # Per-agent cumulative reward (individual credit assignment baseline)
+        # Index = agent slot; reset each episode.
+        self._ep_agent_rewards: list[float] = [0.0] * self._n_agents
+        self._ep_agent_steps: list[int] = [0] * self._n_agents
+
+        # Episode-level action counts for dashboard metrics (focal agent only)
+        self._ep_action_counts: dict[str, int] = {}
+        self._ep_steps: int = 0
+        # Hazard approach/flee counters (reset each episode)
+        self._ep_hazard_approaches: dict[str, int] = {h: 0 for h in HAZARD_RESOURCE_IDS}
+        self._ep_hazard_flees: dict[str, int] = {h: 0 for h in HAZARD_RESOURCE_IDS}
+
         self._stash_registry.reset()
 
         return self._build_obs(self._focal_idx), {}
@@ -195,7 +210,28 @@ class MultiAgentEnv(gym.Env):
 
         # 1. Apply action to focal agent
         action_enum = Action(action)
+
+        # Snapshot hazard distances before the move for approach/flee tracking
+        prev_pos = focal.position
+        pre_hazard_dists = {h: self._nearest_hazard_dist(prev_pos, h) for h in HAZARD_RESOURCE_IDS}
+
         food_gathered, poison_damage = self._apply_action(focal, action_enum)
+
+        # Update approach/flee counters for MOVE actions
+        if action_enum in MOVE_DELTAS:
+            for h in HAZARD_RESOURCE_IDS:
+                post_dist = self._nearest_hazard_dist(focal.position, h)
+                pre_dist = pre_hazard_dists[h]
+                if pre_dist < float("inf"):
+                    if post_dist < pre_dist:
+                        self._ep_hazard_approaches[h] += 1
+                    elif post_dist > pre_dist:
+                        self._ep_hazard_flees[h] += 1
+
+        # Track action counts for dashboard
+        key = action_enum.name.lower()
+        self._ep_action_counts[key] = self._ep_action_counts.get(key, 0) + 1
+        self._ep_steps += 1
 
         # 2. Heuristic step for all non-focal alive agents
         for i, agent in enumerate(self._agents):
@@ -231,6 +267,10 @@ class MultiAgentEnv(gym.Env):
         ema = self._reward_ema[self._focal_idx]
         self._reward_ema[self._focal_idx] = (1.0 - REWARD_EMA_ALPHA) * ema + REWARD_EMA_ALPHA * reward
 
+        # Accumulate per-agent individual reward (credit assignment baseline)
+        self._ep_agent_rewards[self._focal_idx] += reward
+        self._ep_agent_steps[self._focal_idx] += 1
+
         terminated = not focal.alive
 
         # 6. Advance focal index to next live agent (skip dead agents)
@@ -238,11 +278,29 @@ class MultiAgentEnv(gym.Env):
             self._focal_idx = self._next_live(self._focal_idx)
 
         obs = self._build_obs(self._focal_idx)
+        action_rates = {
+            k: v / max(1, self._ep_steps)
+            for k, v in self._ep_action_counts.items()
+        }
         info = {
             "hunger": focal.hunger,
             "health": focal.health,
             "alive_count": sum(1 for a in self._agents if a.alive),
+            "ep_steps": self._ep_steps,
+            "ep_action_counts": dict(self._ep_action_counts),
+            "ep_action_rates": action_rates,
+            "ep_hazard_approaches": dict(self._ep_hazard_approaches),
+            "ep_hazard_flees": dict(self._ep_hazard_flees),
         }
+        if terminated:
+            info["ep_lifespan"] = self._ep_steps
+            # Per-agent credit assignment data: cumulative and mean reward per slot
+            info["ep_agent_rewards"] = list(self._ep_agent_rewards)
+            info["ep_agent_steps"] = list(self._ep_agent_steps)
+            info["ep_agent_mean_reward"] = [
+                r / max(1, s)
+                for r, s in zip(self._ep_agent_rewards, self._ep_agent_steps)
+            ]
         return obs, reward, terminated, False, info
 
     def render(self) -> None:
@@ -469,6 +527,21 @@ class MultiAgentEnv(gym.Env):
                 return idx
         return current_idx  # all dead — episode should have terminated
 
+    def _nearest_hazard_dist(self, pos: tuple[int, int], hazard_id: str) -> float:
+        """Return Manhattan distance to the nearest tile of hazard_id.
+
+        Returns float('inf') if no such tile exists on the current map.
+        """
+        assert self._world is not None
+        try:
+            grid = self._world.get_grid_view(hazard_id)
+        except (KeyError, Exception):
+            return float("inf")
+        ys, xs = np.nonzero(grid)
+        if len(xs) == 0:
+            return float("inf")
+        return float(np.min(np.abs(xs - pos[0]) + np.abs(ys - pos[1])))
+
 
 # ── Combat constants ──────────────────────────────────────────────────────────
 COMBAT_ATTACKER_SCALE: float = 0.3
@@ -549,6 +622,10 @@ class CombatEnv(MultiAgentEnv):
         defeat_bonus = 0.0
         focal_defending = (action_enum == Action.DEFEND)
 
+        # Snapshot hazard distances before the action for approach/flee tracking
+        prev_pos = focal.position
+        pre_hazard_dists = {h: self._nearest_hazard_dist(prev_pos, h) for h in HAZARD_RESOURCE_IDS}
+
         # 1. Apply focal agent's action
         if action_enum == Action.ATTACK:
             damage_dealt, defeated = self._do_attack(focal)
@@ -557,6 +634,21 @@ class CombatEnv(MultiAgentEnv):
             focal.rest()  # defending = hold ground + minor health recovery
         else:
             food_gathered, poison_damage = self._apply_action(focal, action_enum)
+
+        # Track action counts and hazard approach/flee for dashboard
+        key = action_enum.name.lower()
+        self._ep_action_counts[key] = self._ep_action_counts.get(key, 0) + 1
+        self._ep_steps += 1
+
+        if action_enum in MOVE_DELTAS:
+            for h in HAZARD_RESOURCE_IDS:
+                post_dist = self._nearest_hazard_dist(focal.position, h)
+                pre_dist = pre_hazard_dists[h]
+                if pre_dist < float("inf"):
+                    if post_dist < pre_dist:
+                        self._ep_hazard_approaches[h] += 1
+                    elif post_dist > pre_dist:
+                        self._ep_hazard_flees[h] += 1
 
         # 2. Heuristic for non-focal agents (combat-aware in Phase 3c)
         damage_taken = 0.0
@@ -602,18 +694,39 @@ class CombatEnv(MultiAgentEnv):
         ema = self._reward_ema[self._focal_idx]
         self._reward_ema[self._focal_idx] = (1.0 - REWARD_EMA_ALPHA) * ema + REWARD_EMA_ALPHA * reward
 
+        # Accumulate per-agent individual reward (credit assignment baseline)
+        self._ep_agent_rewards[self._focal_idx] += reward
+        self._ep_agent_steps[self._focal_idx] += 1
+
         terminated = not focal.alive
 
         if not terminated:
             self._focal_idx = self._next_live(self._focal_idx)
 
         obs = self._build_obs(self._focal_idx)
+        action_rates = {
+            k: v / max(1, self._ep_steps)
+            for k, v in self._ep_action_counts.items()
+        }
         info = {
             "hunger": focal.hunger,
             "health": focal.health,
             "alive_count": sum(1 for a in self._agents if a.alive),
             "combat_prob": self.combat_prob,
+            "ep_steps": self._ep_steps,
+            "ep_action_counts": dict(self._ep_action_counts),
+            "ep_action_rates": action_rates,
+            "ep_hazard_approaches": dict(self._ep_hazard_approaches),
+            "ep_hazard_flees": dict(self._ep_hazard_flees),
         }
+        if terminated:
+            info["ep_lifespan"] = self._ep_steps
+            info["ep_agent_rewards"] = list(self._ep_agent_rewards)
+            info["ep_agent_steps"] = list(self._ep_agent_steps)
+            info["ep_agent_mean_reward"] = [
+                r / max(1, s)
+                for r, s in zip(self._ep_agent_rewards, self._ep_agent_steps)
+            ]
         return obs, reward, terminated, False, info
 
     # ── Combat helpers ────────────────────────────────────────────────────────

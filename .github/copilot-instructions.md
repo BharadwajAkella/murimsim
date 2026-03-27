@@ -66,3 +66,34 @@ viewer/            # web replay viewer (Phase 1.5)
 | RL (Ph 2+)  | CleanRL / SB3, PettingZoo   |
 | LLM (Ph 5+) | litellm                     |
 | Logging     | wandb (disabled in tests)   |
+
+## Two-Lane Development Approach
+
+### Fast Lane (this repo — default mode)
+**Every session is a coding or training session.** Default behavior is to ship.
+
+- **`build:` / `train:`** — implement feature or run training script, commit when green
+- **`fix:`** — debug, patch, test
+- **`plan:`** — update plan.md only, no code
+- **`coach:`** — brief explanation only; redirect deep theory to ChatGPT
+
+When a task is given without a prefix, treat it as `build:`.
+
+### Slow Lane (NOT this repo)
+Theory, coaching, curriculum design → ChatGPT Plus or Gemini Pro.
+Do not spend repo session tokens on RL concept explanations.
+
+### Current Fast-Lane Ticket Queue (in priority order)
+1. `fix-gather-eat` — decouple starvation penalty from inventory shaping in `murimsim/rl/env.py`
+2. `lstm-v3-training` — retrain LSTM after reward fix (depends on #1)
+3. `sect-scaffold` — SectConfig + SectRegistry + 3 isolated envs
+4. `multiagent-credit` — per-agent reward tracking in multi_env.py (depends on #3)
+5. `viewer-replay` — verify web viewer renders LSTM v2 replay
+
+**Always run `python3 -m pytest tests/ -q` before starting and after finishing a ticket.**
+
+### Current Project State (as of 2026-03-27)
+- Phases 1–3 complete: world, viewer, RL survival + combat trained
+- Latest checkpoint: `checkpoints/limbic_lstm_v2/limbic_lstm_v2_final.zip`
+- 70 tests passing, 3 skipped
+- Open bug: gather rate dropped (12%) due to reward interaction — fix is ticket #1

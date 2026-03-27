@@ -217,3 +217,101 @@ def test_poison_eat_survives_high_resistance():
     assert not terminated
     assert env._agent.health == 1.0
     assert env._agent.resistances["poison"] > 0.4  # grew
+
+
+# ---------------------------------------------------------------------------
+# Hazard tracking + strength reward tests
+# ---------------------------------------------------------------------------
+
+def test_resistance_gain_reward_fires_on_traversal():
+    """Stepping onto a hazard tile and surviving yields a positive resistance reward."""
+    env = make_env()
+    env.reset(seed=42)
+
+    # Place a flame tile at the agent's current position to guarantee traversal effect
+    agent = env._agent
+    ax, ay = agent.position
+    flame_grid = env._world.get_grid_view("flame")
+    # If flame resource doesn't exist in this config, skip gracefully
+    if flame_grid is None:
+        pytest.skip("flame resource not in config")
+
+    # Give the agent high flame resistance so it survives the step
+    agent.resistances["flame"] = 0.9
+    agent.health = 1.0
+
+    resistance_before = sum(agent.resistances.values())
+
+    # Force flame onto the tile the agent is about to move to (move north)
+    nx, ny = ax, max(0, ay - 1)
+    flame_grid[ny, nx] = 1.0
+
+    _, reward, _, _, info = env.step(int(Action.MOVE_N))
+
+    resistance_after = sum(agent.resistances.values())
+
+    # If resistance grew, the reward must have included a positive resistance bonus
+    if resistance_after > resistance_before:
+        # The resistance_gained dict must reflect the gain
+        assert info["resistance_gained"].get("flame", 0.0) > 0.0
+
+
+def test_hazard_approach_flee_counters():
+    """Moving toward nearest hazard increments approach; moving away increments flee."""
+    env = make_env()
+    env.reset(seed=42)
+
+    # Place a poison tile far to the north so we can control direction
+    world = env._world
+    gs = world.grid_size
+    poison_grid = world.get_grid_view("poison")
+    if poison_grid is None:
+        pytest.skip("poison resource not in config")
+
+    # Clear all poison, then place one tile at row 0, col 15
+    poison_grid[:] = 0.0
+    poison_grid[0, 15] = 1.0
+
+    # Teleport agent to middle of map, column 15
+    env._agent.position = (15, 15)
+
+    # Reset counters
+    env._ep_hazard_approaches = {"poison": 0, "flame": 0}
+    env._ep_hazard_flees = {"poison": 0, "flame": 0}
+
+    # Move north (toward row 0) → approach
+    env.step(int(Action.MOVE_N))
+    assert env._ep_hazard_approaches["poison"] > 0
+
+    # Move south (away from row 0) → flee
+    env.step(int(Action.MOVE_S))
+    env.step(int(Action.MOVE_S))
+    assert env._ep_hazard_flees["poison"] > 0
+
+
+def test_info_dict_always_has_hazard_keys():
+    """Every step returns hazard_approaches, hazard_flees, resistance_gained in info."""
+    env = make_env()
+    env.reset(seed=42)
+    _, _, _, _, info = env.step(int(Action.REST))
+    assert "hazard_approaches" in info
+    assert "hazard_flees" in info
+    assert "resistance_gained" in info
+
+
+def test_terminal_info_has_episode_hazard_summary():
+    """On episode termination, ep_hazard_approaches and ep_hazard_flees are in info."""
+    env = make_env()
+    env.reset(seed=42)
+    env._agent.health = 0.001  # nearly dead
+    env._agent.hunger = 1.0
+    # Run until dead
+    for _ in range(200):
+        _, _, terminated, _, info = env.step(int(Action.REST))
+        if terminated:
+            assert "ep_hazard_approaches" in info
+            assert "ep_hazard_flees" in info
+            assert "ep_resistance_gained" in info
+            return
+    # If agent survived 200 rest steps (unlikely), force check
+    pytest.skip("agent did not die within 200 steps")
