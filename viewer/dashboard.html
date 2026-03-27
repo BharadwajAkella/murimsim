@@ -573,16 +573,33 @@
       const stages = window.STAGE_HISTORY;
       if (!stages || stages.length === 0) return;
 
+      // Merge live dashboard data into the "latest" stage entry
+      const live = window.DASHBOARD_DATA;
+      const mergedStages = stages.map(s => {
+        if (s.highlight !== "latest" || !live) return s;
+        const rates = live.avg_action_rates ?? {};
+        return {
+          ...s,
+          avg_lifespan:   live.avg_lifespan   ?? s.avg_lifespan,
+          gather_rate_pct: rates.gather != null ? +(rates.gather * 100).toFixed(1) : s.gather_rate_pct,
+          eat_rate_pct:    rates.eat    != null ? +(rates.eat    * 100).toFixed(1) : s.eat_rate_pct,
+          defend_rate_pct: rates.defend != null ? +(rates.defend * 100).toFixed(1) : s.defend_rate_pct,
+          metric_unit: "steps",
+          _live: true,
+        };
+      });
+
       // Table
       const tbody = document.getElementById("stage-table-body");
       tbody.innerHTML = "";
-      stages.forEach((s, i) => {
-        const prev = i > 0 ? stages[i - 1] : null;
+      mergedStages.forEach((s, i) => {
+        const prev = i > 0 ? mergedStages[i - 1] : null;
         const tagCls = s.highlight ? ` ${s.highlight}` : "";
         const tagLabel = { latest: "latest", best_mlp: "best MLP", best_gather: "best gather", best_combat: "best combat" }[s.highlight] || "";
+        const liveNote = s._live ? ` <span style="font-size:10px;color:var(--muted)">(live)</span>` : "";
         tbody.insertAdjacentHTML("beforeend", `
           <tr>
-            <td><strong>${s.label}</strong></td>
+            <td><strong>${s.label}</strong>${liveNote}</td>
             <td style="color:var(--muted);font-size:12px">${s.phase}</td>
             <td>${fmtSteps(s.steps_trained)}</td>
             <td>${fmtLife(s)} ${prev ? delta(toSteps(s), toSteps(prev), 1) : ""}</td>
@@ -597,7 +614,7 @@
       // Expandable cards
       const cardsEl = document.getElementById("stage-cards");
       cardsEl.innerHTML = "";
-      stages.forEach((s) => {
+      mergedStages.forEach((s) => {
         const tagCls = s.highlight ? ` ${s.highlight}` : "";
         const tagHtml = s.highlight
           ? `<span class="stage-tag${tagCls}" style="margin-left:auto">${({latest:"latest",best_mlp:"best MLP",best_gather:"best gather",best_combat:"best combat"})[s.highlight]||""}</span>`
@@ -661,6 +678,7 @@
         renderBars("resistance-bars", d.avg_resistance_gained, { poison: "#ef4444", flame: "#f97316", qi_drain: "#3b82f6" });
         renderSparkline("sparkline-f", d.history, "f_metric");
         renderCreditBars(d);
+        renderStageComparison();  // re-render so latest stage shows live metrics
       } catch (e) {
         console.error("Dashboard load error:", e);
         document.getElementById("no-data").style.display = "block";
@@ -671,8 +689,6 @@
     document.getElementById("main-content").style.display = "none";
     load();
     setInterval(load, REFRESH_MS);
-    // Stage comparison is static data — render once at startup
-    renderStageComparison();
   </script>
 </body>
 </html>
