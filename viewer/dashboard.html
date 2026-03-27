@@ -594,6 +594,9 @@
         return {
           ...s,
           steps_trained:   live.timestep       ?? s.steps_trained,
+          _steps_display:  live.total_timesteps
+            ? `${fmtSteps(live.timestep)} / ${fmtSteps(live.total_timesteps)}`
+            : fmtSteps(live.timestep ?? s.steps_trained),
           avg_lifespan:    live.avg_lifespan    ?? s.avg_lifespan,
           gather_rate_pct: rates.gather != null ? +(rates.gather * 100).toFixed(1) : s.gather_rate_pct,
           eat_rate_pct:    rates.eat    != null ? +(rates.eat    * 100).toFixed(1) : s.eat_rate_pct,
@@ -610,9 +613,8 @@
         const prev = i > 0 ? mergedStages[i - 1] : null;
         const tagCls = s.highlight ? ` ${s.highlight}` : "";
         const tagLabel = { latest: "latest", best_mlp: "best MLP", best_gather: "best gather", best_combat: "best combat" }[s.highlight] || "";
-        const stepsDisplay = s._live && live.total_timesteps
-          ? `${fmtSteps(s.steps_trained)} / ${fmtSteps(live.total_timesteps)}`
-          : fmtSteps(s.steps_trained);
+        const liveNote = s._live ? ` <span style="font-size:10px;color:var(--muted)">(live)</span>` : "";
+        const stepsDisplay = s._steps_display ?? fmtSteps(s.steps_trained);
         tbody.insertAdjacentHTML("beforeend", `
           <tr>
             <td><strong>${s.label}</strong>${liveNote}</td>
@@ -653,7 +655,7 @@
             <div class="stage-card-header" onclick="toggleCard('${id}')">
               <span class="stage-card-chevron">▶</span>
               <span class="stage-card-title">${s.label}</span>
-              <span class="stage-card-phase">${s.phase} · ${s._live ? stepsDisplay : fmtSteps(s.steps_trained)} steps</span>
+              <span class="stage-card-phase">${s.phase} · ${s._steps_display ?? fmtSteps(s.steps_trained)} steps</span>
               ${tagHtml}
             </div>
             <div class="stage-card-body">
