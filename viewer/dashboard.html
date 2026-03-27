@@ -491,20 +491,26 @@
 
     function loadData() {
       return new Promise((resolve, reject) => {
-        // Remove any previously injected data script
-        const old = document.getElementById("_data-script");
-        if (old) old.remove();
-        window.DASHBOARD_DATA = undefined;
-
-        const s = document.createElement("script");
-        s.id = "_data-script";
-        s.src = DATA_SCRIPT_SRC + "?t=" + Date.now();
-        s.onload = () => {
-          if (window.DASHBOARD_DATA) resolve(window.DASHBOARD_DATA);
-          else reject(new Error("DASHBOARD_DATA not set"));
+        // XMLHttpRequest works on file:// (unlike fetch). Append timestamp to bust cache.
+        const xhr = new XMLHttpRequest();
+        xhr.open("GET", DATA_SCRIPT_SRC + "?t=" + Date.now(), true);
+        xhr.onload = () => {
+          if (xhr.status === 200 || xhr.status === 0) {  // status 0 = file:// success
+            try {
+              // Execute the JS text in a sandboxed scope, capture DASHBOARD_DATA
+              const fn = new Function("window", xhr.responseText + "\nreturn window.DASHBOARD_DATA;");
+              const data = fn({ DASHBOARD_DATA: undefined });
+              if (data) resolve(data);
+              else reject(new Error("DASHBOARD_DATA not set after eval"));
+            } catch (e) {
+              reject(e);
+            }
+          } else {
+            reject(new Error("XHR status " + xhr.status));
+          }
         };
-        s.onerror = () => reject(new Error("script load failed"));
-        document.head.appendChild(s);
+        xhr.onerror = () => reject(new Error("XHR error"));
+        xhr.send();
       });
     }
 
@@ -656,6 +662,7 @@
         renderSparkline("sparkline-f", d.history, "f_metric");
         renderCreditBars(d);
       } catch (e) {
+        console.error("Dashboard load error:", e);
         document.getElementById("no-data").style.display = "block";
         document.getElementById("main-content").style.display = "none";
       }
