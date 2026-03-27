@@ -497,10 +497,10 @@
         xhr.onload = () => {
           if (xhr.status === 200 || xhr.status === 0) {  // status 0 = file:// success
             try {
-              // Execute the JS text in a sandboxed scope, capture DASHBOARD_DATA
-              const fn = new Function("window", xhr.responseText + "\nreturn window.DASHBOARD_DATA;");
-              const data = fn({ DASHBOARD_DATA: undefined });
-              if (data) resolve(data);
+              // eval sets window.DASHBOARD_DATA on the real global window
+              // eslint-disable-next-line no-eval
+              eval(xhr.responseText);
+              if (window.DASHBOARD_DATA) resolve(window.DASHBOARD_DATA);
               else reject(new Error("DASHBOARD_DATA not set after eval"));
             } catch (e) {
               reject(e);
@@ -509,7 +509,21 @@
             reject(new Error("XHR status " + xhr.status));
           }
         };
-        xhr.onerror = () => reject(new Error("XHR error"));
+        xhr.onerror = () => {
+          // Fallback: script tag injection (works on some file:// setups)
+          const old = document.getElementById("_data-script");
+          if (old) old.remove();
+          window.DASHBOARD_DATA = undefined;
+          const s = document.createElement("script");
+          s.id = "_data-script";
+          s.src = DATA_SCRIPT_SRC + "?t=" + Date.now();
+          s.onload = () => {
+            if (window.DASHBOARD_DATA) resolve(window.DASHBOARD_DATA);
+            else reject(new Error("DASHBOARD_DATA not set"));
+          };
+          s.onerror = () => reject(new Error("Both XHR and script tag failed"));
+          document.head.appendChild(s);
+        };
         xhr.send();
       });
     }
@@ -569,18 +583,17 @@
       return `<span class="${cls}">${sign}${pct.toFixed(0)}%</span>`;
     }
 
-    function renderStageComparison() {
+    function renderStageComparison(live) {
       const stages = window.STAGE_HISTORY;
       if (!stages || stages.length === 0) return;
 
       // Merge live dashboard data into the "latest" stage entry
-      const live = window.DASHBOARD_DATA;
       const mergedStages = stages.map(s => {
         if (s.highlight !== "latest" || !live) return s;
         const rates = live.avg_action_rates ?? {};
         return {
           ...s,
-          avg_lifespan:   live.avg_lifespan   ?? s.avg_lifespan,
+          avg_lifespan:    live.avg_lifespan   ?? s.avg_lifespan,
           gather_rate_pct: rates.gather != null ? +(rates.gather * 100).toFixed(1) : s.gather_rate_pct,
           eat_rate_pct:    rates.eat    != null ? +(rates.eat    * 100).toFixed(1) : s.eat_rate_pct,
           defend_rate_pct: rates.defend != null ? +(rates.defend * 100).toFixed(1) : s.defend_rate_pct,
@@ -678,7 +691,7 @@
         renderBars("resistance-bars", d.avg_resistance_gained, { poison: "#ef4444", flame: "#f97316", qi_drain: "#3b82f6" });
         renderSparkline("sparkline-f", d.history, "f_metric");
         renderCreditBars(d);
-        renderStageComparison();  // re-render so latest stage shows live metrics
+        renderStageComparison(d);  // pass live data directly — no global dependency
       } catch (e) {
         console.error("Dashboard load error:", e);
         document.getElementById("no-data").style.display = "block";
