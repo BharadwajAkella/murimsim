@@ -593,7 +593,8 @@
         const rates = live.avg_action_rates ?? {};
         return {
           ...s,
-          avg_lifespan:    live.avg_lifespan   ?? s.avg_lifespan,
+          steps_trained:   live.timestep       ?? s.steps_trained,
+          avg_lifespan:    live.avg_lifespan    ?? s.avg_lifespan,
           gather_rate_pct: rates.gather != null ? +(rates.gather * 100).toFixed(1) : s.gather_rate_pct,
           eat_rate_pct:    rates.eat    != null ? +(rates.eat    * 100).toFixed(1) : s.eat_rate_pct,
           defend_rate_pct: rates.defend != null ? +(rates.defend * 100).toFixed(1) : s.defend_rate_pct,
@@ -609,12 +610,14 @@
         const prev = i > 0 ? mergedStages[i - 1] : null;
         const tagCls = s.highlight ? ` ${s.highlight}` : "";
         const tagLabel = { latest: "latest", best_mlp: "best MLP", best_gather: "best gather", best_combat: "best combat" }[s.highlight] || "";
-        const liveNote = s._live ? ` <span style="font-size:10px;color:var(--muted)">(live)</span>` : "";
+        const stepsDisplay = s._live && live.total_timesteps
+          ? `${fmtSteps(s.steps_trained)} / ${fmtSteps(live.total_timesteps)}`
+          : fmtSteps(s.steps_trained);
         tbody.insertAdjacentHTML("beforeend", `
           <tr>
             <td><strong>${s.label}</strong>${liveNote}</td>
             <td style="color:var(--muted);font-size:12px">${s.phase}</td>
-            <td>${fmtSteps(s.steps_trained)}</td>
+            <td>${stepsDisplay}</td>
             <td>${fmtLife(s)} ${prev ? delta(toSteps(s), toSteps(prev), 1) : ""}</td>
             <td>${fmtPct(s.gather_rate_pct)} ${prev ? delta(s.gather_rate_pct, prev.gather_rate_pct, 1) : ""}</td>
             <td>${fmtPct(s.eat_rate_pct)} ${prev ? delta(s.eat_rate_pct, prev.eat_rate_pct, -1) : ""}</td>
@@ -650,7 +653,7 @@
             <div class="stage-card-header" onclick="toggleCard('${id}')">
               <span class="stage-card-chevron">▶</span>
               <span class="stage-card-title">${s.label}</span>
-              <span class="stage-card-phase">${s.phase} · ${fmtSteps(s.steps_trained)} steps</span>
+              <span class="stage-card-phase">${s.phase} · ${s._live ? stepsDisplay : fmtSteps(s.steps_trained)} steps</span>
               ${tagHtml}
             </div>
             <div class="stage-card-body">
