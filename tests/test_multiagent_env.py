@@ -24,6 +24,7 @@ from murimsim.rl.multi_env import (
     GROUP_ATTACK_BONUS_PER_ALLY,
     GROUP_COHESION_RANGE,
     REWARD_GROUP_COHESION_PER_ALLY,
+    REWARD_COORDINATED_ATTACK,
     CombatEnv,
 )
 
@@ -392,7 +393,7 @@ def test_group_cohesion_reward_nearby() -> None:
     env._form_group(focal_idx, ally_idx)
     # Place ally within cohesion range
     ax, ay = focal.position
-    ally.position = (ax + 1, ay)  # Manhattan distance 1 ≤ GROUP_COHESION_RANGE
+    ally.position = (ax + 1, ay)  # Chebyshev distance 1 ≤ GROUP_COHESION_RANGE
 
     cohesion = env._group_cohesion_reward(focal_idx)
     assert abs(cohesion - REWARD_GROUP_COHESION_PER_ALLY) < 1e-6, (
@@ -417,3 +418,41 @@ def test_group_cohesion_reward_out_of_range() -> None:
 
     cohesion = env._group_cohesion_reward(focal_idx)
     assert cohesion == 0.0, f"Expected 0.0 for out-of-range ally, got {cohesion}"
+
+
+def test_coordinated_attack_reward() -> None:
+    """step() must grant REWARD_COORDINATED_ATTACK when focal attacks with a flanking ally."""
+    env = _make_combat_env(n_agents=3, seed=9)
+
+    focal_idx = env._focal_idx
+    focal = env._agents[focal_idx]
+    others = [i for i in range(env._n_agents) if i != focal_idx]
+    target_idx, ally_idx = others[0], others[1]
+    target = env._agents[target_idx]
+    ally = env._agents[ally_idx]
+
+    # Position: focal attacks target; ally flanks from diagonal
+    focal.position = (10, 10)
+    target.position = (11, 10)
+    ally.position = (12, 11)   # diagonal of target — Chebyshev 1
+
+    focal.strength = 0.8
+    target.strength = 0.1
+    focal.sociability = 1.0
+    ally.sociability = 1.0
+    target.sociability = 0.0
+    env._form_group(focal_idx, ally_idx)
+
+    # Make target very weak so it won't be killed instantly (keeps env alive)
+    target.health = 0.99
+
+    from murimsim.actions import Action, N_ACTIONS_PHASE5
+    attack_action = Action.ATTACK.value
+
+    pre_reward_ema = env._reward_ema[focal_idx]
+    obs, reward, terminated, truncated, info = env.step(attack_action)
+
+    # Reward should include coordinated attack bonus (on top of other signals)
+    assert reward >= REWARD_COORDINATED_ATTACK * 0.5, (
+        f"Expected coordinated attack bonus in reward, got {reward:.4f}"
+    )

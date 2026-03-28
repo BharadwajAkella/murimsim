@@ -366,6 +366,7 @@ class MultiAgentEnv(gym.Env):
     def _group_cohesion_reward(self, agent_idx: int) -> float:
         """Return a per-tick reward for each live group member within GROUP_COHESION_RANGE.
 
+        Uses Chebyshev distance (consistent with 8-direction combat range).
         Incentivises staying physically close to group members rather than
         drifting apart after forming a group.
         """
@@ -381,7 +382,7 @@ class MultiAgentEnv(gym.Env):
             if not ally.alive:
                 continue
             ox, oy = ally.position
-            if abs(ox - ax) + abs(oy - ay) <= GROUP_COHESION_RANGE:
+            if max(abs(ox - ax), abs(oy - ay)) <= GROUP_COHESION_RANGE:
                 nearby_count += 1
         return REWARD_GROUP_COHESION_PER_ALLY * nearby_count
 
@@ -637,7 +638,11 @@ REWARD_GROUP_FORMATION: float = 0.05   # small bonus when bilateral COLLABORATE 
 # Per-tick bonus for each live group member within proximity range.
 # Rewards staying in a live, nearby group rather than just being "in" a group.
 REWARD_GROUP_COHESION_PER_ALLY: float = 0.02
-GROUP_COHESION_RANGE: int = 3  # Manhattan distance within which an ally counts
+GROUP_COHESION_RANGE: int = 3  # Chebyshev distance within which an ally counts
+
+# Bonus when focal attacks while a group ally is flanking (adjacent to) the target.
+# Directly incentivises positioning next to allies before engaging.
+REWARD_COORDINATED_ATTACK: float = 0.05
 
 # Sociability threshold for heuristic agents to accept a collaboration signal
 HEURISTIC_COLLAB_THRESHOLD: float = 0.5
@@ -724,7 +729,13 @@ class CombatEnv(MultiAgentEnv):
         pre_hazard_dists = {h: self._nearest_hazard_dist(prev_pos, h) for h in HAZARD_RESOURCE_IDS}
 
         # 1. Apply focal agent's action
+        flanking_bonus_earned = False
         if action_enum == Action.ATTACK:
+            # Check for flanking allies before the attack (target may die during it)
+            pre_target = self._nearest_adjacent_agent(focal)
+            if pre_target is not None:
+                flankers = self._adjacent_group_allies(self._focal_idx, pre_target)
+                flanking_bonus_earned = len(flankers) > 0
             damage_dealt, defeated = self._do_attack(focal)
             defeat_bonus = REWARD_DEFEAT_OPPONENT if defeated else 0.0
         elif action_enum == Action.DEFEND:
@@ -801,6 +812,9 @@ class CombatEnv(MultiAgentEnv):
         # Per-tick cohesion reward: alive group members within range
         if focal.alive:
             reward += self._group_cohesion_reward(self._focal_idx)
+        # Coordinated attack: bonus when focal attacks with a flanking group ally
+        if flanking_bonus_earned and focal.alive:
+            reward += REWARD_COORDINATED_ATTACK
         ema = self._reward_ema[self._focal_idx]
         self._reward_ema[self._focal_idx] = (1.0 - REWARD_EMA_ALPHA) * ema + REWARD_EMA_ALPHA * reward
 
