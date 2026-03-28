@@ -335,7 +335,6 @@
             <th>Gather %</th>
             <th>Eat %</th>
             <th>Defend %</th>
-            <th>N-Bias %</th>
             <th>Tag</th>
           </tr>
         </thead>
@@ -627,7 +626,6 @@
             <td>${fmtPct(s.gather_rate_pct)} ${prev ? delta(s.gather_rate_pct, prev.gather_rate_pct, 1) : ""}</td>
             <td>${fmtPct(s.eat_rate_pct)} ${prev ? delta(s.eat_rate_pct, prev.eat_rate_pct, -1) : ""}</td>
             <td>${fmtPct(s.defend_rate_pct)} ${prev ? delta(s.defend_rate_pct, prev.defend_rate_pct, 1) : ""}</td>
-            <td>${fmtPct(s.north_bias_pct)} ${prev ? delta(s.north_bias_pct, prev.north_bias_pct, -1) : ""}</td>
             <td>${tagLabel ? `<span class="stage-tag${tagCls}">${tagLabel}</span>` : ""}</td>
           </tr>`);
       });
@@ -648,7 +646,6 @@
           { label: "Gather", val: fmtPct(s.gather_rate_pct) },
           { label: "Eat", val: fmtPct(s.eat_rate_pct) },
           { label: "Defend", val: fmtPct(s.defend_rate_pct) },
-          s.north_bias_pct != null ? { label: "N-Bias", val: fmtPct(s.north_bias_pct) } : null,
         ].filter(Boolean);
         const miniHtml = miniMetrics.map(m =>
           `<div class="mini-kpi"><div class="mk-val">${m.val}</div><div class="mk-label">${m.label}</div></div>`
