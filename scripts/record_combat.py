@@ -26,7 +26,7 @@ from murimsim.rl.multi_env import CombatEnv
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "default.yaml"
 TRAIN_CONFIG_PATH = Path(__file__).parent.parent / "config" / "training.yaml"
-OUTPUT_DIR = Path(__file__).parent.parent / "logs" / "replays"
+OUTPUT_DIR = Path("/mnt/c/Users/bhara/Downloads/replays")
 DEFAULT_MODEL = Path(__file__).parent.parent / "checkpoints" / "limbic_lstm_v2" / "limbic_lstm_v2_final.zip"
 
 # Assign a distinct "sect" colour to each agent slot for the viewer
