@@ -613,6 +613,12 @@ REWARD_GROUP_FORMATION: float = 0.05   # small bonus when bilateral COLLABORATE 
 # Sociability threshold for heuristic agents to accept a collaboration signal
 HEURISTIC_COLLAB_THRESHOLD: float = 0.5
 
+# Group combat mechanics
+# Attack bonus: +X% damage per group member flanking (adjacent to) the target
+GROUP_ATTACK_BONUS_PER_ALLY: float = 0.20
+# Damage split: incoming damage is divided equally across focal + adjacent group members
+GROUP_DAMAGE_SPLIT_ENABLED: bool = True
+
 # Curriculum: combat probability ramps from START → END over RAMP_STEPS global steps
 CURRICULUM_START_PROB: float = 0.2
 CURRICULUM_END_PROB: float = 1.0
@@ -804,11 +810,20 @@ class CombatEnv(MultiAgentEnv):
     # ── Combat helpers ────────────────────────────────────────────────────────
 
     def _do_attack(self, attacker: Agent) -> tuple[float, bool]:
-        """Attack the nearest adjacent agent. Returns (damage_dealt, killed)."""
+        """Attack the nearest adjacent agent. Returns (damage_dealt, killed).
+
+        If the attacker has group members flanking (adjacent to) the target,
+        each ally grants a GROUP_ATTACK_BONUS_PER_ALLY multiplicative damage bonus.
+        """
         target = self._nearest_adjacent_agent(attacker)
         if target is None:
             return 0.0, False
+        attacker_idx = self._agents.index(attacker)
+        flanking_allies = self._adjacent_group_allies(attacker_idx, target)
         damage = self._combat_damage(attacker, target, is_defending=False)
+        if flanking_allies:
+            bonus = GROUP_ATTACK_BONUS_PER_ALLY * len(flanking_allies)
+            damage = float(np.clip(damage * (1.0 + bonus), 0.0, COMBAT_MAX_DAMAGE))
         target.health = max(0.0, target.health - damage)
         target._check_death()
         if not target.alive:
@@ -819,7 +834,12 @@ class CombatEnv(MultiAgentEnv):
     def _heuristic_combat_step(
         self, agent: Agent, focal: Agent, focal_defending: bool
     ) -> float:
-        """Heuristic for one non-focal agent. Returns damage dealt to focal agent."""
+        """Heuristic for one non-focal agent. Returns damage dealt to focal agent.
+
+        If GROUP_DAMAGE_SPLIT_ENABLED and focal has group members adjacent to it,
+        incoming damage is divided equally across focal and those shielding allies.
+        The return value is the share actually received by focal (for reward shaping).
+        """
         ax, ay = agent.position
         fx, fy = focal.position
         adjacent = abs(ax - fx) + abs(ay - fy) <= 1
@@ -832,14 +852,32 @@ class CombatEnv(MultiAgentEnv):
                 self._heuristic_step(agent)
                 return 0.0
 
-            # Attack focal if adjacent and focal appears weaker and agent is not very social
+            # Attack focal if adjacent, focal appears weaker, and agent is not very social
             if agent.strength > focal.strength * 1.1 and focal.health > 0 and agent.sociability < HEURISTIC_COLLAB_THRESHOLD:
                 damage = self._combat_damage(agent, focal, is_defending=focal_defending)
-                focal.health = max(0.0, focal.health - damage)
+
+                if GROUP_DAMAGE_SPLIT_ENABLED:
+                    # Allies standing next to focal absorb an equal share of the damage
+                    shields = self._adjacent_group_allies(focal_idx, focal)
+                    if shields:
+                        share = damage / (len(shields) + 1)
+                        for ally_idx in shields:
+                            ally = self._agents[ally_idx]
+                            ally.health = max(0.0, ally.health - share)
+                            ally._check_death()
+                            if not ally.alive:
+                                self._drop_inventory(ally)
+                        focal_damage = share
+                    else:
+                        focal_damage = damage
+                else:
+                    focal_damage = damage
+
+                focal.health = max(0.0, focal.health - focal_damage)
                 focal._check_death()
                 if not focal.alive:
                     self._drop_inventory(focal)
-                return damage
+                return focal_damage
 
         # Otherwise forage
         self._heuristic_step(agent)
@@ -869,6 +907,29 @@ class CombatEnv(MultiAgentEnv):
             if abs(ox - ax) + abs(oy - ay) <= 1:
                 return other
         return None
+
+    def _adjacent_group_allies(self, agent_idx: int, ref: Agent) -> list[int]:
+        """Return indices of live group members of agent_idx adjacent to ref.
+
+        Used for two things:
+        - Attack bonus: allies flanking (adjacent to) the target grant +damage.
+        - Damage split: allies adjacent to the focal agent absorb a share of incoming damage.
+        """
+        group = self._get_group(agent_idx)
+        if group is None:
+            return []
+        rx, ry = ref.position
+        allies: list[int] = []
+        for ally_idx in group:
+            if ally_idx == agent_idx:
+                continue
+            ally = self._agents[ally_idx]
+            if not ally.alive:
+                continue
+            ax, ay = ally.position
+            if abs(ax - rx) + abs(ay - ry) <= 1:
+                allies.append(ally_idx)
+        return allies
 
     def _try_collaborate(self, focal_idx: int) -> bool:
         """Attempt to form a group with the nearest adjacent agent.

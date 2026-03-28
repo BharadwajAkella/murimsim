@@ -21,6 +21,9 @@ from murimsim.rl.multi_env import (
     OBS_STASH_GRID_SIZE,
     OBS_STATS_SIZE,
     OBS_VIEW_SIZE,
+    GROUP_ATTACK_BONUS_PER_ALLY,
+    GROUP_DAMAGE_SPLIT_ENABLED,
+    CombatEnv,
 )
 
 CONFIG_PATH = Path("config/default.yaml")
@@ -188,7 +191,6 @@ def test_collaborate_forms_group() -> None:
     """COLLABORATE on an adjacent social agent must create a group."""
     import yaml
     from pathlib import Path
-    from murimsim.rl.multi_env import CombatEnv
     from murimsim.actions import Action
 
     cfg_path = Path("config/default.yaml")
@@ -221,7 +223,6 @@ def test_collaborate_fails_with_unsocial_neighbour() -> None:
     """COLLABORATE with a low-sociability neighbour must not form a group."""
     import yaml
     from pathlib import Path
-    from murimsim.rl.multi_env import CombatEnv
     from murimsim.actions import Action
 
     cfg_path = Path("config/default.yaml")
@@ -252,7 +253,6 @@ def test_walk_away_moves_from_neighbour() -> None:
     """WALK_AWAY must move the focal agent one step away from its nearest adjacent agent."""
     import yaml
     from pathlib import Path
-    from murimsim.rl.multi_env import CombatEnv
     from murimsim.actions import Action
 
     cfg_path = Path("config/default.yaml")
@@ -280,3 +280,113 @@ def test_walk_away_moves_from_neighbour() -> None:
     assert post_dist > 1, (
         f"WALK_AWAY did not move away: pre={pre_pos}, post={post_pos}, neighbour={other.position}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Group combat mechanics tests
+# ---------------------------------------------------------------------------
+
+def _make_combat_env(n_agents: int = 4, seed: int = 0) -> "CombatEnv":
+    cfg_path = Path("config/default.yaml")
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+    env = CombatEnv(config=cfg, n_agents=n_agents, seed=seed)
+    env.reset(seed=seed)
+    return env
+
+
+def test_group_attack_bonus_with_flanking_ally() -> None:
+    """Attack damage must be higher when a group ally is adjacent to the target."""
+    env = _make_combat_env(n_agents=3, seed=7)
+
+    focal_idx = env._focal_idx
+    focal = env._agents[focal_idx]
+    # Pick two other agents: one will be the target, one the flanking ally
+    others = [i for i in range(env._n_agents) if i != focal_idx]
+    target_idx, ally_idx = others[0], others[1]
+    target = env._agents[target_idx]
+    ally = env._agents[ally_idx]
+
+    # Place target adjacent east of focal; ally adjacent east of target (flanking)
+    focal.position = (10, 10)
+    target.position = (11, 10)
+    ally.position = (12, 10)
+
+    # Form a group between focal and ally (not target)
+    focal.sociability = 1.0
+    ally.sociability = 1.0
+    target.sociability = 0.0
+    env._form_group(focal_idx, ally_idx)
+
+    # Baseline damage without flanking (no group)
+    env2 = _make_combat_env(n_agents=3, seed=7)
+    focal2_idx = env2._focal_idx
+    focal2 = env2._agents[focal2_idx]
+    others2 = [i for i in range(env2._n_agents) if i != focal2_idx]
+    target2 = env2._agents[others2[0]]
+    focal2.position = (10, 10)
+    target2.position = (11, 10)
+    # no group, no flanking ally
+
+    base_damage = env2._combat_damage(focal2, target2, is_defending=False)
+    flanked_damage = base_damage * (1.0 + GROUP_ATTACK_BONUS_PER_ALLY * 1)
+
+    # Verify _adjacent_group_allies finds the ally
+    flankers = env._adjacent_group_allies(focal_idx, target)
+    assert ally_idx in flankers, "Flanking ally should be detected as adjacent to target"
+
+    # Verify the actual _do_attack output exceeds solo damage
+    target_health_before = target.health
+    damage_dealt, _ = env._do_attack(focal)
+    damage_applied = target_health_before - target.health
+    assert damage_applied > base_damage - 1e-6, (
+        f"Flanked attack ({damage_applied:.4f}) should exceed solo attack ({base_damage:.4f})"
+    )
+
+
+def test_damage_split_across_shielding_ally() -> None:
+    """When a group ally is adjacent to the focal agent, incoming damage is split."""
+    if not GROUP_DAMAGE_SPLIT_ENABLED:
+        pytest.skip("GROUP_DAMAGE_SPLIT_ENABLED is False")
+
+    env = _make_combat_env(n_agents=3, seed=11)
+
+    focal_idx = env._focal_idx
+    focal = env._agents[focal_idx]
+    others = [i for i in range(env._n_agents) if i != focal_idx]
+    attacker_idx, shield_idx = others[0], others[1]
+    attacker = env._agents[attacker_idx]
+    shield = env._agents[shield_idx]
+
+    # Place attacker adjacent to focal; shield also adjacent to focal (shielding position)
+    focal.position = (10, 10)
+    attacker.position = (9, 10)   # west of focal — will attack
+    shield.position = (10, 11)    # south of focal — shielding
+
+    # Attacker is a strong, unsocial aggressor
+    attacker.strength = 1.0
+    attacker.sociability = 0.0
+    focal.strength = 0.1
+    shield.strength = 0.5
+    shield.sociability = 1.0
+
+    # Form a group between focal and shield
+    env._form_group(focal_idx, shield_idx)
+
+    focal_health_before = focal.health
+    shield_health_before = shield.health
+
+    damage = env._heuristic_combat_step(attacker, focal, focal_defending=False)
+
+    # focal should have taken less than full damage
+    focal_damage_taken = focal_health_before - focal.health
+    shield_damage_taken = shield_health_before - shield.health
+
+    assert focal_damage_taken < attacker.strength * 0.3, (
+        "Focal should take less than solo damage when a shield is present"
+    )
+    assert shield_damage_taken > 0, "Shielding ally should absorb some damage"
+    assert abs(focal_damage_taken - shield_damage_taken) < 1e-6, (
+        "Damage should be split equally between focal and shield"
+    )
+
