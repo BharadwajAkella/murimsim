@@ -59,7 +59,7 @@ domain_randomization:
 # LSTM / Recurrent PPO — Stage 4 training
 # Replaces MlpPolicy with MlpLstmPolicy. All other env settings identical to phase3c.
 lstm:
-  total_timesteps: 600_000
+  total_timesteps: 2_000_000
   checkpoint_dir: checkpoints/limbic_lstm_v2
   checkpoint_freq: 100_000
   n_envs: 4

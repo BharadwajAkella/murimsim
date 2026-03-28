@@ -642,7 +642,7 @@ GROUP_COHESION_RANGE: int = 3  # Chebyshev distance within which an ally counts
 
 # Bonus when focal attacks while a group ally is flanking (adjacent to) the target.
 # Directly incentivises positioning next to allies before engaging.
-REWARD_COORDINATED_ATTACK: float = 0.05
+REWARD_COORDINATED_ATTACK: float = 0.10
 
 # Sociability threshold for heuristic agents to accept a collaboration signal
 HEURISTIC_COLLAB_THRESHOLD: float = 0.5
