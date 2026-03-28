@@ -23,6 +23,8 @@ from murimsim.rl.multi_env import (
     OBS_VIEW_SIZE,
     GROUP_ATTACK_BONUS_PER_ALLY,
     GROUP_DAMAGE_SPLIT_ENABLED,
+    GROUP_COHESION_RANGE,
+    REWARD_GROUP_COHESION_PER_ALLY,
     CombatEnv,
 )
 
@@ -390,3 +392,43 @@ def test_damage_split_across_shielding_ally() -> None:
         "Damage should be split equally between focal and shield"
     )
 
+
+def test_group_cohesion_reward_nearby() -> None:
+    """_group_cohesion_reward must return REWARD_GROUP_COHESION_PER_ALLY per nearby ally."""
+    env = _make_combat_env(n_agents=3, seed=5)
+
+    focal_idx = env._focal_idx
+    focal = env._agents[focal_idx]
+    others = [i for i in range(env._n_agents) if i != focal_idx]
+    ally_idx = others[0]
+    ally = env._agents[ally_idx]
+
+    # Form a group
+    env._form_group(focal_idx, ally_idx)
+    # Place ally within cohesion range
+    ax, ay = focal.position
+    ally.position = (ax + 1, ay)  # Manhattan distance 1 ≤ GROUP_COHESION_RANGE
+
+    cohesion = env._group_cohesion_reward(focal_idx)
+    assert abs(cohesion - REWARD_GROUP_COHESION_PER_ALLY) < 1e-6, (
+        f"Expected {REWARD_GROUP_COHESION_PER_ALLY}, got {cohesion}"
+    )
+
+
+def test_group_cohesion_reward_out_of_range() -> None:
+    """_group_cohesion_reward must return 0 when ally is beyond GROUP_COHESION_RANGE."""
+    env = _make_combat_env(n_agents=3, seed=5)
+
+    focal_idx = env._focal_idx
+    focal = env._agents[focal_idx]
+    others = [i for i in range(env._n_agents) if i != focal_idx]
+    ally_idx = others[0]
+    ally = env._agents[ally_idx]
+
+    env._form_group(focal_idx, ally_idx)
+    # Place ally beyond cohesion range
+    ax, ay = focal.position
+    ally.position = (ax + GROUP_COHESION_RANGE + 2, ay)
+
+    cohesion = env._group_cohesion_reward(focal_idx)
+    assert cohesion == 0.0, f"Expected 0.0 for out-of-range ally, got {cohesion}"

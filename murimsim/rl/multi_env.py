@@ -360,6 +360,28 @@ class MultiAgentEnv(gym.Env):
                 new_groups.append(frozenset(pruned))
         self._groups = new_groups
 
+    def _group_cohesion_reward(self, agent_idx: int) -> float:
+        """Return a per-tick reward for each live group member within GROUP_COHESION_RANGE.
+
+        Incentivises staying physically close to group members rather than
+        drifting apart after forming a group.
+        """
+        group = self._get_group(agent_idx)
+        if group is None:
+            return 0.0
+        ax, ay = self._agents[agent_idx].position
+        nearby_count = 0
+        for ally_idx in group:
+            if ally_idx == agent_idx:
+                continue
+            ally = self._agents[ally_idx]
+            if not ally.alive:
+                continue
+            ox, oy = ally.position
+            if abs(ox - ax) + abs(oy - ay) <= GROUP_COHESION_RANGE:
+                nearby_count += 1
+        return REWARD_GROUP_COHESION_PER_ALLY * nearby_count
+
     # ── Observation builder ───────────────────────────────────────────────────
 
     def _build_obs(self, agent_idx: int) -> np.ndarray:
@@ -609,6 +631,10 @@ COMBAT_MAX_DAMAGE: float = 0.5
 REWARD_DEFEAT_OPPONENT: float = 0.3
 REWARD_DAMAGE_TAKEN_SCALE: float = -0.2
 REWARD_GROUP_FORMATION: float = 0.05   # small bonus when bilateral COLLABORATE succeeds
+# Per-tick bonus for each live group member within proximity range.
+# Rewards staying in a live, nearby group rather than just being "in" a group.
+REWARD_GROUP_COHESION_PER_ALLY: float = 0.02
+GROUP_COHESION_RANGE: int = 3  # Manhattan distance within which an ally counts
 
 # Sociability threshold for heuristic agents to accept a collaboration signal
 HEURISTIC_COLLAB_THRESHOLD: float = 0.5
@@ -761,7 +787,7 @@ class CombatEnv(MultiAgentEnv):
         if damage_taken > 0 and focal.alive:
             self._combat_experience[self._focal_idx] += 1.0
 
-        # 6. Compute reward (group formation bonus added on top)
+        # 6. Compute reward (group formation bonus + cohesion bonus added on top)
         reward = self._compute_combat_reward(
             hunger_prev, food_gathered, poison_damage, focal,
             exploration_reward, damage_dealt, damage_taken, defeat_bonus,
@@ -769,6 +795,9 @@ class CombatEnv(MultiAgentEnv):
         )
         if group_formed:
             reward += REWARD_GROUP_FORMATION
+        # Per-tick cohesion reward: alive group members within range
+        if focal.alive:
+            reward += self._group_cohesion_reward(self._focal_idx)
         ema = self._reward_ema[self._focal_idx]
         self._reward_ema[self._focal_idx] = (1.0 - REWARD_EMA_ALPHA) * ema + REWARD_EMA_ALPHA * reward
 
