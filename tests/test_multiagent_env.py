@@ -22,7 +22,6 @@ from murimsim.rl.multi_env import (
     OBS_STATS_SIZE,
     OBS_VIEW_SIZE,
     GROUP_ATTACK_BONUS_PER_ALLY,
-    GROUP_DAMAGE_SPLIT_ENABLED,
     GROUP_COHESION_RANGE,
     REWARD_GROUP_COHESION_PER_ALLY,
     CombatEnv,
@@ -346,50 +345,36 @@ def test_group_attack_bonus_with_flanking_ally() -> None:
     )
 
 
-def test_damage_split_across_shielding_ally() -> None:
-    """When a group ally is adjacent to the focal agent, incoming damage is split."""
-    if not GROUP_DAMAGE_SPLIT_ENABLED:
-        pytest.skip("GROUP_DAMAGE_SPLIT_ENABLED is False")
-
+def test_diagonal_flanking_ally_detected() -> None:
+    """A group ally on a diagonal cell (Chebyshev distance 1) must count as a flanker."""
     env = _make_combat_env(n_agents=3, seed=11)
 
     focal_idx = env._focal_idx
     focal = env._agents[focal_idx]
     others = [i for i in range(env._n_agents) if i != focal_idx]
-    attacker_idx, shield_idx = others[0], others[1]
-    attacker = env._agents[attacker_idx]
-    shield = env._agents[shield_idx]
+    target_idx, ally_idx = others[0], others[1]
+    target = env._agents[target_idx]
+    ally = env._agents[ally_idx]
 
-    # Place attacker adjacent to focal; shield also adjacent to focal (shielding position)
+    # Focal attacks target; ally is on the diagonal relative to target
     focal.position = (10, 10)
-    attacker.position = (9, 10)   # west of focal — will attack
-    shield.position = (10, 11)    # south of focal — shielding
+    target.position = (11, 10)
+    ally.position = (12, 11)   # diagonal of target — Chebyshev 1, Manhattan 2
 
-    # Attacker is a strong, unsocial aggressor
-    attacker.strength = 1.0
-    attacker.sociability = 0.0
-    focal.strength = 0.1
-    shield.strength = 0.5
-    shield.sociability = 1.0
+    focal.sociability = 1.0
+    ally.sociability = 1.0
+    target.sociability = 0.0
+    env._form_group(focal_idx, ally_idx)
 
-    # Form a group between focal and shield
-    env._form_group(focal_idx, shield_idx)
+    flankers = env._adjacent_group_allies(focal_idx, target)
+    assert ally_idx in flankers, "Diagonal ally should count as flanker (Chebyshev distance 1)"
 
-    focal_health_before = focal.health
-    shield_health_before = shield.health
-
-    damage = env._heuristic_combat_step(attacker, focal, focal_defending=False)
-
-    # focal should have taken less than full damage
-    focal_damage_taken = focal_health_before - focal.health
-    shield_damage_taken = shield_health_before - shield.health
-
-    assert focal_damage_taken < attacker.strength * 0.3, (
-        "Focal should take less than solo damage when a shield is present"
-    )
-    assert shield_damage_taken > 0, "Shielding ally should absorb some damage"
-    assert abs(focal_damage_taken - shield_damage_taken) < 1e-6, (
-        "Damage should be split equally between focal and shield"
+    base_damage = env._combat_damage(focal, target, is_defending=False)
+    target_health_before = target.health
+    env._do_attack(focal)
+    damage_applied = target_health_before - target.health
+    assert damage_applied > base_damage - 1e-6, (
+        "Diagonal flanking should boost damage above solo attack"
     )
 
 

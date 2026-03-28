@@ -643,10 +643,9 @@ GROUP_COHESION_RANGE: int = 3  # Manhattan distance within which an ally counts
 HEURISTIC_COLLAB_THRESHOLD: float = 0.5
 
 # Group combat mechanics
-# Attack bonus: +X% damage per group member flanking (adjacent to) the target
+# Combat requires attacker and target to be within Chebyshev distance 1 (8 directions incl. diagonals)
+# Attack bonus: +X% damage per group member flanking from any of the 8 surrounding cells
 GROUP_ATTACK_BONUS_PER_ALLY: float = 0.20
-# Damage split: incoming damage is divided equally across focal + adjacent group members
-GROUP_DAMAGE_SPLIT_ENABLED: bool = True
 
 # Curriculum: combat probability ramps from START → END over RAMP_STEPS global steps
 CURRICULUM_START_PROB: float = 0.2
@@ -846,9 +845,9 @@ class CombatEnv(MultiAgentEnv):
     # ── Combat helpers ────────────────────────────────────────────────────────
 
     def _do_attack(self, attacker: Agent) -> tuple[float, bool]:
-        """Attack the nearest adjacent agent. Returns (damage_dealt, killed).
+        """Attack the nearest agent within Chebyshev distance 1 (8 directions). Returns (damage_dealt, killed).
 
-        If the attacker has group members flanking (adjacent to) the target,
+        If the attacker has group members flanking (adjacent to the target from any direction),
         each ally grants a GROUP_ATTACK_BONUS_PER_ALLY multiplicative damage bonus.
         """
         target = self._nearest_adjacent_agent(attacker)
@@ -872,13 +871,11 @@ class CombatEnv(MultiAgentEnv):
     ) -> float:
         """Heuristic for one non-focal agent. Returns damage dealt to focal agent.
 
-        If GROUP_DAMAGE_SPLIT_ENABLED and focal has group members adjacent to it,
-        incoming damage is divided equally across focal and those shielding allies.
-        The return value is the share actually received by focal (for reward shaping).
+        Requires Chebyshev distance ≤ 1 (8 directions) for combat to engage.
         """
         ax, ay = agent.position
         fx, fy = focal.position
-        adjacent = abs(ax - fx) + abs(ay - fy) <= 1
+        adjacent = max(abs(ax - fx), abs(ay - fy)) <= 1
 
         if adjacent:
             # Same group: never attack; just forage
@@ -891,29 +888,11 @@ class CombatEnv(MultiAgentEnv):
             # Attack focal if adjacent, focal appears weaker, and agent is not very social
             if agent.strength > focal.strength * 1.1 and focal.health > 0 and agent.sociability < HEURISTIC_COLLAB_THRESHOLD:
                 damage = self._combat_damage(agent, focal, is_defending=focal_defending)
-
-                if GROUP_DAMAGE_SPLIT_ENABLED:
-                    # Allies standing next to focal absorb an equal share of the damage
-                    shields = self._adjacent_group_allies(focal_idx, focal)
-                    if shields:
-                        share = damage / (len(shields) + 1)
-                        for ally_idx in shields:
-                            ally = self._agents[ally_idx]
-                            ally.health = max(0.0, ally.health - share)
-                            ally._check_death()
-                            if not ally.alive:
-                                self._drop_inventory(ally)
-                        focal_damage = share
-                    else:
-                        focal_damage = damage
-                else:
-                    focal_damage = damage
-
-                focal.health = max(0.0, focal.health - focal_damage)
+                focal.health = max(0.0, focal.health - damage)
                 focal._check_death()
                 if not focal.alive:
                     self._drop_inventory(focal)
-                return focal_damage
+                return damage
 
         # Otherwise forage
         self._heuristic_step(agent)
@@ -934,22 +913,20 @@ class CombatEnv(MultiAgentEnv):
         return float(np.clip(raw, 0.0, COMBAT_MAX_DAMAGE))
 
     def _nearest_adjacent_agent(self, agent: Agent) -> Agent | None:
-        """Return nearest live agent within Manhattan distance 1, or None."""
+        """Return nearest live agent within Chebyshev distance 1 (8 directions), or None."""
         ax, ay = agent.position
         for other in self._agents:
             if other is agent or not other.alive:
                 continue
             ox, oy = other.position
-            if abs(ox - ax) + abs(oy - ay) <= 1:
+            if max(abs(ox - ax), abs(oy - ay)) <= 1:
                 return other
         return None
 
     def _adjacent_group_allies(self, agent_idx: int, ref: Agent) -> list[int]:
-        """Return indices of live group members of agent_idx adjacent to ref.
+        """Return indices of live group members of agent_idx within Chebyshev distance 1 of ref.
 
-        Used for two things:
-        - Attack bonus: allies flanking (adjacent to) the target grant +damage.
-        - Damage split: allies adjacent to the focal agent absorb a share of incoming damage.
+        Used for flanking: allies adjacent to the target (from any of 8 directions) grant +damage.
         """
         group = self._get_group(agent_idx)
         if group is None:
@@ -963,7 +940,7 @@ class CombatEnv(MultiAgentEnv):
             if not ally.alive:
                 continue
             ax, ay = ally.position
-            if abs(ax - rx) + abs(ay - ry) <= 1:
+            if max(abs(ax - rx), abs(ay - ry)) <= 1:
                 allies.append(ally_idx)
         return allies
 

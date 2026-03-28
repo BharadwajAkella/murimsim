@@ -28,14 +28,12 @@ const RESOURCE_COLORS = {
   mountain:  "rgba(120, 80, 40, 0.85)",   // brown
 };
 
-const SECT_COLORS = {
-  iron_fang: "#e74c3c",    // red
-  jade_lotus: "#2ecc71",   // green
-  shadow_root: "#9b59b6",  // purple
-};
+const SECT_COLORS = {};  // sects not yet implemented — all agents share AGENT_COLOR
 
 const DEAD_AGENT_COLOR = "#555";
-const AGENT_RADIUS_FRAC = 0.28; // fraction of cell size
+const AGENT_COLOR = "#a78bfa";         // unified alive-agent color (soft purple)
+const AGENT_COMBAT_COLOR = "#ef4444";  // bright red during attack or defend
+const AGENT_RADIUS_FRAC = 0.28;        // fraction of cell size
 const DEFAULT_FPS = 8;
 const MIN_FPS = 1;
 const MAX_FPS = 60;
@@ -281,10 +279,25 @@ function render() {
     // Agent dot
     ctx.beginPath();
     ctx.arc(cx, cy, agentRadius, 0, 2 * Math.PI);
-    ctx.fillStyle = agent.alive
-      ? (SECT_COLORS[agent.sect] || "#ffffff")
-      : DEAD_AGENT_COLOR;
+    const inCombat = agent.alive && (agent.action === "attack" || agent.action === "defend");
+    if (!agent.alive) {
+      ctx.fillStyle = DEAD_AGENT_COLOR;
+    } else if (inCombat) {
+      // Flash between two reds: bright on even render frames, darker on odd
+      ctx.fillStyle = (state.currentIndex % 2 === 0) ? AGENT_COMBAT_COLOR : "#b91c1c";
+    } else {
+      ctx.fillStyle = AGENT_COLOR;
+    }
     ctx.fill();
+
+    // Combat ring: extra glow when fighting
+    if (inCombat) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, agentRadius + 4, 0, 2 * Math.PI);
+      ctx.strokeStyle = AGENT_COMBAT_COLOR;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
 
     // Selection highlight
     if (agent.id === state.selectedAgentId) {
