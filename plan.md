@@ -790,16 +790,84 @@ Keep as-is; no unit changes needed.
 | Phase 2: RL Survival          | ✅ Done        | Forage + poison survival                             | Probes pass + `limbic_v1.ckpt`                         |
 | Phase 3: RL Combat            | ✅ Done        | Fight/flight w/o forgetting forage                   | Probes pass + `limbic_lstm_v2_final.zip`               |
 | Phase 4: Reward Tuning        | ✅ Done        | Strength priority, gather/eat decoupled              | LSTM v4: 74 steps, 7.3% defend, `limbic_lstm_v4_final.zip` |
-| Phase 5: Biome Environments   | 🔲 Next        | 3 distinct maps, multi-population training           | Agents in poison zone build more resistance than others |
-| Phase 6: Emergent Grouping    | ⬜ Not started | Natural alliances, shared stash, territory           | 1+ non-programmed group behavior observed in replay    |
-| Phase 7: Movable Resources    | ⬜ Not started | Agents carry/deploy hazards as weapons               | Trap-setting or resource denial observed               |
-| Phase 8: LLM Culture          | ⬜ Not started | LLM applies selection pressure on survivor traits    | Cultural drift measurable across generations           |
+| Phase 5: Group Dynamics       | 🔲 Next        | Social personality + collaboration/fight/walk-away   | Groups form naturally; social agents survive longer together |
+| Phase 6: Biome Environments   | ⬜ Not started | 3 distinct maps, multi-population training           | Agents in poison zone build more resistance than others |
+| Phase 7: Emergent Territory   | ⬜ Not started | Natural alliances, shared stash, territory           | 1+ non-programmed group behavior observed in replay    |
+| Phase 8: Movable Resources    | ⬜ Not started | Agents carry/deploy hazards as weapons               | Trap-setting or resource denial observed               |
+| Phase 9: LLM Culture          | ⬜ Not started | LLM applies selection pressure on survivor traits    | Cultural drift measurable across generations           |
 
 **Current test suite:** 74 passed, 3 skipped (as of 2026-03-28)
 **Latest checkpoint:** `checkpoints/limbic_lstm_v4/limbic_lstm_v4_final.zip`
 
-> **Design principle:** No named groups, no top-down abstractions (sects, alliances) until the behavior
-> they represent is observed emerging from the simulation. Code follows behavior, not the other way around.
+> **Design principle:** No named groups, no top-down abstractions until the behavior they represent
+> is observed emerging from the simulation. Code follows behavior, not the other way around.
+
+---
+
+## Phase 5: Group Dynamics
+
+> Goal: agents can form ad-hoc groups based on proximity and personality. No named groups — just
+> emergent coalitions that form, persist, and dissolve through agent behavior.
+
+### Social Personality Parameter
+
+Each agent has a `sociability` trait in [0.0, 1.0] (consistent with existing trait scale):
+- `1.0` = highly social — strong pull toward collaboration, shares resources readily
+- `0.0` = fully independent — prefers soloing, may tolerate others but does not initiate
+
+`sociability` is a fixed agent parameter sampled at spawn (from a per-episode distribution),
+not learned by the RL policy directly. The policy *observes* its own sociability and nearby
+agents' inferred sociability, and learns to act on it.
+
+### Encounter Decision Space
+
+When agent A enters the interaction range of agent B, both agents independently choose:
+
+| Choice | Condition favoring it |
+|---|---|
+| **Collaborate** | Both have high sociability; neither is at critical hunger |
+| **Fight** | Low sociability OR resource scarcity; one agent stronger |
+| **Walk away** | Indifference; both focused on other tasks |
+
+The decision is part of the RL action space (extend `Action` enum or use a dedicated
+interaction action). Agents signal intent; if both choose collaborate → group formed.
+
+### Group Mechanics (v1 — keep simple, tune later)
+
+- **Membership:** small flat list of agent IDs, no hierarchy yet
+- **Combat strength:** sum of individual strengths (sum of resistances + health)
+- **Resource sharing:** gathered/stolen resources divided equally among group members at end of step
+- **Group dissolution:** any member can leave at any step; group disbands when size = 1
+- **No persistent group state across episodes** — groups reform each episode from scratch
+
+### Observations
+
+Each agent's observation is extended with a small "nearby agents" vector:
+- For each agent in interaction range: [distance, inferred_sociability, group_membership_flag]
+- Already partially present in CombatEnv obs (75-dim agent channel) — extend rather than replace
+
+### Reward Additions
+
+- Small positive reward for successfully forming a group (signals coordination was achievable)
+- Group survival bonus: if all group members alive at episode end, each gets a small bonus
+- No direct resource-sharing reward — let agents discover the value of pooling through outcome
+
+### What We're Watching For
+
+The goal is NOT to hard-code alliances. We want to see:
+- Social agents gravitating toward each other without being told to
+- Groups persisting in high-threat areas (poison zones, rival encounters)
+- Independent agents surviving solo in low-competition zones
+- Any asymmetric relationship emerge (one agent leading, others following) — if it does,
+  **that** is when we add a dominance axis to the personality space
+
+### Iteration Plan
+
+This phase will run multiple training rounds before biome-maps:
+1. Add `sociability` trait + encounter action + group mechanics → train → observe
+2. Tune reward weights for group formation (too high = everyone groups; too low = nobody does)
+3. Tune resource sharing (equal split is v1; may need to weight by contribution)
+4. Only move to biome-maps when groups form naturally and persist under pressure
 
 ---
 
@@ -809,10 +877,15 @@ Keep as-is; no unit changes needed.
 
 | ID | Task | Status | Depends On |
 | -- | ---- | ------ | ---------- |
-| `biome-maps` | Create 3 env configs: poison-rich, combat-scarce, flame-varied. Each gives local stat advantage to agents who stay. | 🔲 Pending | — |
-| `multi-pop-training` | Train 3 populations in parallel, each seeded into a different biome. Warm-start from LSTM v4. | 🔲 Pending | `biome-maps` |
-| `emergence-eval` | Eval script: run mixed-population episode, log per-agent resistance by home-biome zone. Check for differentiation. | 🔲 Pending | `multi-pop-training` |
-| `v4-replay` | Generate combat replay with LSTM v4 checkpoint for visual baseline before biome training. | 🔲 Pending | — |
+| `v4-replay` | Generate combat replay with LSTM v4 checkpoint for visual baseline. | 🔲 Pending | — |
+| `sociability-trait` | Add `sociability` float [0,1] to `Agent`. Sampled at spawn. Visible in obs vector. | 🔲 Pending | — |
+| `encounter-action` | Add COLLABORATE/WALK_AWAY to action space. Extend CombatEnv encounter logic: both choose → outcome resolves. | 🔲 Pending | `sociability-trait` |
+| `group-mechanics` | Group dataclass: member list, combat-strength sum, equal resource split on gather. Dissolves when size=1. | 🔲 Pending | `encounter-action` |
+| `group-rewards` | Group formation bonus + group survival bonus. No direct sharing reward. | 🔲 Pending | `group-mechanics` |
+| `group-training-v1` | Train LSTM v5 with group dynamics. Watch for social clustering in replay. | 🔲 Pending | `group-rewards` |
+| `biome-maps` | Create 3 env configs: poison-rich, combat-scarce, flame-varied. | 🔲 Pending | `group-training-v1` |
+| `multi-pop-training` | Train 3 populations in parallel, each seeded into a different biome. | 🔲 Pending | `biome-maps` |
+| `emergence-eval` | Mixed-population eval: measure resistance by biome zone, watch group differentiation. | 🔲 Pending | `multi-pop-training` |
 
 ---
 
@@ -820,7 +893,9 @@ Keep as-is; no unit changes needed.
 
 > Theory and curriculum questions. Take these to ChatGPT/Gemini — not this repo.
 
-- Multi-agent credit assignment and group reward attribution (before Phase 6)
+- Group reward attribution: how to credit individual agents for group outcomes
+- Social vs independent personality: what behavioral signatures confirm the trait is doing work
+- When to introduce dominance/subordination axis (what observable behavior earns it)
 - When to introduce LLM culture pressure — what signal triggers the prompt?
 - Genetic drift vs learned drift: how to measure which is driving differentiation
 
