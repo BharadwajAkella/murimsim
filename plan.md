@@ -1,6 +1,8 @@
-# MurimSim — 3-Sect MVP Master Plan (Canonical 0–1 Trait Scale)
+# MurimSim — Emergent Behavior Master Plan (Canonical 0–1 Trait Scale)
 
-> A multi-agent simulation where 3 sects compete over resources in a procedural world.
+> A multi-agent simulation where agents compete over resources in a procedural world.
+> Named abstractions (groups, alliances, culture) are built **only after** the behavior they
+> represent is observed emerging from the simulation.
 > Emergent group strategies — cooperation, warfare, cultural drift — with minimal manual intervention.
 >
 > **Canonical rule:** All traits/params are floats in **[0.0, 1.0]** everywhere in code + logs.
@@ -781,18 +783,23 @@ Keep as-is; no unit changes needed.
 
 ## Progress Tracker
 
-| Phase                    | Status        | Key Milestone                                   | Exit Gate                       |
-| ------------------------ | ------------- | ----------------------------------------------- | ------------------------------- |
-| Phase 1: World           | ✅ Done        | Deterministic grid + resource registry + poison | All **9** tests pass + heatmaps                  |
-| Phase 1.5: Viewer        | ✅ Done        | Browser replay viewer + tick logger             | Logger tests pass + viewer renders recorded ticks |
-| Phase 2: RL Survival     | ✅ Done        | Forage + poison survival                        | Probes pass + `limbic_v1.ckpt`                    |
-| Phase 3: RL Combat       | ✅ Done        | Fight/flight w/o forgetting forage              | Probes pass + `limbic_v2.ckpt` + `limbic_lstm_v2.ckpt` |
-| Phase 4: Individual      | ⬜ Not started | Personality modulation                          | Determinism + monotonic tests   |
-| Phase 5: Sects + Culture | ⬜ Not started | Inheritance + LLM pressures                     | Differentiation + drift probes  |
-| Phase 6: Integration     | ⬜ Not started | Emergence observed                              | 1+ non-programmed strategy      |
+| Phase                         | Status        | Key Milestone                                        | Exit Gate                                              |
+| ----------------------------- | ------------- | ---------------------------------------------------- | ------------------------------------------------------ |
+| Phase 1: World                | ✅ Done        | Deterministic grid + resource registry + poison      | 9 tests pass + heatmaps                                |
+| Phase 1.5: Viewer             | ✅ Done        | Browser replay viewer + tick logger                  | Logger tests pass + viewer renders recorded ticks      |
+| Phase 2: RL Survival          | ✅ Done        | Forage + poison survival                             | Probes pass + `limbic_v1.ckpt`                         |
+| Phase 3: RL Combat            | ✅ Done        | Fight/flight w/o forgetting forage                   | Probes pass + `limbic_lstm_v2_final.zip`               |
+| Phase 4: Reward Tuning        | ✅ Done        | Strength priority, gather/eat decoupled              | LSTM v4: 74 steps, 7.3% defend, `limbic_lstm_v4_final.zip` |
+| Phase 5: Biome Environments   | 🔲 Next        | 3 distinct maps, multi-population training           | Agents in poison zone build more resistance than others |
+| Phase 6: Emergent Grouping    | ⬜ Not started | Natural alliances, shared stash, territory           | 1+ non-programmed group behavior observed in replay    |
+| Phase 7: Movable Resources    | ⬜ Not started | Agents carry/deploy hazards as weapons               | Trap-setting or resource denial observed               |
+| Phase 8: LLM Culture          | ⬜ Not started | LLM applies selection pressure on survivor traits    | Cultural drift measurable across generations           |
 
-**Current test suite:** 70 passed, 3 skipped (as of 2026-03-27)
-**Latest checkpoint:** `checkpoints/limbic_lstm_v2/limbic_lstm_v2_final.zip`
+**Current test suite:** 74 passed, 3 skipped (as of 2026-03-28)
+**Latest checkpoint:** `checkpoints/limbic_lstm_v4/limbic_lstm_v4_final.zip`
+
+> **Design principle:** No named groups, no top-down abstractions (sects, alliances) until the behavior
+> they represent is observed emerging from the simulation. Code follows behavior, not the other way around.
 
 ---
 
@@ -802,11 +809,10 @@ Keep as-is; no unit changes needed.
 
 | ID | Task | Status | Depends On |
 | -- | ---- | ------ | ---------- |
-| `fix-gather-eat` | Fix gather/eat reward interaction (decouple starvation from inventory shaping) | 🔲 Pending | — |
-| `lstm-v3-training` | Train LSTM v3 with decoupled signal, target gather rate >20% | 🔲 Pending | fix-gather-eat |
-| `sect-scaffold` | Scaffold 3-sect system: SectConfig, SectRegistry, 3 isolated envs | 🔲 Pending | — |
-| `multiagent-credit` | Per-agent reward tracking baseline in multi_env.py | 🔲 Pending | sect-scaffold |
-| `viewer-replay` | Verify web viewer renders LSTM v2 replay correctly | 🔲 Pending | — |
+| `biome-maps` | Create 3 env configs: poison-rich, combat-scarce, flame-varied. Each gives local stat advantage to agents who stay. | 🔲 Pending | — |
+| `multi-pop-training` | Train 3 populations in parallel, each seeded into a different biome. Warm-start from LSTM v4. | 🔲 Pending | `biome-maps` |
+| `emergence-eval` | Eval script: run mixed-population episode, log per-agent resistance by home-biome zone. Check for differentiation. | 🔲 Pending | `multi-pop-training` |
+| `v4-replay` | Generate combat replay with LSTM v4 checkpoint for visual baseline before biome training. | 🔲 Pending | — |
 
 ---
 
@@ -814,8 +820,8 @@ Keep as-is; no unit changes needed.
 
 > Theory and curriculum questions. Take these to ChatGPT/Gemini — not this repo.
 
-- Multi-agent credit assignment theory (before implementing `multiagent-credit` ticket)
-- Stage 6/7 curriculum design (when `sect-scaffold` is done)
-- Reward shaping theory for the gather/eat fix
+- Multi-agent credit assignment and group reward attribution (before Phase 6)
+- When to introduce LLM culture pressure — what signal triggers the prompt?
+- Genetic drift vs learned drift: how to measure which is driving differentiation
 
 ---
