@@ -191,6 +191,12 @@ class MultiAgentEnv(gym.Env):
         self._combat_experience = [0.0] * self._n_agents
         self._groups = []
 
+        # Reciprocity memory: _help_received[recipient][helper] = step_when_helped
+        # Cleared each episode so past-life debts don't carry over.
+        self._help_received: dict[int, dict[int, int]] = {}
+        # Per-episode step counter (for reciprocity window comparison)
+        self._ep_step_count: int = 0
+
         # Per-agent cumulative reward (individual credit assignment baseline)
         # Index = agent slot; reset each episode.
         self._ep_agent_rewards: list[float] = [0.0] * self._n_agents
@@ -241,6 +247,7 @@ class MultiAgentEnv(gym.Env):
         key = action_enum.name.lower()
         self._ep_action_counts[key] = self._ep_action_counts.get(key, 0) + 1
         self._ep_steps += 1
+        self._ep_step_count += 1
         self._ep_focal_strength_sum += focal.strength
         for i, agent in enumerate(self._agents):
             if i != self._focal_idx and agent.alive:
@@ -251,6 +258,24 @@ class MultiAgentEnv(gym.Env):
             self._world.step()
             for agent in self._agents:
                 agent.tick()
+
+        self._prune_dead_from_groups()
+
+        # Food sharing: each live agent attempts to share with critically hungry group allies
+        food_share_reward = 0.0
+        focal_idx = self._focal_idx
+        for sharer_idx in range(self._n_agents):
+            if not self._agents[sharer_idx].alive:
+                continue
+            group = self._get_group(sharer_idx)
+            if group is None:
+                continue
+            for recipient_idx in group:
+                if recipient_idx == sharer_idx:
+                    continue
+                if self._try_food_share(sharer_idx, recipient_idx):
+                    if sharer_idx == focal_idx or recipient_idx == focal_idx:
+                        food_share_reward += REWARD_FOOD_SHARE
 
         # 4. Update history for focal agent
         # Exploration reward is survival-gated: full reward when well-fed, zero when starving
@@ -272,6 +297,8 @@ class MultiAgentEnv(gym.Env):
 
         # 5. Compute reward for focal agent's action
         reward = self._compute_reward(hunger_prev, food_gathered, poison_damage, focal, exploration_reward, inv_food_prev)
+        if focal.alive:
+            reward += food_share_reward
         ema = self._reward_ema[self._focal_idx]
         self._reward_ema[self._focal_idx] = (1.0 - REWARD_EMA_ALPHA) * ema + REWARD_EMA_ALPHA * reward
 
@@ -385,6 +412,49 @@ class MultiAgentEnv(gym.Env):
             if max(abs(ox - ax), abs(oy - ay)) <= GROUP_COHESION_RANGE:
                 nearby_count += 1
         return REWARD_GROUP_COHESION_PER_ALLY * nearby_count
+
+    def _try_food_share(self, sharer_idx: int, recipient_idx: int) -> bool:
+        """Attempt to share one food unit from sharer to recipient.
+
+        Succeeds only if:
+          - Recipient is alive, in the same group as sharer, and critically hungry.
+          - Sharer has food in inventory.
+          - Reciprocity roll passes (boosted if recipient helped sharer recently).
+
+        Returns True if food was actually transferred.
+        """
+        sharer = self._agents[sharer_idx]
+        recipient = self._agents[recipient_idx]
+
+        if not (sharer.alive and recipient.alive):
+            return False
+        if self._get_group(sharer_idx) != self._get_group(recipient_idx):
+            return False
+        if self._get_group(sharer_idx) is None:
+            return False
+        if recipient.hunger < SHARE_HUNGER_THRESHOLD:
+            return False
+        if sharer.inventory.food == 0:
+            return False
+
+        # Reciprocity: did the recipient help the sharer recently?
+        last_help = self._help_received.get(sharer_idx, {}).get(recipient_idx, -RECIPROCITY_WINDOW - 1)
+        boosted = (self._ep_step_count - last_help) <= RECIPROCITY_WINDOW
+        threshold = RECIPROCITY_BOOSTED if boosted else RECIPROCITY_BASE
+
+        if self._rng.random() > threshold:
+            return False
+
+        # Transfer one food unit
+        sharer.inventory.food -= 1
+        recipient.inventory.food += 1
+
+        # Record that sharer helped recipient
+        if recipient_idx not in self._help_received:
+            self._help_received[recipient_idx] = {}
+        self._help_received[recipient_idx][sharer_idx] = self._ep_step_count
+
+        return True
 
     # ── Observation builder ───────────────────────────────────────────────────
 
@@ -647,6 +717,14 @@ REWARD_COORDINATED_ATTACK: float = 0.10
 # Sociability threshold for heuristic agents to accept a collaboration signal
 HEURISTIC_COLLAB_THRESHOLD: float = 0.5
 
+# Food sharing with reciprocity
+# A group member will attempt to share food when an ally's hunger exceeds this threshold.
+SHARE_HUNGER_THRESHOLD: float = 0.85  # ally must be critically starving to trigger share
+RECIPROCITY_BASE: float = 0.50        # base chance to share (50%)
+RECIPROCITY_BOOSTED: float = 0.85     # boosted chance if ally helped me recently (85%)
+RECIPROCITY_WINDOW: int = 100         # steps within which past help is remembered
+REWARD_FOOD_SHARE: float = 0.04       # reward focal receives when it shares or is shared with
+
 # Group combat mechanics
 # Combat requires attacker and target to be within Chebyshev distance 1 (8 directions incl. diagonals)
 # Attack bonus: +X% damage per group member flanking from any of the 8 surrounding cells
@@ -751,6 +829,7 @@ class CombatEnv(MultiAgentEnv):
         key = action_enum.name.lower()
         self._ep_action_counts[key] = self._ep_action_counts.get(key, 0) + 1
         self._ep_steps += 1
+        self._ep_step_count += 1
         self._ep_focal_strength_sum += focal.strength
 
         if action_enum in MOVE_DELTAS:
@@ -778,6 +857,24 @@ class CombatEnv(MultiAgentEnv):
 
         # Remove dead agents from any groups
         self._prune_dead_from_groups()
+
+        # Food sharing: each live agent attempts to share with critically hungry group allies.
+        # Focal agent gets a reward signal; heuristic agents share silently.
+        food_share_reward = 0.0
+        focal_idx = self._focal_idx
+        for sharer_idx in range(self._n_agents):
+            if not self._agents[sharer_idx].alive:
+                continue
+            group = self._get_group(sharer_idx)
+            if group is None:
+                continue
+            for recipient_idx in group:
+                if recipient_idx == sharer_idx:
+                    continue
+                if self._try_food_share(sharer_idx, recipient_idx):
+                    # Focal gets reward if it shared OR if it was the recipient
+                    if sharer_idx == focal_idx or recipient_idx == focal_idx:
+                        food_share_reward += REWARD_FOOD_SHARE
 
         # 4. Update history for focal agent
         # Exploration reward is survival-gated: full reward when well-fed, zero when starving
@@ -815,6 +912,9 @@ class CombatEnv(MultiAgentEnv):
         # Coordinated attack: bonus when focal attacks with a flanking group ally
         if flanking_bonus_earned and focal.alive:
             reward += REWARD_COORDINATED_ATTACK
+        # Food sharing: reward focal for participating in mutual aid
+        if focal.alive:
+            reward += food_share_reward
         ema = self._reward_ema[self._focal_idx]
         self._reward_ema[self._focal_idx] = (1.0 - REWARD_EMA_ALPHA) * ema + REWARD_EMA_ALPHA * reward
 

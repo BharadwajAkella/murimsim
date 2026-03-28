@@ -456,3 +456,90 @@ def test_coordinated_attack_reward() -> None:
     assert reward >= REWARD_COORDINATED_ATTACK * 0.5, (
         f"Expected coordinated attack bonus in reward, got {reward:.4f}"
     )
+
+
+def test_food_share_transfers_food() -> None:
+    """_try_food_share must transfer food and record the help when conditions are met."""
+    from murimsim.rl.multi_env import (
+        SHARE_HUNGER_THRESHOLD, RECIPROCITY_BASE, RECIPROCITY_WINDOW, REWARD_FOOD_SHARE,
+    )
+
+    env = _make_combat_env(n_agents=2, seed=3)
+
+    focal_idx = env._focal_idx
+    focal = env._agents[focal_idx]
+    ally_idx = [i for i in range(env._n_agents) if i != focal_idx][0]
+    ally = env._agents[ally_idx]
+
+    # Form a group
+    env._form_group(focal_idx, ally_idx)
+
+    # Make focal critically hungry (recipient), ally has food to share
+    focal.hunger = SHARE_HUNGER_THRESHOLD + 0.05
+    ally.inventory.food = 3
+    focal.inventory.food = 0
+
+    # Force reciprocity to always pass: seed(2) first draw ≈ 0.26 < RECIPROCITY_BASE(0.5)
+    import numpy as np
+    env._rng = np.random.default_rng(2)
+
+    shared = env._try_food_share(ally_idx, focal_idx)
+    assert shared, "Should have shared food when ally is critically hungry"
+    assert ally.inventory.food == 2, "Sharer lost one food unit"
+    assert focal.inventory.food == 1, "Recipient gained one food unit"
+    assert env._help_received.get(focal_idx, {}).get(ally_idx) == 0, (
+        "Help record should be at ep_step_count=0"
+    )
+
+
+def test_food_share_boosted_reciprocity() -> None:
+    """Reciprocity boost: if ally helped focal recently, share chance rises to RECIPROCITY_BOOSTED."""
+    from murimsim.rl.multi_env import (
+        SHARE_HUNGER_THRESHOLD, RECIPROCITY_WINDOW,
+    )
+    import numpy as np
+
+    env = _make_combat_env(n_agents=2, seed=5)
+
+    focal_idx = env._focal_idx
+    focal = env._agents[focal_idx]
+    ally_idx = [i for i in range(env._n_agents) if i != focal_idx][0]
+    ally = env._agents[ally_idx]
+
+    env._form_group(focal_idx, ally_idx)
+    focal.hunger = SHARE_HUNGER_THRESHOLD + 0.05
+    ally.inventory.food = 5
+    focal.inventory.food = 0
+
+    # Record that ally helped focal 10 steps ago (within window)
+    env._help_received[ally_idx] = {focal_idx: env._ep_step_count - 10}
+
+    # With boosted reciprocity (0.85), a rng value of 0.84 should pass
+    # We force the rng to return 0.84 by overriding with a controlled sequence
+    class _MockRng:
+        def random(self): return 0.84
+        def integers(self, lo, hi): return lo
+
+    env._rng = _MockRng()  # type: ignore[assignment]
+    shared = env._try_food_share(ally_idx, focal_idx)
+    assert shared, "Boosted reciprocity should pass at 0.84 threshold"
+
+
+def test_food_share_no_share_when_not_in_group() -> None:
+    """_try_food_share must not transfer food between agents not in a group."""
+    from murimsim.rl.multi_env import SHARE_HUNGER_THRESHOLD
+
+    env = _make_combat_env(n_agents=2, seed=7)
+
+    focal_idx = env._focal_idx
+    focal = env._agents[focal_idx]
+    ally_idx = [i for i in range(env._n_agents) if i != focal_idx][0]
+    ally = env._agents[ally_idx]
+
+    # No group formed
+    focal.hunger = SHARE_HUNGER_THRESHOLD + 0.05
+    ally.inventory.food = 3
+
+    shared = env._try_food_share(ally_idx, focal_idx)
+    assert not shared, "Should not share food without a group"
+    assert ally.inventory.food == 3, "Sharer food should be unchanged"
