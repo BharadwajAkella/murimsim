@@ -199,6 +199,7 @@ class MultiAgentEnv(gym.Env):
         # Episode-level action counts for dashboard metrics (focal agent only)
         self._ep_action_counts: dict[str, int] = {}
         self._ep_steps: int = 0
+        self._ep_focal_strength_sum: float = 0.0  # sum of focal agent's strength each step
         # Hazard approach/flee counters (reset each episode)
         self._ep_hazard_approaches: dict[str, int] = {h: 0 for h in HAZARD_RESOURCE_IDS}
         self._ep_hazard_flees: dict[str, int] = {h: 0 for h in HAZARD_RESOURCE_IDS}
@@ -240,8 +241,7 @@ class MultiAgentEnv(gym.Env):
         key = action_enum.name.lower()
         self._ep_action_counts[key] = self._ep_action_counts.get(key, 0) + 1
         self._ep_steps += 1
-
-        # 2. Heuristic step for all non-focal alive agents
+        self._ep_focal_strength_sum += focal.strength
         for i, agent in enumerate(self._agents):
             if i != self._focal_idx and agent.alive:
                 self._heuristic_step(agent)
@@ -302,6 +302,9 @@ class MultiAgentEnv(gym.Env):
         }
         if terminated:
             info["ep_lifespan"] = self._ep_steps
+            info["ep_avg_strength"] = (
+                self._ep_focal_strength_sum / self._ep_steps if self._ep_steps > 0 else 0.0
+            )
             # Per-agent credit assignment data: cumulative and mean reward per slot
             info["ep_agent_rewards"] = list(self._ep_agent_rewards)
             info["ep_agent_steps"] = list(self._ep_agent_steps)
@@ -738,6 +741,7 @@ class CombatEnv(MultiAgentEnv):
         key = action_enum.name.lower()
         self._ep_action_counts[key] = self._ep_action_counts.get(key, 0) + 1
         self._ep_steps += 1
+        self._ep_focal_strength_sum += focal.strength
 
         if action_enum in MOVE_DELTAS:
             for h in HAZARD_RESOURCE_IDS:
@@ -828,6 +832,9 @@ class CombatEnv(MultiAgentEnv):
         }
         if terminated:
             info["ep_lifespan"] = self._ep_steps
+            info["ep_avg_strength"] = (
+                self._ep_focal_strength_sum / self._ep_steps if self._ep_steps > 0 else 0.0
+            )
             info["ep_agent_rewards"] = list(self._ep_agent_rewards)
             info["ep_agent_steps"] = list(self._ep_agent_steps)
             info["ep_agent_mean_reward"] = [

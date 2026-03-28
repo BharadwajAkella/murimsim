@@ -331,6 +331,7 @@
             <th>Phase</th>
             <th>Steps</th>
             <th>Avg Lifespan</th>
+            <th>Avg Strength</th>
             <th>Gather %</th>
             <th>Eat %</th>
             <th>Defend %</th>
@@ -598,6 +599,7 @@
             ? `${fmtSteps(live.timestep)} / ${fmtSteps(live.total_timesteps)}`
             : fmtSteps(live.timestep ?? s.steps_trained),
           avg_lifespan:    live.avg_lifespan    ?? s.avg_lifespan,
+          avg_strength:    live.avg_strength    ?? s.avg_strength,
           gather_rate_pct: rates.gather != null ? +(rates.gather * 100).toFixed(1) : s.gather_rate_pct,
           eat_rate_pct:    rates.eat    != null ? +(rates.eat    * 100).toFixed(1) : s.eat_rate_pct,
           defend_rate_pct: rates.defend != null ? +(rates.defend * 100).toFixed(1) : s.defend_rate_pct,
@@ -621,6 +623,7 @@
             <td style="color:var(--muted);font-size:12px">${s.phase}</td>
             <td>${stepsDisplay}</td>
             <td>${fmtLife(s)} ${prev ? delta(toSteps(s), toSteps(prev), 1) : ""}</td>
+            <td>${s.avg_strength != null ? s.avg_strength.toFixed(3) : "—"} ${prev && prev.avg_strength != null && s.avg_strength != null ? delta(s.avg_strength, prev.avg_strength, 1) : ""}</td>
             <td>${fmtPct(s.gather_rate_pct)} ${prev ? delta(s.gather_rate_pct, prev.gather_rate_pct, 1) : ""}</td>
             <td>${fmtPct(s.eat_rate_pct)} ${prev ? delta(s.eat_rate_pct, prev.eat_rate_pct, -1) : ""}</td>
             <td>${fmtPct(s.defend_rate_pct)} ${prev ? delta(s.defend_rate_pct, prev.defend_rate_pct, 1) : ""}</td>
@@ -641,6 +644,7 @@
         const stepsVal = toSteps(s);
         const miniMetrics = [
           { label: "Lifespan", val: stepsVal != null ? `~${stepsVal.toFixed(0)} stp` : "—" },
+          { label: "Strength", val: s.avg_strength != null ? s.avg_strength.toFixed(3) : "—" },
           { label: "Gather", val: fmtPct(s.gather_rate_pct) },
           { label: "Eat", val: fmtPct(s.eat_rate_pct) },
           { label: "Defend", val: fmtPct(s.defend_rate_pct) },

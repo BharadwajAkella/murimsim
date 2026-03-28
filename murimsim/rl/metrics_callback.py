@@ -60,6 +60,7 @@ class MetricsDashboardCallback(BaseCallback):
         # Rolling buffers — each entry is one completed episode
         self._lifespans: deque[float] = deque(maxlen=_ROLLING_WINDOW)
         self._f_metrics: deque[float] = deque(maxlen=_ROLLING_WINDOW)
+        self._strengths: deque[float] = deque(maxlen=_ROLLING_WINDOW)
         # action_rates: deque of dicts
         self._action_rates: deque[dict[str, float]] = deque(maxlen=_ROLLING_WINDOW)
         # hazard behaviour
@@ -100,6 +101,8 @@ class MetricsDashboardCallback(BaseCallback):
         """Extract metrics from a terminal episode info dict."""
         if "ep_lifespan" in info:
             self._lifespans.append(float(info["ep_lifespan"]))
+        if "ep_avg_strength" in info:
+            self._strengths.append(float(info["ep_avg_strength"]))
         if "f_metric" in info:
             self._f_metrics.append(float(info["f_metric"]))
         if "ep_action_rates" in info:
@@ -173,6 +176,7 @@ class MetricsDashboardCallback(BaseCallback):
             "rolling_window": _ROLLING_WINDOW,
             "avg_lifespan": self._rolling_mean(self._lifespans),
             "avg_f_metric": self._rolling_mean(self._f_metrics),
+            "avg_strength": self._rolling_mean(self._strengths),
             "avg_action_rates": {k: round(v, 4) for k, v in avg_action_rates.items()},
             "avg_hazard_approaches": {k: round(v, 2) for k, v in avg_hazard_approaches.items()},
             "avg_hazard_flees": {k: round(v, 2) for k, v in avg_hazard_flees.items()},
