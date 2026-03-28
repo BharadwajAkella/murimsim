@@ -63,6 +63,9 @@ class Agent:
         strength:         Combat strength in [0, 1].
         adventure_spirit: Curiosity / exploration drive in [0, 1]. Scales the
                           intrinsic reward for visiting new tiles.
+        sociability:      Social personality in [0, 1]. 0 = fully independent,
+                          1 = highly social. Influences collaborate/fight/walk-away
+                          decisions when two agents are in range of each other.
         resistances:      Per-stat resistance values in [0, 1]. Keys: "poison",
                           "flame", "qi_drain", etc. Higher = more resistant.
         inventory:        Carried resources.
@@ -75,6 +78,7 @@ class Agent:
     hunger: float
     strength: float
     adventure_spirit: float = 0.5   # default mid-range; overridden by spawn()
+    sociability: float = 0.5        # [0, 1]: 0 = fully independent, 1 = highly social
     resistances: dict[str, float] = dataclasses.field(default_factory=dict)
     inventory: AgentInventory = dataclasses.field(default_factory=AgentInventory)
     alive: bool = True
@@ -114,6 +118,8 @@ class Agent:
         str_max = float(agent_cfg.get("strength_max",           0.8))
         as_min  = float(agent_cfg.get("adventure_spirit_min",   0.1))
         as_max  = float(agent_cfg.get("adventure_spirit_max",   0.9))
+        soc_min = float(agent_cfg.get("sociability_min",        0.1))
+        soc_max = float(agent_cfg.get("sociability_max",        0.9))
 
         return cls(
             agent_id=agent_id,
@@ -122,6 +128,7 @@ class Agent:
             hunger=0.0,
             strength=         float(np.clip(rng.uniform(str_min, str_max), 0.0, 1.0)),
             adventure_spirit= float(np.clip(rng.uniform(as_min,  as_max),  0.0, 1.0)),
+            sociability=      float(np.clip(rng.uniform(soc_min, soc_max), 0.0, 1.0)),
             resistances={
                 "poison":   float(np.clip(rng.uniform(pr_min, pr_max), 0.0, 1.0)),
                 "flame":    float(np.clip(rng.uniform(fr_min, fr_max), 0.0, 1.0)),
@@ -295,6 +302,7 @@ class Agent:
             "resistances": {k: round(v, 4) for k, v in self.resistances.items()},
             "intakes": {k: round(v, 4) for k, v in self._intakes.items()},
             "adventure_spirit": round(self.adventure_spirit, 4),
+            "sociability": round(self.sociability, 4),
             "action": action,
             "action_detail": action_detail,
             "alive": self.alive,

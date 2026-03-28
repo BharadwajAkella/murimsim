@@ -7,19 +7,22 @@ remaining agents follow a simple heuristic, then the focal index advances.
 This design keeps the standard gym.Env interface so the env works directly
 with SB3 PPO through DummyVecEnv / SubprocVecEnv.
 
-Observation layout (Phase 3b onwards — 234 floats total):
+Observation layout (Phase 5 — 261 floats total):
     [0:100]   5×5 local grid × 4 resource channels  (food, qi, materials, poison)
-    [100:175] 5×5 local grid × 3 agent channels     (agent_present, health, strength)
-    [175:225] 5×5 local grid × 2 stash channels     (my_stash, enemy_stash)
-    [225:234] Self stats × 9:
+    [100:200] 5×5 local grid × 4 agent channels     (agent_present, health, strength, sociability)
+    [200:250] 5×5 local grid × 2 stash channels     (my_stash, enemy_stash)
+    [250:261] Self stats × 11:
                 health, hunger, inv_food, inv_poison,
                 poison_resistance, poison_intake,
-                combat_experience,      # Phase 3c: fights survived / 100, else 0
+                combat_experience,      # fights survived / 100
                 terrain_familiarity,    # ticks near food / TERRAIN_FAM_SCALE, capped 1.0
-                recent_reward_ema       # EMA of per-step rewards, normalised to [0,1]
+                recent_reward_ema,      # EMA of per-step rewards, normalised to [0,1]
+                sociability,            # own personality trait
+                in_group                # 1.0 if currently in a group, 0.0 otherwise
 
 Action space (Phase 3b): Discrete(7) — same as SurvivalEnv
 Action space (Phase 3c): Discrete(9) — adds ATTACK, DEFEND
+Action space (Phase 5):  Discrete(14) — adds COLLABORATE, WALK_AWAY
 """
 from __future__ import annotations
 
@@ -30,7 +33,7 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
-from murimsim.actions import Action, MOVE_DELTAS, N_ACTIONS_PHASE2, N_ACTIONS_PHASE3
+from murimsim.actions import Action, MOVE_DELTAS, N_ACTIONS_PHASE2, N_ACTIONS_PHASE3, N_ACTIONS_PHASE5
 from murimsim.agent import Agent
 from murimsim.stash import StashRegistry
 from murimsim.world import World
@@ -39,15 +42,15 @@ from murimsim.world import World
 OBS_VIEW_SIZE: int = 5
 
 OBS_N_RESOURCE_CH: int = 4          # food, qi, materials, poison
-OBS_N_AGENT_CH: int = 3             # agent_present, agent_health, agent_strength
+OBS_N_AGENT_CH: int = 4             # agent_present, agent_health, agent_strength, agent_sociability
 OBS_N_STASH_CH: int = 2             # my_stash, enemy_stash
 OBS_CHANNEL_ORDER: list[str] = ["food", "qi", "materials", "poison"]
 
 OBS_RESOURCE_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_RESOURCE_CH  # 100
-OBS_AGENT_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_AGENT_CH        # 75
+OBS_AGENT_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_AGENT_CH        # 100
 OBS_STASH_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_STASH_CH        # 50
-OBS_STATS_SIZE: int = 9  # health, hunger, inv_food, inv_poison, pr, pi, combat_exp, terrain_fam, reward_ema
-OBS_TOTAL_SIZE: int = OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE + OBS_STASH_GRID_SIZE + OBS_STATS_SIZE  # 234
+OBS_STATS_SIZE: int = 11  # health, hunger, inv_food, inv_poison, pr, pi, combat_exp, terrain_fam, reward_ema, sociability, in_group
+OBS_TOTAL_SIZE: int = OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE + OBS_STASH_GRID_SIZE + OBS_STATS_SIZE  # 261
 
 # ── History signal constants ──────────────────────────────────────────────────
 TERRAIN_FAM_SCALE: float = 200.0   # ticks_near_food / SCALE → [0, 1]
@@ -129,6 +132,10 @@ class MultiAgentEnv(gym.Env):
         self._focal_idx: int = 0
         self._stash_registry: StashRegistry = StashRegistry()
 
+        # Active groups: each entry is a frozenset of agent indices. An agent
+        # belongs to at most one group. Groups dissolve when size drops to 1.
+        self._groups: list[frozenset[int]] = []
+
         # Per-agent history state (reset each episode)
         self._visited_tiles: list[set[tuple[int, int]]] = []
         self._ticks_near_food: list[float] = []
@@ -182,6 +189,7 @@ class MultiAgentEnv(gym.Env):
         self._ticks_near_food = [0.0] * self._n_agents
         self._reward_ema = [0.0] * self._n_agents
         self._combat_experience = [0.0] * self._n_agents
+        self._groups = []
 
         # Per-agent cumulative reward (individual credit assignment baseline)
         # Index = agent slot; reset each episode.
@@ -306,6 +314,52 @@ class MultiAgentEnv(gym.Env):
     def render(self) -> None:
         pass  # Rendering handled by web viewer
 
+    # ── Group helpers ─────────────────────────────────────────────────────────
+
+    def _get_group(self, agent_idx: int) -> frozenset[int] | None:
+        """Return the group the agent belongs to, or None if solo."""
+        for g in self._groups:
+            if agent_idx in g:
+                return g
+        return None
+
+    def _form_group(self, idx_a: int, idx_b: int) -> None:
+        """Merge two agents (or their groups) into one group."""
+        group_a = self._get_group(idx_a)
+        group_b = self._get_group(idx_b)
+        members: set[int] = set()
+        if group_a is not None:
+            self._groups.remove(group_a)
+            members.update(group_a)
+        else:
+            members.add(idx_a)
+        if group_b is not None:
+            self._groups.remove(group_b)
+            members.update(group_b)
+        else:
+            members.add(idx_b)
+        self._groups.append(frozenset(members))
+
+    def _leave_group(self, agent_idx: int) -> None:
+        """Remove an agent from its group; dissolve group if only 1 member remains."""
+        group = self._get_group(agent_idx)
+        if group is None:
+            return
+        self._groups.remove(group)
+        remaining = group - {agent_idx}
+        if len(remaining) > 1:
+            self._groups.append(frozenset(remaining))
+
+    def _prune_dead_from_groups(self) -> None:
+        """Remove dead agents from all groups; dissolve groups that become size ≤ 1."""
+        alive_set = {i for i, a in enumerate(self._agents) if a.alive}
+        new_groups: list[frozenset[int]] = []
+        for g in self._groups:
+            pruned = g & alive_set
+            if len(pruned) >= 2:
+                new_groups.append(frozenset(pruned))
+        self._groups = new_groups
+
     # ── Observation builder ───────────────────────────────────────────────────
 
     def _build_obs(self, agent_idx: int) -> np.ndarray:
@@ -334,7 +388,7 @@ class MultiAgentEnv(gym.Env):
         resource_window[gy0:gy0 + (y1 - y0), gx0:gx0 + (x1 - x0), :] = grid_stack[y0:y1, x0:x1, :]
         flat_resources = resource_window.reshape(-1)  # 100
 
-        # Agent channels (agent_present, agent_health, agent_strength)
+        # Agent channels (agent_present, agent_health, agent_strength, agent_sociability)
         agent_window = np.zeros((OBS_VIEW_SIZE, OBS_VIEW_SIZE, OBS_N_AGENT_CH), dtype=np.float32)
         for i, other in enumerate(self._agents):
             if i == agent_idx or not other.alive:
@@ -343,10 +397,11 @@ class MultiAgentEnv(gym.Env):
             wx = (ox - ax) + half
             wy = (oy - ay) + half
             if 0 <= wx < OBS_VIEW_SIZE and 0 <= wy < OBS_VIEW_SIZE:
-                agent_window[wy, wx, 0] = max(agent_window[wy, wx, 0], 1.0)          # present
-                agent_window[wy, wx, 1] = max(agent_window[wy, wx, 1], other.health)  # health
-                agent_window[wy, wx, 2] = max(agent_window[wy, wx, 2], other.strength)  # strength
-        flat_agents = agent_window.reshape(-1)  # 75
+                agent_window[wy, wx, 0] = max(agent_window[wy, wx, 0], 1.0)                  # present
+                agent_window[wy, wx, 1] = max(agent_window[wy, wx, 1], other.health)          # health
+                agent_window[wy, wx, 2] = max(agent_window[wy, wx, 2], other.strength)        # strength
+                agent_window[wy, wx, 3] = max(agent_window[wy, wx, 3], other.sociability)     # sociability
+        flat_agents = agent_window.reshape(-1)  # 100
 
         # Stash channels (my_stash, enemy_stash)
         stash_window = np.zeros((OBS_VIEW_SIZE, OBS_VIEW_SIZE, OBS_N_STASH_CH), dtype=np.float32)
@@ -361,12 +416,13 @@ class MultiAgentEnv(gym.Env):
                     stash_window[wy, wx, 1] = 1.0 if enemy else 0.0
         flat_stashes = stash_window.reshape(-1)  # 50
 
-        # Self stats (9 values)
+        # Self stats (11 values)
         inv = agent.inventory
         terrain_fam = min(1.0, self._ticks_near_food[agent_idx] / TERRAIN_FAM_SCALE)
         raw_ema = self._reward_ema[agent_idx]
         reward_ema_norm = float(np.clip(0.5 + raw_ema / (2.0 * REWARD_EMA_SCALE), 0.0, 1.0))
         combat_exp = min(1.0, self._combat_experience[agent_idx] / 100.0)
+        in_group = 1.0 if self._get_group(agent_idx) is not None else 0.0
 
         stats = np.array([
             agent.health,
@@ -378,6 +434,8 @@ class MultiAgentEnv(gym.Env):
             combat_exp,
             terrain_fam,
             reward_ema_norm,
+            agent.sociability,
+            in_group,
         ], dtype=np.float32)
 
         return np.concatenate([flat_resources, flat_agents, flat_stashes, stats])
@@ -550,6 +608,10 @@ COMBAT_MAX_DAMAGE: float = 0.5
 
 REWARD_DEFEAT_OPPONENT: float = 0.3
 REWARD_DAMAGE_TAKEN_SCALE: float = -0.2
+REWARD_GROUP_FORMATION: float = 0.05   # small bonus when bilateral COLLABORATE succeeds
+
+# Sociability threshold for heuristic agents to accept a collaboration signal
+HEURISTIC_COLLAB_THRESHOLD: float = 0.5
 
 # Curriculum: combat probability ramps from START → END over RAMP_STEPS global steps
 CURRICULUM_START_PROB: float = 0.2
@@ -588,7 +650,7 @@ class CombatEnv(MultiAgentEnv):
             n_agents=n_agents,
             seed=seed,
             render_mode=render_mode,
-            n_actions=N_ACTIONS_PHASE3,
+            n_actions=N_ACTIONS_PHASE5,
         )
         self._curriculum_ramp_steps: int = curriculum_ramp_steps
         self._global_step_count: int = 0  # persists across episodes
@@ -621,6 +683,7 @@ class CombatEnv(MultiAgentEnv):
         damage_dealt = 0.0
         defeat_bonus = 0.0
         focal_defending = (action_enum == Action.DEFEND)
+        group_formed = False
 
         # Snapshot hazard distances before the action for approach/flee tracking
         prev_pos = focal.position
@@ -632,6 +695,10 @@ class CombatEnv(MultiAgentEnv):
             defeat_bonus = REWARD_DEFEAT_OPPONENT if defeated else 0.0
         elif action_enum == Action.DEFEND:
             focal.rest()  # defending = hold ground + minor health recovery
+        elif action_enum == Action.COLLABORATE:
+            group_formed = self._try_collaborate(self._focal_idx)
+        elif action_enum == Action.WALK_AWAY:
+            self._walk_away(focal)
         else:
             food_gathered, poison_damage = self._apply_action(focal, action_enum)
 
@@ -663,6 +730,9 @@ class CombatEnv(MultiAgentEnv):
             for agent in self._agents:
                 agent.tick()
 
+        # Remove dead agents from any groups
+        self._prune_dead_from_groups()
+
         # 4. Update history for focal agent
         # Exploration reward is survival-gated: full reward when well-fed, zero when starving
         exploration_reward = 0.0
@@ -685,12 +755,14 @@ class CombatEnv(MultiAgentEnv):
         if damage_taken > 0 and focal.alive:
             self._combat_experience[self._focal_idx] += 1.0
 
-        # 6. Compute reward
+        # 6. Compute reward (group formation bonus added on top)
         reward = self._compute_combat_reward(
             hunger_prev, food_gathered, poison_damage, focal,
             exploration_reward, damage_dealt, damage_taken, defeat_bonus,
             inv_food_prev,
         )
+        if group_formed:
+            reward += REWARD_GROUP_FORMATION
         ema = self._reward_ema[self._focal_idx]
         self._reward_ema[self._focal_idx] = (1.0 - REWARD_EMA_ALPHA) * ema + REWARD_EMA_ALPHA * reward
 
@@ -752,14 +824,22 @@ class CombatEnv(MultiAgentEnv):
         fx, fy = focal.position
         adjacent = abs(ax - fx) + abs(ay - fy) <= 1
 
-        # Attack focal if adjacent and focal appears weaker
-        if adjacent and agent.strength > focal.strength * 1.1 and focal.health > 0:
-            damage = self._combat_damage(agent, focal, is_defending=focal_defending)
-            focal.health = max(0.0, focal.health - damage)
-            focal._check_death()
-            if not focal.alive:
-                self._drop_inventory(focal)
-            return damage
+        if adjacent:
+            # Same group: never attack; just forage
+            agent_idx = self._agents.index(agent)
+            focal_idx = self._focal_idx
+            if self._get_group(agent_idx) is not None and self._get_group(agent_idx) == self._get_group(focal_idx):
+                self._heuristic_step(agent)
+                return 0.0
+
+            # Attack focal if adjacent and focal appears weaker and agent is not very social
+            if agent.strength > focal.strength * 1.1 and focal.health > 0 and agent.sociability < HEURISTIC_COLLAB_THRESHOLD:
+                damage = self._combat_damage(agent, focal, is_defending=focal_defending)
+                focal.health = max(0.0, focal.health - damage)
+                focal._check_death()
+                if not focal.alive:
+                    self._drop_inventory(focal)
+                return damage
 
         # Otherwise forage
         self._heuristic_step(agent)
@@ -789,6 +869,46 @@ class CombatEnv(MultiAgentEnv):
             if abs(ox - ax) + abs(oy - ay) <= 1:
                 return other
         return None
+
+    def _try_collaborate(self, focal_idx: int) -> bool:
+        """Attempt to form a group with the nearest adjacent agent.
+
+        Succeeds if the neighbour's sociability meets the collaboration threshold.
+        Returns True if a new group was formed.
+        """
+        focal = self._agents[focal_idx]
+        neighbour = self._nearest_adjacent_agent(focal)
+        if neighbour is None:
+            return False
+        neighbour_idx = self._agents.index(neighbour)
+        # Already in the same group — collaboration already established
+        if (self._get_group(focal_idx) is not None
+                and self._get_group(focal_idx) == self._get_group(neighbour_idx)):
+            return False
+        # Form a group only if the neighbour is also social enough
+        if neighbour.sociability >= HEURISTIC_COLLAB_THRESHOLD:
+            self._form_group(focal_idx, neighbour_idx)
+            return True
+        return False
+
+    def _walk_away(self, agent: Agent) -> None:
+        """Move one step away from the nearest adjacent agent.
+
+        Direction is the opposite of the vector toward that agent.
+        No-op if no adjacent agent exists.
+        """
+        neighbour = self._nearest_adjacent_agent(agent)
+        if neighbour is None:
+            return
+        ax, ay = agent.position
+        nx, ny = neighbour.position
+        dx = ax - nx  # direction away from neighbour
+        dy = ay - ny
+        # Normalise to unit step (prioritise larger axis; ties: prefer x)
+        if abs(dx) >= abs(dy):
+            agent.move(1 if dx > 0 else -1, 0, self._world.grid_size)
+        else:
+            agent.move(0, 1 if dy > 0 else -1, self._world.grid_size)
 
     def _drop_inventory(self, agent: Agent) -> None:
         """Drop dead agent's food inventory onto its tile (if tile is empty)."""

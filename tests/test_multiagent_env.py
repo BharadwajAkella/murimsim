@@ -1,10 +1,10 @@
 """Tests for Phase 3b: multi-agent coexistence environment.
 
 Validates that:
-  1. The extended observation (234 floats) includes agent channels correctly.
+  1. The extended observation (261 floats) includes agent channels correctly.
   2. Agent deaths drop their inventory onto the world tile.
   3. 10 agents can run for 1000 steps without crashing.
-  4. Observation size is exactly 234.
+  4. Observation size is exactly 261.
 """
 from __future__ import annotations
 
@@ -33,20 +33,20 @@ def _make_env(n_agents: int = 3, seed: int = 0) -> MultiAgentEnv:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: observation size is exactly 234
+# Test 1: observation size is exactly 261
 # ---------------------------------------------------------------------------
 
 def test_agent_obs_size() -> None:
-    """Obs vector must be exactly OBS_TOTAL_SIZE (234) floats."""
+    """Obs vector must be exactly OBS_TOTAL_SIZE (261) floats."""
     assert OBS_RESOURCE_GRID_SIZE == 100, f"Expected 100, got {OBS_RESOURCE_GRID_SIZE}"
-    assert OBS_AGENT_GRID_SIZE == 75, f"Expected 75, got {OBS_AGENT_GRID_SIZE}"
+    assert OBS_AGENT_GRID_SIZE == 100, f"Expected 100, got {OBS_AGENT_GRID_SIZE}"
     assert OBS_STASH_GRID_SIZE == 50, f"Expected 50, got {OBS_STASH_GRID_SIZE}"
-    assert OBS_STATS_SIZE == 9, f"Expected 9, got {OBS_STATS_SIZE}"
-    assert OBS_TOTAL_SIZE == 234, f"Expected 234, got {OBS_TOTAL_SIZE}"
+    assert OBS_STATS_SIZE == 11, f"Expected 11, got {OBS_STATS_SIZE}"
+    assert OBS_TOTAL_SIZE == 261, f"Expected 261, got {OBS_TOTAL_SIZE}"
 
     env = _make_env(n_agents=5)
     obs, _ = env.reset(seed=0)
-    assert obs.shape == (234,), f"Expected obs shape (234,), got {obs.shape}"
+    assert obs.shape == (261,), f"Expected obs shape (261,), got {obs.shape}"
     assert obs.dtype == np.float32
     assert np.all(np.isfinite(obs)), "Obs contains non-finite values"
 
@@ -56,7 +56,7 @@ def test_agent_obs_size() -> None:
 # ---------------------------------------------------------------------------
 
 def test_obs_includes_nearby_agents() -> None:
-    """Agent channels [100:175] must be nonzero when other agents are nearby."""
+    """Agent channels [100:200] must be nonzero when other agents are nearby."""
     env = _make_env(n_agents=5, seed=42)
     obs, _ = env.reset(seed=42)
 
@@ -135,3 +135,148 @@ def test_multiple_agents_coexist() -> None:
             resets += 1
     # Some resets are expected (agents die); just make sure it doesn't blow up
     assert resets >= 0  # trivially true — just ensuring no exception was raised
+
+
+# ---------------------------------------------------------------------------
+# Test 5: sociability trait on Agent
+# ---------------------------------------------------------------------------
+
+def test_sociability_trait_in_spawn() -> None:
+    """Agent.spawn() must populate sociability in [0, 1]."""
+    import yaml
+    from pathlib import Path
+    from murimsim.agent import Agent
+
+    cfg_path = Path("config/default.yaml")
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+    rng = np.random.default_rng(0)
+    for i in range(20):
+        agent = Agent.spawn(f"a{i}", (0, 0), rng, cfg)
+        assert 0.0 <= agent.sociability <= 1.0, f"sociability out of range: {agent.sociability}"
+
+
+def test_sociability_in_obs() -> None:
+    """Own sociability must appear as the 10th stat (index 250) in the obs vector."""
+    from murimsim.rl.multi_env import OBS_RESOURCE_GRID_SIZE, OBS_AGENT_GRID_SIZE, OBS_STASH_GRID_SIZE
+
+    env = _make_env(n_agents=3, seed=7)
+    env.reset(seed=7)
+    focal = env._agents[env._focal_idx]
+    obs = env._build_obs(env._focal_idx)
+    stats_start = OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE + OBS_STASH_GRID_SIZE
+    sociability_in_obs = obs[stats_start + 9]  # index 9 in stats
+    assert abs(sociability_in_obs - focal.sociability) < 1e-5, (
+        f"Obs sociability {sociability_in_obs} != agent sociability {focal.sociability}"
+    )
+
+
+def test_sociability_in_replay_dict() -> None:
+    """Agent.to_replay_dict() must include 'sociability' key."""
+    from murimsim.agent import Agent
+    agent = Agent(agent_id="x", position=(0, 0), health=1.0, hunger=0.0, strength=0.5, sociability=0.7)
+    d = agent.to_replay_dict()
+    assert "sociability" in d, "Missing 'sociability' key in replay dict"
+    assert abs(d["sociability"] - 0.7) < 1e-4
+
+
+# ---------------------------------------------------------------------------
+# Test 6: encounter actions (COLLABORATE / WALK_AWAY)
+# ---------------------------------------------------------------------------
+
+def test_collaborate_forms_group() -> None:
+    """COLLABORATE on an adjacent social agent must create a group."""
+    import yaml
+    from pathlib import Path
+    from murimsim.rl.multi_env import CombatEnv
+    from murimsim.actions import Action
+
+    cfg_path = Path("config/default.yaml")
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+
+    env = CombatEnv(config=cfg, n_agents=3, seed=0)
+    env.reset(seed=0)
+
+    focal_idx = env._focal_idx
+    focal = env._agents[focal_idx]
+    other_idx = (focal_idx + 1) % env._n_agents
+    other = env._agents[other_idx]
+
+    # Force adjacency and high sociability on both
+    fx, fy = focal.position
+    gs = env._world.grid_size
+    other.position = (min(fx + 1, gs - 1), fy)
+    focal.sociability = 0.9
+    other.sociability = 0.9
+
+    assert env._get_group(focal_idx) is None, "Should start with no group"
+    env.step(int(Action.COLLABORATE))
+    assert env._get_group(focal_idx) is not None or env._get_group(other_idx) is not None, (
+        "COLLABORATE with a social adjacent agent should form a group"
+    )
+
+
+def test_collaborate_fails_with_unsocial_neighbour() -> None:
+    """COLLABORATE with a low-sociability neighbour must not form a group."""
+    import yaml
+    from pathlib import Path
+    from murimsim.rl.multi_env import CombatEnv
+    from murimsim.actions import Action
+
+    cfg_path = Path("config/default.yaml")
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+
+    env = CombatEnv(config=cfg, n_agents=3, seed=0)
+    env.reset(seed=0)
+
+    focal_idx = env._focal_idx
+    focal = env._agents[focal_idx]
+    other_idx = (focal_idx + 1) % env._n_agents
+    other = env._agents[other_idx]
+
+    fx, fy = focal.position
+    gs = env._world.grid_size
+    other.position = (min(fx + 1, gs - 1), fy)
+    focal.sociability = 0.9
+    other.sociability = 0.1  # below threshold
+
+    env.step(int(Action.COLLABORATE))
+    assert env._get_group(focal_idx) is None, (
+        "COLLABORATE with an unsocial neighbour must not form a group"
+    )
+
+
+def test_walk_away_moves_from_neighbour() -> None:
+    """WALK_AWAY must move the focal agent one step away from its nearest adjacent agent."""
+    import yaml
+    from pathlib import Path
+    from murimsim.rl.multi_env import CombatEnv
+    from murimsim.actions import Action
+
+    cfg_path = Path("config/default.yaml")
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+
+    env = CombatEnv(config=cfg, n_agents=3, seed=0)
+    env.reset(seed=0)
+
+    focal_idx = env._focal_idx
+    focal = env._agents[focal_idx]
+    other_idx = (focal_idx + 1) % env._n_agents
+    other = env._agents[other_idx]
+
+    # Place them adjacent with room to walk away (not at edge)
+    focal.position = (10, 10)
+    other.position = (11, 10)  # east of focal
+
+    pre_pos = focal.position
+    # Call _walk_away directly to test movement in isolation
+    env._walk_away(focal)
+    post_pos = focal.position
+
+    post_dist = abs(post_pos[0] - other.position[0]) + abs(post_pos[1] - other.position[1])
+    assert post_dist > 1, (
+        f"WALK_AWAY did not move away: pre={pre_pos}, post={post_pos}, neighbour={other.position}"
+    )
