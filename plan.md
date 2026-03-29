@@ -790,102 +790,152 @@ Keep as-is; no unit changes needed.
 | Phase 2: RL Survival          | ✅ Done        | Forage + poison survival                             | Probes pass + `limbic_v1.ckpt`                         |
 | Phase 3: RL Combat            | ✅ Done        | Fight/flight w/o forgetting forage                   | Probes pass + `limbic_lstm_v2_final.zip`               |
 | Phase 4: Reward Tuning        | ✅ Done        | Strength priority, gather/eat decoupled              | LSTM v4: 74 steps, 7.3% defend, `limbic_lstm_v4_final.zip` |
-| Phase 5: Group Dynamics       | 🔲 Next        | Social personality + collaboration/fight/walk-away   | Groups form naturally; social agents survive longer together |
-| Phase 6: Biome Environments   | ⬜ Not started | 3 distinct maps, multi-population training           | Agents in poison zone build more resistance than others |
-| Phase 7: Emergent Territory   | ⬜ Not started | Natural alliances, shared stash, territory           | 1+ non-programmed group behavior observed in replay    |
-| Phase 8: Movable Resources    | ⬜ Not started | Agents carry/deploy hazards as weapons               | Trap-setting or resource denial observed               |
-| Phase 9: LLM Culture          | ⬜ Not started | LLM applies selection pressure on survivor traits    | Cultural drift measurable across generations           |
+| Phase 5: Group Dynamics       | ✅ Done        | Groups, flanking, cohesion, food sharing + reciprocity | LSTM v8: lifespan 105.7, attack 0.3%, eat 31.9% |
+| Phase 5.5: Settlement         | 🔲 Next        | Detect stable home regions, settlement metrics, dense-patch map, shared stash improvements | Settlement metrics logged; agents revisit same region; stash fill rate > 0 |
+| Phase 5.6: Power Growth       | ⬜ Not started | Qi training action, hazard unification, power score  | Agents train near qi; resistance grows from exposure curriculum |
+| Phase 6a: Sect Scaffold       | ⬜ Not started | 3 sect populations, biome home regions, sect metrics | Each sect favors a distinct biome; sect-level stats logged |
+| Phase 6b: Generations         | ⬜ Not started | Aging, death by age, reproduction, trait inheritance | Trait drift measurable across generations in logs |
+| Phase 7: Movable Resources    | ⬜ Not started | Haul action (only if settlement confirmed); resource denial | Trap-setting or stash-to-stash transport observed in replay |
+| Phase 8: LLM Culture          | ⬜ Not started | LLM applies selection pressure on survivor traits    | Cultural drift measurable across generations           |
 
-**Current test suite:** 74 passed, 3 skipped (as of 2026-03-28)
-**Latest checkpoint:** `checkpoints/limbic_lstm_v4/limbic_lstm_v4_final.zip`
+**Current test suite:** 88 passed, 3 skipped (as of 2026-03-29)
+**Latest checkpoint:** `checkpoints/limbic_lstm_v8/limbic_lstm_v8_final.zip`
 
 > **Design principle:** No named groups, no top-down abstractions until the behavior they represent
 > is observed emerging from the simulation. Code follows behavior, not the other way around.
 
 ---
 
-## Phase 5: Group Dynamics
+## Phase 5: Group Dynamics ✅ COMPLETE
 
-> Goal: agents can form ad-hoc groups based on proximity and personality. No named groups — just
-> emergent coalitions that form, persist, and dissolve through agent behavior.
+All group mechanics shipped through LSTM v8. Key results:
+- Lifespan: **105.7** (peak 115.0 at step 1.74M) — all-time record
+- Attack rate: 1.7% → **0.3%** (near-zero aggression)
+- Eat rate: 22% → **31.9%** (food sharing confirmed active)
+- Collaborate rate: **6.2%**
+- 8-directional flanking (Chebyshev), coordinated attack bonus, food sharing with reciprocity memory all implemented
 
-### Social Personality Parameter
+---
 
-Each agent has a `sociability` trait in [0.0, 1.0] (consistent with existing trait scale):
-- `1.0` = highly social — strong pull toward collaboration, shares resources readily
-- `0.0` = fully independent — prefers soloing, may tolerate others but does not initiate
+## Phase 5.5: Settlement Benchmark
 
-`sociability` is a fixed agent parameter sampled at spawn (from a per-episode distribution),
-not learned by the RL policy directly. The policy *observes* its own sociability and nearby
-agents' inferred sociability, and learns to act on it.
+> Goal: detect whether group clustering is becoming persistent settlement behavior, not just
+> temporary proximity. All sub-phases are strictly sequenced — instrument first, then pressure.
 
-### Encounter Decision Space
+### Why Settlement Before Sects
+Sects need a home region to make sense. Before adding sect structure, we need to confirm agents
+*can* settle — i.e., they return to the same region, maintain a stash, and forage outward.
+If they don't settle naturally by Phase 5.5, we cannot build sects on top of that behavior.
 
-When agent A enters the interaction range of agent B, both agents independently choose:
+### 5.5a — Settlement Metrics (instrument only, no game changes)
+Add to `MultiAgentEnv` step logging:
+- `stash_fill_rate`: items deposited / items gathered per episode
+- `stash_withdraw_rate`: items withdrawn / items deposited per episode  
+- `avg_dist_from_stash`: mean Chebyshev distance of each agent from its own stash over episode
+- `revisit_entropy`: how concentrated each agent's grid visits are (low entropy = settled)
+- `group_persistence`: avg ticks a group stays together without dissolving
 
-| Choice | Condition favoring it |
-|---|---|
-| **Collaborate** | Both have high sociability; neither is at critical hunger |
-| **Fight** | Low sociability OR resource scarcity; one agent stronger |
-| **Walk away** | Indifference; both focused on other tasks |
+Log these per-episode to `logs/`. Dashboard widget in `logs/stage_history.js` optional.
 
-The decision is part of the RL action space (extend `Action` enum or use a dedicated
-interaction action). Agents signal intent; if both choose collaborate → group formed.
+### 5.5b — Dense-Patch Map
+Create one environment layout in `config/envs/dense_patch.yaml`:
+- Two high-food regions in opposite corners (2×food spawn density vs default)
+- Sparse food everywhere else
+- Same hazards as default
 
-### Group Mechanics (v1 — keep simple, tune later)
+Train one eval run (no warm-start needed, use LSTM v8 frozen) to measure settlement baseline
+against the new metrics. Do not launch a new training session yet.
 
-- **Membership:** small flat list of agent IDs, no hierarchy yet
-- **Combat strength:** sum of individual strengths (sum of resistances + health)
-- **Resource sharing:** gathered/stolen resources divided equally among group members at end of step
-- **Group dissolution:** any member can leave at any step; group disbands when size = 1
-- **No persistent group state across episodes** — groups reform each episode from scratch
+### 5.5c — Shared Stash Improvements
+After baseline is measured, improve group-stash interaction:
+- Group members can withdraw from any group member's stash (not just their own)
+- Foraging-outward reward: small bonus when agent returns to stash with food after being ≥5 tiles away
+- Group-eat bonus: small bonus when two group members eat within the same 5-tick window near a stash
 
-### Observations
+**Obs space note:** 5.5c does NOT change obs size (261 floats). Stash channel already present.
+Any obs-size change triggers a partial-transfer warm-start — document it explicitly.
 
-Each agent's observation is extended with a small "nearby agents" vector:
-- For each agent in interaction range: [distance, inferred_sociability, group_membership_flag]
-- Already partially present in CombatEnv obs (75-dim agent channel) — extend rather than replace
+---
 
-### Reward Additions
+## Phase 5.6: Power Growth
 
-- Small positive reward for successfully forming a group (signals coordination was achievable)
-- Group survival bonus: if all group members alive at episode end, each gets a small bonus
-- No direct resource-sharing reward — let agents discover the value of pooling through outcome
+> Only start after 5.5c is stable and settlement metrics are positive.
 
-### What We're Watching For
+### Qi Training Action
+- Add `train` to action space (obs size increases — requires partial warm-start from v8)
+- Training near qi tile: `strength += 0.01 * qi_density_at_tile` per tick
+- Training anywhere else: `strength += 0.002` per tick (background growth)
+- Training costs the tick (opportunity cost vs foraging)
 
-The goal is NOT to hard-code alliances. We want to see:
-- Social agents gravitating toward each other without being told to
-- Groups persisting in high-threat areas (poison zones, rival encounters)
-- Independent agents surviving solo in low-competition zones
-- Any asymmetric relationship emerge (one agent leading, others following) — if it does,
-  **that** is when we add a dominance axis to the personality space
+### Power Score
+```
+power = 0.4 * strength + 0.3 * qi_reserve + 0.2 * poison_resistance + 0.1 * flame_resistance
+```
+Log `power` separately from `lifespan`. Power growth should not substitute for survival.
 
-### Iteration Plan
-
-This phase will run multiple training rounds before biome-maps:
-1. Add `sociability` trait + encounter action + group mechanics → train → observe
-2. Tune reward weights for group formation (too high = everyone groups; too low = nobody does)
-3. Tune resource sharing (equal split is v1; may need to weight by contribution)
-4. Only move to biome-maps when groups form naturally and persist under pressure
+### Hazard Unification
+Merge poison and flame into one generic hazard system:
+```yaml
+# config/default.yaml
+hazards:
+  - id: poison_pool
+    damage_per_tick: 0.02
+    resistance_stat: poison_resistance
+    resistance_growth_rate: 0.001   # per tick of survivable exposure
+  - id: flame_vent
+    damage_per_tick: 0.03
+    resistance_stat: flame_resistance
+    resistance_growth_rate: 0.0008
+```
+Remove duplicate poison/flame code paths. One `apply_hazard(agent, hazard_def)` function handles both.
+Curriculum: expose agents at low concentration first, increase over training.
 
 ---
 
 ## Fast Lane — Active Tickets
 
 > Coding tasks only. Run `pytest` before and after each ticket. No ticket is done until tests are green.
+> **Obs space rule:** Any ticket that changes the 261-float obs vector must note the new size and
+> plan for partial warm-start from v8 (new dims init to zero, policy retrained for 500K+ steps).
+
+### Phase 5.5 — Settlement Benchmark
 
 | ID | Task | Status | Depends On |
 | -- | ---- | ------ | ---------- |
-| `v4-replay` | Generate combat replay with LSTM v4 checkpoint for visual baseline. | 🔲 Pending | — |
-| `sociability-trait` | Add `sociability` float [0,1] to `Agent`. Sampled at spawn. Visible in obs vector. | 🔲 Pending | — |
-| `encounter-action` | Add COLLABORATE/WALK_AWAY to action space. Extend CombatEnv encounter logic: both choose → outcome resolves. | 🔲 Pending | `sociability-trait` |
-| `group-mechanics` | Group dataclass: member list, combat-strength sum, equal resource split on gather. Dissolves when size=1. | 🔲 Pending | `encounter-action` |
-| `group-rewards` | Group formation bonus + group survival bonus. No direct sharing reward. | 🔲 Pending | `group-mechanics` |
-| `group-training-v1` | Train LSTM v5 with group dynamics. Watch for social clustering in replay. | 🔲 Pending | `group-rewards` |
-| `biome-maps` | Create 3 env configs: poison-rich, combat-scarce, flame-varied. | 🔲 Pending | `group-training-v1` |
-| `multi-pop-training` | Train 3 populations in parallel, each seeded into a different biome. | 🔲 Pending | `biome-maps` |
-| `emergence-eval` | Mixed-population eval: measure resistance by biome zone, watch group differentiation. | 🔲 Pending | `multi-pop-training` |
+| `settlement-metrics` | Add per-episode logging: stash_fill_rate, stash_withdraw_rate, avg_dist_from_stash, revisit_entropy, group_persistence. No game changes. | 🔲 Pending | — |
+| `dense-patch-map` | Create `config/envs/dense_patch.yaml` with 2× food density in 2 corners. Run frozen LSTM v8 eval, measure settlement metrics baseline. | 🔲 Pending | `settlement-metrics` |
+| `shared-stash` | Group members withdraw from any group member's stash. Foraging-outward reward (+0.02 when returning to stash after ≥5 tile excursion). Group-eat bonus (+0.01). | 🔲 Pending | `dense-patch-map` |
+| `settlement-training-v9` | Train LSTM v9 warm-start from v8 on dense-patch map. Watch stash_fill_rate and revisit_entropy. | 🔲 Pending | `shared-stash` |
+
+### Phase 5.6 — Power Growth (after 5.5c stable)
+
+| ID | Task | Status | Depends On |
+| -- | ---- | ------ | ---------- |
+| `hazard-unify` | Merge poison + flame into one `apply_hazard(agent, hazard_def)` function. YAML-driven. No obs change. | 🔲 Pending | `settlement-training-v9` |
+| `qi-train-action` | Add `train` action to action space. Strength growth from qi tiles. **Obs size changes — partial warm-start required.** | 🔲 Pending | `hazard-unify` |
+| `power-score` | Add `power` metric to logging: `0.4*strength + 0.3*qi + 0.2*poison_res + 0.1*flame_res`. Log separately from lifespan. | 🔲 Pending | `qi-train-action` |
+| `power-training-v10` | Train LSTM v10 warm-start (partial transfer, new action dim). Watch power growth vs lifespan tradeoff. | 🔲 Pending | `power-score` |
+
+### Phase 6a — Sect Scaffold (after settlement confirmed)
+
+| ID | Task | Status | Depends On |
+| -- | ---- | ------ | ---------- |
+| `sect-scaffold` | SectConfig dataclass + SectRegistry + 3 CombatEnv instances (one per sect). Biome home regions. Sect-level metrics. | 🔲 Pending | `power-training-v10` |
+| `viewer-territory` | Restore per-sect agent colors. Show sect home regions + stash influence zones on grid. | 🔲 Pending | `sect-scaffold` |
+| `inter-sect-combat` | Sect-aware attack bonus vs enemy sect, penalty vs own sect. | 🔲 Pending | `sect-scaffold` |
+
+### Phase 6b — Generations (after sects stable)
+
+| ID | Task | Status | Depends On |
+| -- | ---- | ------ | ---------- |
+| `aging` | Age counter per agent. Death by age threshold. End-of-life survivor selection. | 🔲 Pending | `inter-sect-combat` |
+| `reproduction` | Trait inheritance: `inherit_value(mom, dad, rng, sigma)` midpoint + Gaussian noise. Lamarckian poison resistance. | 🔲 Pending | `aging` |
+
+### Phase 7 — Movable Resources (conditional on settlement logs)
+
+| ID | Task | Status | Depends On |
+| -- | ---- | ------ | ---------- |
+| `haul-action` | Add `haul` action only if logs show: stable home regions + spatially uneven resources + returning > consuming in place. Otherwise skip. | ⬜ Conditional | `aging` |
 
 ---
 
@@ -893,10 +943,26 @@ This phase will run multiple training rounds before biome-maps:
 
 > Theory and curriculum questions. Take these to ChatGPT/Gemini — not this repo.
 
+- Settlement vs roaming: what reward structures encourage one vs the other?
 - Group reward attribution: how to credit individual agents for group outcomes
-- Social vs independent personality: what behavioral signatures confirm the trait is doing work
+- Qi training opportunity cost: how to set the reward so training is worth it but doesn't dominate
 - When to introduce dominance/subordination axis (what observable behavior earns it)
 - When to introduce LLM culture pressure — what signal triggers the prompt?
 - Genetic drift vs learned drift: how to measure which is driving differentiation
+- Population-based outer loop timing: when does PPO inner loop plateau enough to warrant outer loop?
+
+---
+
+## Not Now (do not implement until explicitly unlocked)
+
+| Feature | Unlocked by |
+| ------- | ----------- |
+| Barter / crafting economy | Never in limbic phase |
+| Sect secrets / martial knowledge transfer | Phase 8 LLM culture |
+| Symbolic diplomacy | Post-generation stability |
+| Procreation mechanics | Phase 6b aging scaffold |
+| Special poison-trained subpopulation | Hazard unification + sect scaffold |
+| Complex resource hauling | `haul-action` conditional gate |
+| 3D rendering / animation | Separate project |
 
 ---
