@@ -122,6 +122,10 @@ class World:
             self.stats.total_depleted[rid] = 0
             self.stats.total_regenerated[rid] = 0
 
+        # Qi influence field: radiates from qi resource tiles.
+        # Values stack across sources; normalised to [0, 1].
+        self._qi_field: np.ndarray = self._compute_qi_field(H, W)
+
         logger.debug(
             "World initialised: grid=%dx%d seed=%d resources=%s",
             self.grid_size,
@@ -207,6 +211,18 @@ class World:
         """
         return self._grid[resource_id]
 
+    def get_qi_field_value(self, x: int, y: int) -> float:
+        """Return the qi influence field value at (x, y), in [0, 1].
+
+        1.0 means maximum training effectiveness (standing on or very close to
+        a strong qi source).  0.0 means no qi influence.
+        """
+        return float(self._qi_field[y, x])
+
+    def get_qi_field(self) -> np.ndarray:
+        """Return a read-only view of the full qi influence field (shape: H×W, float32)."""
+        return self._qi_field
+
     def get_grids_view(self) -> dict[str, np.ndarray]:
         """Return views of all internal grids (read-only by convention)."""
         return self._grid
@@ -226,6 +242,55 @@ class World:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _compute_qi_field(self, H: int, W: int) -> np.ndarray:
+        """Build the qi influence field from all qi resource tiles.
+
+        Algorithm (stacking, Chebyshev distance):
+          1. For each qi tile at (sx, sy), draw a strength value ``val`` uniformly
+             from [20, 100].
+          2. Every cell at Chebyshev distance ``d`` from that tile receives
+             ``max(0, val - 10 * d)`` added to its field value.
+          3. Contributions from all sources are **summed** (stacking).
+          4. The raw field is clamped to [0, 100] and normalised to [0, 1].
+
+        If no ``qi`` resource type is registered, returns an all-zero field.
+
+        Returns:
+            Float32 array of shape (H, W) with values in [0, 1].
+        """
+        field = np.zeros((H, W), dtype=np.float32)
+        if "qi" not in self._grid:
+            return field
+
+        qi_grid = self._grid["qi"]
+        source_ys, source_xs = np.where(qi_grid > 0)
+
+        if len(source_xs) == 0:
+            return field
+
+        # Max radius beyond which influence is zero (val_max=100, step=10 → 10 tiles)
+        max_radius = 10
+
+        for sy, sx in zip(source_ys, source_xs):
+            val = float(self._rng.uniform(20.0, 100.0))
+            # Bounding box for efficiency
+            y_lo = max(0, sy - max_radius)
+            y_hi = min(H, sy + max_radius + 1)
+            x_lo = max(0, sx - max_radius)
+            x_hi = min(W, sx + max_radius + 1)
+            # Build coordinate grids for the bounding box
+            ys = np.arange(y_lo, y_hi, dtype=np.int32)
+            xs = np.arange(x_lo, x_hi, dtype=np.int32)
+            yy, xx = np.meshgrid(ys, xs, indexing="ij")
+            dist = np.maximum(np.abs(yy - sy), np.abs(xx - sx))  # Chebyshev distance
+            contribution = np.maximum(0.0, val - 10.0 * dist).astype(np.float32)
+            field[y_lo:y_hi, x_lo:x_hi] += contribution
+
+        # Stack can exceed 100; clamp then normalise to [0, 1]
+        np.clip(field, 0.0, 100.0, out=field)
+        field /= 100.0
+        return field
 
     def _spawn(
         self, rcfg: ResourceConfig, H: int, W: int, occupied: np.ndarray

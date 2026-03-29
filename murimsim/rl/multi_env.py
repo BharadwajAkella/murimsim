@@ -814,8 +814,8 @@ class MultiAgentEnv(gym.Env):
 
         elif action_enum == Action.TRAIN:
             x, y = agent.position
-            on_qi = self._world.get_grid_view("qi")[y, x] > 0 if "qi" in self._world.resources else False
-            agent.train(on_qi_tile=on_qi)
+            qi_val = self._world.get_qi_field_value(x, y) if "qi" in self._world.resources else 0.0
+            agent.train(qi_field_value=qi_val)
             # Training reward is applied in _compute_reward via strength_delta tracking.
 
         return food_gathered, hazard_damage, stash_bonus

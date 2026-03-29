@@ -392,20 +392,27 @@ class Agent:
     TRAIN_RATE_QI_TILE: float = 0.01    # strength growth on a qi tile
     TRAIN_RATE_ANYWHERE: float = 0.002  # strength growth anywhere else
 
-    def train(self, on_qi_tile: bool) -> float:
-        """Cultivate: grow strength by TRAIN_RATE × (1 - strength).
+    def train(self, qi_field_value: float = 0.0) -> float:
+        """Cultivate: grow strength based on the local qi influence field.
 
-        On a qi tile the rate is 5× higher. Growth is capped at 1.0.
+        Training rate interpolates linearly between ``TRAIN_RATE_ANYWHERE``
+        (qi_field_value=0) and ``TRAIN_RATE_QI_TILE`` (qi_field_value=1.0).
+        When multiple qi sources overlap their contributions stack, creating
+        "qi nexus" zones with maximum training effectiveness.
 
         Args:
-            on_qi_tile: True when standing on a tile with qi resource.
+            qi_field_value: Normalised qi influence at the agent's tile [0, 1].
+                            0.0 = no nearby qi, 1.0 = maximum (saturated field).
 
         Returns:
             Actual strength delta (≥ 0).
         """
         if not self.alive:
             return 0.0
-        rate = self.TRAIN_RATE_QI_TILE if on_qi_tile else self.TRAIN_RATE_ANYWHERE
+        rate = (
+            self.TRAIN_RATE_ANYWHERE
+            + (self.TRAIN_RATE_QI_TILE - self.TRAIN_RATE_ANYWHERE) * float(qi_field_value)
+        )
         delta = rate * (1.0 - self.strength)
         self.strength = min(1.0, self.strength + delta)
         return delta

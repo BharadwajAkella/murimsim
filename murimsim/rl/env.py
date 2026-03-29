@@ -305,8 +305,8 @@ class SurvivalEnv(gym.Env):
 
         elif action_enum == Action.TRAIN:
             x, y = agent.position
-            on_qi = self._world.get_grid_view("qi")[y, x] > 0 if "qi" in self._world.resources else False
-            strength_delta = agent.train(on_qi_tile=on_qi)
+            qi_val = self._world.get_qi_field_value(x, y) if "qi" in self._world.resources else 0.0
+            strength_delta = agent.train(qi_field_value=qi_val)
             reward_train = REWARD_TRAIN_STRENGTH_SCALE * strength_delta
 
         # --- World + agent advance for action_ticks ticks (one action = n real ticks) ---

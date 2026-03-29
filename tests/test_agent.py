@@ -325,7 +325,7 @@ def test_gatherable_false_not_gathered():
 
 
 def test_train_grows_strength_on_qi_tile():
-    """TRAIN action on qi tile grows strength faster than anywhere."""
+    """TRAIN action with max qi field grows strength faster than without qi."""
     from murimsim.agent import Agent
     rng = np.random.default_rng(0)
     cfg = {"agent": {
@@ -341,13 +341,13 @@ def test_train_grows_strength_on_qi_tile():
     agent = Agent.spawn("a0", (0, 0), rng, cfg)
     agent.strength = 0.3
 
-    delta_qi = agent.train(on_qi_tile=True)
+    delta_qi = agent.train(qi_field_value=1.0)
     assert abs(delta_qi - Agent.TRAIN_RATE_QI_TILE * 0.7) < 1e-6
     assert agent.strength > 0.3
 
     agent.strength = 0.3
-    delta_anywhere = agent.train(on_qi_tile=False)
-    assert delta_anywhere < delta_qi, "qi-tile training must be faster"
+    delta_anywhere = agent.train(qi_field_value=0.0)
+    assert delta_anywhere < delta_qi, "max-qi training must be faster than no-qi"
 
 
 def test_train_capped_at_one():
@@ -367,7 +367,7 @@ def test_train_capped_at_one():
     agent = Agent.spawn("a0", (0, 0), rng, cfg)
     agent.strength = 0.99
     for _ in range(50):
-        agent.train(on_qi_tile=True)
+        agent.train(qi_field_value=1.0)
     assert agent.strength <= 1.0
 
 
