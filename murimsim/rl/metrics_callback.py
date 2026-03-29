@@ -69,6 +69,9 @@ class MetricsDashboardCallback(BaseCallback):
         self._resistance_gained: deque[dict[str, float]] = deque(maxlen=_ROLLING_WINDOW)
         # per-agent credit assignment: list of per-agent mean rewards per episode
         self._agent_mean_rewards: deque[list[float]] = deque(maxlen=_ROLLING_WINDOW)
+        # power score tracking
+        self._avg_powers: deque[float] = deque(maxlen=_ROLLING_WINDOW)
+        self._final_powers: deque[float] = deque(maxlen=_ROLLING_WINDOW)
         # timestep history for sparkline
         self._history: list[dict[str, Any]] = []
 
@@ -115,6 +118,10 @@ class MetricsDashboardCallback(BaseCallback):
             self._resistance_gained.append(dict(info["ep_resistance_gained"]))
         if "ep_agent_mean_reward" in info:
             self._agent_mean_rewards.append(list(info["ep_agent_mean_reward"]))
+        if "ep_avg_power" in info:
+            self._avg_powers.append(float(info["ep_avg_power"]))
+        if "ep_final_power" in info:
+            self._final_powers.append(float(info["ep_final_power"]))
 
     def _rolling_mean(self, buf: deque) -> float | None:
         if not buf:
@@ -183,6 +190,8 @@ class MetricsDashboardCallback(BaseCallback):
             "hazard_approach_ratio": approach_ratio,
             "avg_resistance_gained": {k: round(v, 4) for k, v in avg_resistance_gained.items()},
             "avg_agent_credit": avg_agent_credit,   # per-agent mean reward (credit baseline)
+            "avg_power": self._rolling_mean(self._avg_powers),
+            "avg_final_power": self._rolling_mean(self._final_powers),
             "history": self._history[-500:],  # cap sparkline history
         }
 

@@ -81,6 +81,28 @@ STARVATION_THRESHOLD: float = 0.70
 # δ-reward for TRAIN action: incentivises training (strength delta × scale)
 REWARD_TRAIN_STRENGTH_SCALE: float = 2.0
 
+# Power score weights (used for ep_avg_power metric, logged per episode)
+POWER_WEIGHT_STRENGTH: float = 0.4
+POWER_WEIGHT_QI: float = 0.3      # maps to qi_drain_resistance (cultivation level)
+POWER_WEIGHT_POISON: float = 0.2
+POWER_WEIGHT_FLAME: float = 0.1
+
+
+def compute_power_score(agent: "Agent") -> float:
+    """Scalar cultivation power in [0, 1].
+
+    power = 0.4 * strength
+          + 0.3 * qi_drain_resistance
+          + 0.2 * poison_resistance
+          + 0.1 * flame_resistance
+    """
+    return (
+        POWER_WEIGHT_STRENGTH * agent.strength
+        + POWER_WEIGHT_QI * agent.resistances.get("qi_drain", 0.0)
+        + POWER_WEIGHT_POISON * agent.resistances.get("poison", 0.0)
+        + POWER_WEIGHT_FLAME * agent.resistances.get("flame", 0.0)
+    )
+
 
 class MultiAgentEnv(gym.Env):
     """Multi-agent survival environment (Phase 3b/3c).
@@ -209,6 +231,7 @@ class MultiAgentEnv(gym.Env):
         self._ep_action_counts: dict[str, int] = {}
         self._ep_steps: int = 0
         self._ep_focal_strength_sum: float = 0.0  # sum of focal agent's strength each step
+        self._ep_focal_power_sum: float = 0.0     # sum of focal agent's power score each step
         # Hazard approach/flee counters — keyed by YAML hazard IDs (effect=='negative')
         hazard_ids = self._world.hazard_ids
         self._ep_hazard_approaches: dict[str, int] = {h: 0 for h in hazard_ids}
@@ -268,6 +291,7 @@ class MultiAgentEnv(gym.Env):
         self._ep_steps += 1
         self._ep_step_count += 1
         self._ep_focal_strength_sum += focal.strength
+        self._ep_focal_power_sum += compute_power_score(focal)
         for i, agent in enumerate(self._agents):
             if i != self._focal_idx and agent.alive:
                 self._heuristic_step(agent)
@@ -372,6 +396,10 @@ class MultiAgentEnv(gym.Env):
             info["ep_avg_strength"] = (
                 self._ep_focal_strength_sum / self._ep_steps if self._ep_steps > 0 else 0.0
             )
+            info["ep_avg_power"] = (
+                self._ep_focal_power_sum / self._ep_steps if self._ep_steps > 0 else 0.0
+            )
+            info["ep_final_power"] = compute_power_score(focal)
             # Per-agent credit assignment data: cumulative and mean reward per slot
             info["ep_agent_rewards"] = list(self._ep_agent_rewards)
             info["ep_agent_steps"] = list(self._ep_agent_steps)
@@ -971,6 +999,7 @@ class CombatEnv(MultiAgentEnv):
         self._ep_steps += 1
         self._ep_step_count += 1
         self._ep_focal_strength_sum += focal.strength
+        self._ep_focal_power_sum += compute_power_score(focal)
 
         if action_enum in MOVE_DELTAS:
             for h in self._ep_hazard_approaches:
@@ -1109,6 +1138,10 @@ class CombatEnv(MultiAgentEnv):
             info["ep_avg_strength"] = (
                 self._ep_focal_strength_sum / self._ep_steps if self._ep_steps > 0 else 0.0
             )
+            info["ep_avg_power"] = (
+                self._ep_focal_power_sum / self._ep_steps if self._ep_steps > 0 else 0.0
+            )
+            info["ep_final_power"] = compute_power_score(focal)
             info["ep_agent_rewards"] = list(self._ep_agent_rewards)
             info["ep_agent_steps"] = list(self._ep_agent_steps)
             info["ep_agent_mean_reward"] = [

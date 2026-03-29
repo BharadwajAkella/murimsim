@@ -646,3 +646,36 @@ def test_group_persistence_tracks_formations() -> None:
     # Step once so group_member_ticks accumulates
     env.step(env.action_space.sample())
     assert env._ep_group_member_ticks > 0, "Group member ticks should accumulate while group is active"
+
+
+# ---------------------------------------------------------------------------
+# Test: power score metric in episode info
+# ---------------------------------------------------------------------------
+
+def test_power_score_in_episode_info() -> None:
+    """ep_avg_power and ep_final_power must be present in terminal info dict."""
+    from murimsim.rl.multi_env import compute_power_score
+
+    env = _make_env(n_agents=3, seed=99)
+    env.reset(seed=99)
+
+    # compute_power_score returns a float in [0,1]
+    from murimsim.agent import Agent
+    a = Agent(agent_id="test", position=(0, 0), health=0.8, hunger=0.5, strength=0.3)
+    score = compute_power_score(a)
+    assert 0.0 <= score <= 1.0, f"Power score out of range: {score}"
+
+    # Run until episode terminates, then check info
+    obs, _ = env.reset(seed=99)
+    terminal_info: dict | None = None
+    for _ in range(5000):
+        obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
+        if terminated or truncated:
+            terminal_info = info
+            break
+
+    assert terminal_info is not None, "Episode never terminated within 5000 steps"
+    assert "ep_avg_power" in terminal_info, "ep_avg_power missing from terminal info"
+    assert "ep_final_power" in terminal_info, "ep_final_power missing from terminal info"
+    assert 0.0 <= terminal_info["ep_avg_power"] <= 1.0
+    assert 0.0 <= terminal_info["ep_final_power"] <= 1.0
