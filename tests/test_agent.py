@@ -134,23 +134,26 @@ def test_eating_food_hunger_floor():
 
 
 def test_poison_eat_kills_low_resistance():
-    """res=0.05, potency=0.4 → damage=0.35; agent with health=0.3 dies."""
+    """res=0.05, potency=0.4 → damage = potency*(1-effective_res) = 0.4*(1-0.05) = 0.38.
+    Agent with health=0.3 dies."""
     agent = _make_agent(health=0.3, poison_resistance=0.05)
     agent.inventory.poison = 1
     damage = agent.eat(_resource_configs())
-    assert abs(damage - 0.35) < 1e-6
+    expected = 0.4 * (1.0 - 0.05)  # multiplicative unified formula
+    assert abs(damage - expected) < 1e-6
     assert not agent.alive
 
 
 def test_poison_eat_survives_high_resistance():
-    """First eat with intake=0: effective_res=0.4, damage=0.0.
-    Agent survives and resistance still grows."""
-    agent = _make_agent(health=1.0, poison_resistance=0.4)
+    """Unified formula: damage = potency*(1-effective_res).
+    At res=0.9, damage=0.4*0.1=0.04; agent with health=1.0 survives and gains resistance."""
+    agent = _make_agent(health=1.0, poison_resistance=0.9)
     agent.inventory.poison = 1
     damage = agent.eat(_resource_configs())
-    assert abs(damage - 0.0) < 1e-6
+    expected = 0.4 * (1.0 - 0.9)
+    assert abs(damage - expected) < 1e-4
     assert agent.alive
-    assert agent.resistances["poison"] > 0.4
+    assert agent.resistances["poison"] > 0.9
 
 
 def test_poison_resistance_growth():

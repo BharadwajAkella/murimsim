@@ -177,14 +177,47 @@ class Agent:
             current = getattr(self.inventory, field)
             setattr(self.inventory, field, current + 1)
 
+    def apply_hazard(self, resistance_stat: str, raw_damage: float) -> float:
+        """Core hazard application: apply raw_damage reduced by resistance and intake.
+
+        Shared by traversal effects (flame, mountain) and consumption effects (poison eat).
+        Formula: actual_damage = raw_damage * (1 - effective_resistance)
+        where   effective_resistance = resistance * max(0, 1 - intake)
+
+        Side-effects:
+          - Reduces self.health by actual_damage.
+          - Increments _intakes[resistance_stat] by INTAKE_PER_EXPOSURE (chips armor).
+          - Grows resistances[resistance_stat] on survival (Lamarckian).
+          - Calls _check_death().
+
+        Args:
+            resistance_stat: Key in self.resistances / self._intakes (e.g. "poison", "flame").
+            raw_damage:      Damage before resistance reduction (≥ 0).
+
+        Returns:
+            Actual health damage dealt.
+        """
+        if not self.alive:
+            return 0.0
+        resistance = self.resistances.get(resistance_stat, 0.0)
+        intake = self._intakes.get(resistance_stat, 0.0)
+        effective_resistance = resistance * max(0.0, 1.0 - intake)
+        actual_damage = max(0.0, raw_damage * (1.0 - effective_resistance))
+        self.health = max(0.0, self.health - actual_damage)
+        self._intakes[resistance_stat] = min(1.0, intake + INTAKE_PER_EXPOSURE)
+        if self.health > 0:
+            self.resistances[resistance_stat] = min(
+                1.0, resistance + RESISTANCE_GAIN * (1.0 - resistance)
+            )
+        self._check_death()
+        return actual_damage
+
     def apply_traversal_effects(self, effects: list[dict]) -> float:
         """Apply on_enter traversal effects for a tile the agent just stepped onto.
 
         Each effect dict: {trigger, attribute, delta, resistance_stat}.
-        Only trigger="on_enter" effects are processed.
-
-        Resistance reduces damage. Repeated exposure chips the resistance armor
-        via the intake accumulator, and surviving exposure slowly builds resistance.
+        Only trigger="on_enter" effects are processed. Delegates per-effect damage
+        to apply_hazard() which handles resistance/intake/growth uniformly.
 
         Args:
             effects: List of effect dicts from world.get_traversal_effects().
@@ -198,27 +231,15 @@ class Agent:
         for effect in effects:
             if effect.get("trigger") != "on_enter":
                 continue
-            resistance_stat = effect["resistance_stat"]
-            resistance = self.resistances.get(resistance_stat, 0.0)
-            intake = self._intakes.get(resistance_stat, 0.0)
-            effective_resistance = resistance * max(0.0, 1.0 - intake)
-            damage = max(0.0, abs(float(effect["delta"])) * (1.0 - effective_resistance))
-
             attribute = effect["attribute"]
+            resistance_stat = effect["resistance_stat"]
+            raw_damage = abs(float(effect["delta"]))
             if attribute == "health":
-                self.health = max(0.0, self.health - damage)
-                total_damage += damage
+                total_damage += self.apply_hazard(resistance_stat, raw_damage)
             else:
                 logger.warning(
                     "apply_traversal_effects: attribute %r not yet tracked — no-op", attribute
                 )
-
-            self._intakes[resistance_stat] = min(1.0, intake + INTAKE_PER_EXPOSURE)
-            if self.health > 0:
-                self.resistances[resistance_stat] = min(
-                    1.0, resistance + RESISTANCE_GAIN * (1.0 - resistance)
-                )
-            self._check_death()
         return total_damage
 
     def eat(self, resource_configs: dict[str, Any]) -> float:
@@ -259,25 +280,7 @@ class Agent:
                 if poison_cfg is not None
                 else 0.4
             )
-            poison_resistance = self.resistances.get("poison", 0.0)
-            poison_intake = self._intakes.get("poison", 0.0)
-            # Effective resistance uses current intake (chipped from previous eats)
-            effective_resistance = poison_resistance * max(0.0, 1.0 - poison_intake)
-            # Resistance reduces damage; immunity at resistance=1.0
-            if poison_resistance >= 1.0:
-                damage = 0.0
-            else:
-                damage = max(0.0, potency - effective_resistance)
-            # Intake rises AFTER damage is dealt — chips the armor for next eat
-            self._intakes["poison"] = min(1.0, poison_intake + INTAKE_PER_EXPOSURE)
-            self.health = max(0.0, self.health - damage)
-            # Surviving poison builds resistance (Lamarckian)
-            if self.health > 0.0:
-                self.resistances["poison"] = min(
-                    1.0,
-                    poison_resistance + RESISTANCE_GAIN * (1.0 - poison_resistance),
-                )
-            self._check_death()
+            damage = self.apply_hazard("poison", potency)
 
         return damage
 

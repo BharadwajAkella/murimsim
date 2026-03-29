@@ -17,8 +17,7 @@ Reward (per step):
     +0.02  alive bonus (per step)
     +0.20  * (hunger_prev - hunger_now)   hunger relief
     +0.18  * food_gathered_this_step      ← gather reward (raised to match hunger relief value)
-    -0.30  * poison_damage_taken
-    -0.30  * traversal_damage_taken
+    -0.30  * hazard_damage_taken          (traversal + consumption, unified)
     +0.12  * Δ(inv_food / INV_SECURITY_CAP)   inventory security shaping (potential-based)
     -0.08  when inv_food == 0 and food is nearby (empty-inventory penalty, decoupled from hunger)
     +0.50  * Δ(sum(resistances))          resistance growth reward (potential-based)
@@ -82,8 +81,7 @@ F_WEIGHT_STAT_GAIN: float = 0.3
 REWARD_ALIVE: float = 0.02
 REWARD_HUNGER_RELIEF_SCALE: float = 0.20
 REWARD_FOOD_GATHERED_SCALE: float = 0.18           # raised from 0.10 — gather now equals hunger relief
-REWARD_POISON_DAMAGE_SCALE: float = -0.30
-REWARD_TRAVERSAL_DAMAGE_SCALE: float = -0.30
+REWARD_HAZARD_DAMAGE_SCALE: float = -0.30          # unified: traversal + consumption damage
 REWARD_DEATH: float = -1.00
 REWARD_EXPLORE_BASE: float = 0.25                  # multiplied by (1-hunger) in step
 # Potential-based inventory security shaping
@@ -114,8 +112,8 @@ REWARD_RESISTANCE_GAIN_SCALE: float = 0.50
 # At full immunity (3 stats × 1.0) → 0.008 × 3.0 = 0.024/step > REWARD_ALIVE
 REWARD_STRENGTH_SCALE: float = 0.008
 
-# Hazard resource IDs whose tiles are tracked for approach/flee metrics
-HAZARD_RESOURCE_IDS: tuple[str, ...] = ("poison", "flame")
+# Hazard resource IDs are loaded from YAML at env init (effect == "negative")
+# — no hardcoded list here.
 
 
 class SurvivalEnv(gym.Env):
@@ -163,8 +161,9 @@ class SurvivalEnv(gym.Env):
         self._ep_resistance_start: dict[str, float] = {}
         self._ep_max_ticks: int = 500  # updated from config on reset
         # Hazard approach/flee counters and resistance gain (reset each episode)
-        self._ep_hazard_approaches: dict[str, int] = {h: 0 for h in HAZARD_RESOURCE_IDS}
-        self._ep_hazard_flees: dict[str, int] = {h: 0 for h in HAZARD_RESOURCE_IDS}
+        # Populated from world.hazard_ids after reset() creates the world.
+        self._ep_hazard_approaches: dict[str, int] = {}
+        self._ep_hazard_flees: dict[str, int] = {}
         self._ep_resistance_gained: dict[str, float] = {}
 
     # ------------------------------------------------------------------
@@ -214,8 +213,9 @@ class SurvivalEnv(gym.Env):
         self._ep_food_eaten = 0
         self._ep_resistance_start = dict(self._agent.resistances)
         self._ep_max_ticks = int(self._config.get("world", {}).get("max_ticks", 500))
-        self._ep_hazard_approaches = {h: 0 for h in HAZARD_RESOURCE_IDS}
-        self._ep_hazard_flees = {h: 0 for h in HAZARD_RESOURCE_IDS}
+        hazard_ids = self._world.hazard_ids
+        self._ep_hazard_approaches = {h: 0 for h in hazard_ids}
+        self._ep_hazard_flees = {h: 0 for h in hazard_ids}
         self._ep_resistance_gained = {}
 
         obs = self._build_obs()
@@ -229,7 +229,7 @@ class SurvivalEnv(gym.Env):
         inv_food_prev = agent.inventory.food
         resistances_prev = dict(agent.resistances)
         food_gathered = 0
-        poison_damage = 0.0
+        hazard_damage = 0.0
         reward_deposit = 0.0
         reward_withdraw = 0.0
         reward_steal = 0.0
@@ -239,7 +239,7 @@ class SurvivalEnv(gym.Env):
         # --- Snapshot hazard distances before move (for approach/flee tracking) ---
         prev_pos = agent.position
         pre_hazard_dists = {
-            h: self._nearest_hazard_dist(prev_pos, h) for h in HAZARD_RESOURCE_IDS
+            h: self._nearest_hazard_dist(prev_pos, h) for h in self._ep_hazard_approaches
         }
 
         # --- Execute action ---
@@ -248,11 +248,10 @@ class SurvivalEnv(gym.Env):
             agent.move(dx, dy, self._world.grid_size)
             effects = self._world.get_traversal_effects(*agent.position)
             if effects:
-                traversal_damage = agent.apply_traversal_effects(effects)
-                poison_damage += traversal_damage
+                hazard_damage += agent.apply_traversal_effects(effects)
 
             # Update approach/flee counters based on distance change to each hazard
-            for h in HAZARD_RESOURCE_IDS:
+            for h in self._ep_hazard_approaches:
                 post_dist = self._nearest_hazard_dist(agent.position, h)
                 pre_dist = pre_hazard_dists[h]
                 if pre_dist < float("inf"):  # only track if hazard exists on map
@@ -277,7 +276,7 @@ class SurvivalEnv(gym.Env):
                     break
 
         elif action_enum == Action.EAT:
-            poison_damage = agent.eat(self._resource_configs)
+            hazard_damage = agent.eat(self._resource_configs)
 
         elif action_enum == Action.REST:
             agent.rest()
@@ -336,7 +335,7 @@ class SurvivalEnv(gym.Env):
         reward = self._compute_reward(
             hunger_prev,
             food_gathered,
-            poison_damage,
+            hazard_damage,
             agent,
             exploration_reward,
             action_enum,
@@ -455,7 +454,7 @@ class SurvivalEnv(gym.Env):
         self,
         hunger_prev: float,
         food_gathered: int,
-        poison_damage: float,
+        hazard_damage: float,
         agent: Agent,
         exploration_reward: float = 0.0,
         action_enum: Action | None = None,
@@ -467,7 +466,7 @@ class SurvivalEnv(gym.Env):
         if hunger_relief > 0:
             reward += REWARD_HUNGER_RELIEF_SCALE * hunger_relief
         reward += REWARD_FOOD_GATHERED_SCALE * food_gathered
-        reward += REWARD_POISON_DAMAGE_SCALE * poison_damage
+        reward += REWARD_HAZARD_DAMAGE_SCALE * hazard_damage
         reward += exploration_reward
         # Potential-based inventory security shaping
         inv_delta = (agent.inventory.food - inv_food_prev) / INV_SECURITY_CAP

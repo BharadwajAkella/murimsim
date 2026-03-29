@@ -134,6 +134,11 @@ class World:
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def hazard_ids(self) -> tuple[str, ...]:
+        """Resource IDs with effect='negative' (used for approach/flee tracking)."""
+        return tuple(rid for rid, rcfg in self.resources.items() if rcfg.effect == "negative")
+
     def step(self) -> None:
         """Advance the simulation by one tick. Processes all resource regeneration."""
         self.tick += 1

@@ -206,17 +206,18 @@ def test_poison_eat_kills_low_resistance():
 
 
 def test_poison_eat_survives_high_resistance():
-    """High resistance can fully negate poison damage; resistance still grows."""
+    """Unified formula: damage = potency*(1-resistance). At res=0.9, agent survives."""
     env = make_env()
     env.reset(seed=42)
     env._agent.health = 1.0
-    env._agent.resistances["poison"] = 0.4
+    env._agent.resistances["poison"] = 0.9
     env._agent.inventory.poison = 1
 
     _, _, terminated, _, _ = env.step(int(Action.EAT))
     assert not terminated
-    assert env._agent.health == 1.0
-    assert env._agent.resistances["poison"] > 0.4  # grew
+    expected_damage = 0.4 * (1.0 - 0.9)  # 0.04
+    assert abs(env._agent.health - (1.0 - expected_damage)) < 0.02  # allow starvation tick
+    assert env._agent.resistances["poison"] > 0.9  # grew
 
 
 # ---------------------------------------------------------------------------

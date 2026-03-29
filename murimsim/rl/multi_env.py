@@ -63,13 +63,13 @@ HEURISTIC_HUNGER_EAT: float = 0.5   # eat when hunger exceeds this
 HEURISTIC_SCAN_RADIUS: int = 3      # Manhattan radius for food scan
 
 # ── Hazard tracking ───────────────────────────────────────────────────────────
-HAZARD_RESOURCE_IDS: tuple[str, ...] = ("poison", "flame")
+# HAZARD_RESOURCE_IDS is derived from world.hazard_ids (effect=='negative') at env init.
 
 # ── Reward shaping (Stage 5: potential-based) ────────────────────────────────
 REWARD_ALIVE: float = 0.02
 REWARD_HUNGER_RELIEF_SCALE: float = 0.20
 REWARD_FOOD_GATHERED_SCALE: float = 0.10           # raised from 0.05 — gather was undervalued
-REWARD_POISON_DAMAGE_SCALE: float = -0.30
+REWARD_HAZARD_DAMAGE_SCALE: float = -0.30          # unified: traversal + consumption damage
 REWARD_DEATH: float = -1.00
 REWARD_EXPLORE_BASE: float = 0.25                  # multiplied by (1-hunger) in step
 # Potential-based inventory security shaping: reward Δ(food_in_hand / INV_CAP)
@@ -207,9 +207,10 @@ class MultiAgentEnv(gym.Env):
         self._ep_action_counts: dict[str, int] = {}
         self._ep_steps: int = 0
         self._ep_focal_strength_sum: float = 0.0  # sum of focal agent's strength each step
-        # Hazard approach/flee counters (reset each episode)
-        self._ep_hazard_approaches: dict[str, int] = {h: 0 for h in HAZARD_RESOURCE_IDS}
-        self._ep_hazard_flees: dict[str, int] = {h: 0 for h in HAZARD_RESOURCE_IDS}
+        # Hazard approach/flee counters — keyed by YAML hazard IDs (effect=='negative')
+        hazard_ids = self._world.hazard_ids
+        self._ep_hazard_approaches: dict[str, int] = {h: 0 for h in hazard_ids}
+        self._ep_hazard_flees: dict[str, int] = {h: 0 for h in hazard_ids}
 
         # Settlement metrics (reset each episode)
         # visit_counts[i][(x,y)] = number of times agent i visited that tile
@@ -236,20 +237,20 @@ class MultiAgentEnv(gym.Env):
         hunger_prev = focal.hunger
         inv_food_prev = focal.inventory.food
         food_gathered = 0
-        poison_damage = 0.0
+        hazard_damage = 0.0
 
         # 1. Apply action to focal agent
         action_enum = Action(action)
 
         # Snapshot hazard distances before the move for approach/flee tracking
         prev_pos = focal.position
-        pre_hazard_dists = {h: self._nearest_hazard_dist(prev_pos, h) for h in HAZARD_RESOURCE_IDS}
+        pre_hazard_dists = {h: self._nearest_hazard_dist(prev_pos, h) for h in self._ep_hazard_approaches}
 
-        food_gathered, poison_damage, stash_bonus = self._apply_action(focal, action_enum, self._focal_idx)
+        food_gathered, hazard_damage, stash_bonus = self._apply_action(focal, action_enum, self._focal_idx)
 
         # Update approach/flee counters for MOVE actions
         if action_enum in MOVE_DELTAS:
-            for h in HAZARD_RESOURCE_IDS:
+            for h in self._ep_hazard_approaches:
                 post_dist = self._nearest_hazard_dist(focal.position, h)
                 pre_dist = pre_hazard_dists[h]
                 if pre_dist < float("inf"):
@@ -326,7 +327,7 @@ class MultiAgentEnv(gym.Env):
                 self._ticks_near_food[self._focal_idx] += 1.0
 
         # 5. Compute reward for focal agent's action
-        reward = self._compute_reward(hunger_prev, food_gathered, poison_damage, focal, exploration_reward, inv_food_prev)
+        reward = self._compute_reward(hunger_prev, food_gathered, hazard_damage, focal, exploration_reward, inv_food_prev)
         if focal.alive:
             reward += food_share_reward
             reward += stash_bonus
@@ -622,7 +623,7 @@ class MultiAgentEnv(gym.Env):
         self,
         hunger_prev: float,
         food_gathered: int,
-        poison_damage: float,
+        hazard_damage: float,
         agent: Agent,
         exploration_reward: float = 0.0,
         inv_food_prev: int = 0,
@@ -641,7 +642,7 @@ class MultiAgentEnv(gym.Env):
         if hunger_relief > 0:
             reward += REWARD_HUNGER_RELIEF_SCALE * hunger_relief
         reward += REWARD_FOOD_GATHERED_SCALE * food_gathered
-        reward += REWARD_POISON_DAMAGE_SCALE * poison_damage
+        reward += REWARD_HAZARD_DAMAGE_SCALE * hazard_damage
         reward += exploration_reward
         # Potential-based inventory shaping: φ(s) = food_in_hand / INV_SECURITY_CAP
         inv_delta = (agent.inventory.food - inv_food_prev) / INV_SECURITY_CAP
@@ -656,14 +657,14 @@ class MultiAgentEnv(gym.Env):
     # ── Action application ────────────────────────────────────────────────────
 
     def _apply_action(self, agent: Agent, action_enum: Action, agent_idx: int = -1) -> tuple[int, float, float]:
-        """Apply action_enum to agent. Returns (food_gathered, poison_damage, stash_bonus).
+        """Apply action_enum to agent. Returns (food_gathered, hazard_damage, stash_bonus).
 
         stash_bonus is non-zero only when a DEPOSIT qualifies for the
         foraging-outward reward (agent was >= FORAGE_OUTWARD_MIN_DIST tiles from
         the stash between this and its previous deposit).
         """
         food_gathered = 0
-        poison_damage = 0.0
+        hazard_damage = 0.0
         stash_bonus = 0.0
 
         if action_enum in MOVE_DELTAS:
@@ -692,7 +693,7 @@ class MultiAgentEnv(gym.Env):
                     break
 
         elif action_enum == Action.EAT:
-            poison_damage = agent.eat(self._resource_configs)
+            hazard_damage = agent.eat(self._resource_configs)
 
         elif action_enum == Action.REST:
             agent.rest()
@@ -720,7 +721,7 @@ class MultiAgentEnv(gym.Env):
         elif action_enum == Action.STEAL:
             self._stash_registry.steal(agent)
 
-        return food_gathered, poison_damage, stash_bonus
+        return food_gathered, hazard_damage, stash_bonus
 
     # ── Heuristic for non-focal agents ───────────────────────────────────────
 
@@ -919,7 +920,7 @@ class CombatEnv(MultiAgentEnv):
         hunger_prev = focal.hunger
         inv_food_prev = focal.inventory.food
         food_gathered = 0
-        poison_damage = 0.0
+        hazard_damage = 0.0
         damage_dealt = 0.0
         defeat_bonus = 0.0
         focal_defending = (action_enum == Action.DEFEND)
@@ -928,7 +929,7 @@ class CombatEnv(MultiAgentEnv):
 
         # Snapshot hazard distances before the action for approach/flee tracking
         prev_pos = focal.position
-        pre_hazard_dists = {h: self._nearest_hazard_dist(prev_pos, h) for h in HAZARD_RESOURCE_IDS}
+        pre_hazard_dists = {h: self._nearest_hazard_dist(prev_pos, h) for h in self._ep_hazard_approaches}
 
         # 1. Apply focal agent's action
         flanking_bonus_earned = False
@@ -947,7 +948,7 @@ class CombatEnv(MultiAgentEnv):
         elif action_enum == Action.WALK_AWAY:
             self._walk_away(focal)
         else:
-            food_gathered, poison_damage, stash_bonus = self._apply_action(focal, action_enum, self._focal_idx)
+            food_gathered, hazard_damage, stash_bonus = self._apply_action(focal, action_enum, self._focal_idx)
 
         # Track action counts and hazard approach/flee for dashboard
         key = action_enum.name.lower()
@@ -957,7 +958,7 @@ class CombatEnv(MultiAgentEnv):
         self._ep_focal_strength_sum += focal.strength
 
         if action_enum in MOVE_DELTAS:
-            for h in HAZARD_RESOURCE_IDS:
+            for h in self._ep_hazard_approaches:
                 post_dist = self._nearest_hazard_dist(focal.position, h)
                 pre_dist = pre_hazard_dists[h]
                 if pre_dist < float("inf"):
@@ -1039,7 +1040,7 @@ class CombatEnv(MultiAgentEnv):
 
         # 6. Compute reward (group formation bonus + cohesion bonus added on top)
         reward = self._compute_combat_reward(
-            hunger_prev, food_gathered, poison_damage, focal,
+            hunger_prev, food_gathered, hazard_damage, focal,
             exploration_reward, damage_dealt, damage_taken, defeat_bonus,
             inv_food_prev,
         )
@@ -1264,7 +1265,7 @@ class CombatEnv(MultiAgentEnv):
         self,
         hunger_prev: float,
         food_gathered: int,
-        poison_damage: float,
+        hazard_damage: float,
         agent: Agent,
         exploration_reward: float,
         damage_dealt: float,
@@ -1273,7 +1274,7 @@ class CombatEnv(MultiAgentEnv):
         inv_food_prev: int = 0,
     ) -> float:
         """Phase 3c reward: Phase 3b reward + combat shaping."""
-        reward = self._compute_reward(hunger_prev, food_gathered, poison_damage, agent, exploration_reward, inv_food_prev)
+        reward = self._compute_reward(hunger_prev, food_gathered, hazard_damage, agent, exploration_reward, inv_food_prev)
         reward += REWARD_DAMAGE_TAKEN_SCALE * damage_taken
         reward += defeat_bonus
         return reward
