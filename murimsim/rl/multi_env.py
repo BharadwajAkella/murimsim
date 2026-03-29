@@ -206,6 +206,7 @@ class MultiAgentEnv(gym.Env):
         self._action_ticks = int(cfg["world"].get("action_ticks", 1))
         self._world = World(cfg, rng=np.random.default_rng(effective_seed))
         self._resource_configs = self._world.resources
+        self._max_age: int = int(cfg.get("agent", {}).get("max_age", 0))
 
         gs = self._world.grid_size
         self._agents = [
@@ -256,6 +257,7 @@ class MultiAgentEnv(gym.Env):
         self._ep_dist_from_stash_count: int = 0     # denominator for the above
         self._ep_groups_formed: int = 0         # how many times _form_group was called
         self._ep_group_member_ticks: int = 0    # sum of group sizes across all steps
+        self._ep_deaths_by_age: int = 0         # agents that died of natural old age
 
         # Foraging-outward tracking: max Chebyshev dist from own stash since last deposit
         self._max_dist_since_deposit: list[float] = [0.0] * self._n_agents
@@ -309,7 +311,10 @@ class MultiAgentEnv(gym.Env):
         for _ in range(self._action_ticks):
             self._world.step()
             for agent in self._agents:
-                agent.tick()
+                died_of_age = agent.tick(self._max_age)
+                if died_of_age:
+                    self._ep_deaths_by_age += 1
+                    self._drop_inventory(agent)
 
         self._prune_dead_from_groups()
 
@@ -428,6 +433,7 @@ class MultiAgentEnv(gym.Env):
                 self._ep_group_member_ticks / self._ep_groups_formed
                 if self._ep_groups_formed > 0 else 0.0
             )
+            info["ep_deaths_by_age"] = self._ep_deaths_by_age
         return obs, reward, terminated, False, info
 
     def render(self) -> None:
@@ -494,6 +500,15 @@ class MultiAgentEnv(gym.Env):
             if len(pruned) >= 2:
                 new_groups.append(frozenset(pruned))
         self._groups = new_groups
+
+    def _drop_inventory(self, agent: Agent) -> None:
+        """Drop a dead agent's food inventory onto its tile (if tile is empty)."""
+        if agent.inventory.food <= 0:
+            return
+        x, y = agent.position
+        if self._world.get_grid_view("food")[y, x] == 0.0:
+            self._world._grid["food"][y, x] = 1.0
+        agent.inventory.food = 0
 
     def _stash_proximity_reward(self, agent_idx: int) -> float:
         """Per-tick stash proximity bonus — currently disabled (REWARD_STASH_PROXIMITY=0.0).
@@ -1072,7 +1087,10 @@ class CombatEnv(MultiAgentEnv):
         for _ in range(self._action_ticks):
             self._world.step()
             for agent in self._agents:
-                agent.tick()
+                died_of_age = agent.tick(self._max_age)
+                if died_of_age:
+                    self._ep_deaths_by_age += 1
+                    self._drop_inventory(agent)
 
         # Remove dead agents from any groups
         self._prune_dead_from_groups()
@@ -1213,6 +1231,7 @@ class CombatEnv(MultiAgentEnv):
                 self._ep_group_member_ticks / self._ep_groups_formed
                 if self._ep_groups_formed > 0 else 0.0
             )
+            info["ep_deaths_by_age"] = self._ep_deaths_by_age
         return obs, reward, terminated, False, info
 
     # ── Combat helpers ────────────────────────────────────────────────────────
@@ -1356,15 +1375,6 @@ class CombatEnv(MultiAgentEnv):
             agent.move(1 if dx > 0 else -1, 0, self._world.grid_size)
         else:
             agent.move(0, 1 if dy > 0 else -1, self._world.grid_size)
-
-    def _drop_inventory(self, agent: Agent) -> None:
-        """Drop dead agent's food inventory onto its tile (if tile is empty)."""
-        if agent.inventory.food <= 0:
-            return
-        x, y = agent.position
-        if self._world.get_grid_view("food")[y, x] == 0.0:
-            self._world._grid["food"][y, x] = 1.0
-        agent.inventory.food = 0
 
     def _compute_combat_reward(
         self,

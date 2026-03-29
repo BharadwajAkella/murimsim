@@ -83,6 +83,7 @@ class Agent:
     inventory: AgentInventory = dataclasses.field(default_factory=AgentInventory)
     alive: bool = True
     sect_id: str = "none"           # assigned by CombatEnv when sect_config is set
+    age: int = 0                    # ticks lived; death occurs at max_age (from config)
     # Tracks cumulative recent exposure per resistance_stat; decays per tick
     _intakes: dict[str, float] = dataclasses.field(
         default_factory=dict, init=False, repr=False
@@ -141,16 +142,30 @@ class Agent:
     # Tick update
     # ------------------------------------------------------------------
 
-    def tick(self) -> None:
-        """Advance one tick: increase hunger; apply starvation damage; decay all intakes."""
+    def tick(self, max_age: int = 0) -> bool:
+        """Advance one tick: hunger, starvation, intake decay, and aging.
+
+        Args:
+            max_age: If > 0, the agent dies of old age when ``self.age >= max_age``.
+                     Pass 0 (the default) to disable age-based death.
+
+        Returns:
+            True if the agent died of old age this tick (for death-cause tracking).
+        """
         if not self.alive:
-            return
+            return False
+        self.age += 1
+        if max_age > 0 and self.age >= max_age:
+            self.health = 0.0
+            self.alive = False
+            return True
         self.hunger = min(1.0, self.hunger + HUNGER_PER_TICK)
         if self.hunger >= 1.0:
             self.health = max(0.0, self.health - STARVATION_DAMAGE_PER_TICK)
         for stat in list(self._intakes):
             self._intakes[stat] = max(0.0, self._intakes[stat] - INTAKE_DECAY_PER_TICK)
         self._check_death()
+        return False
 
     # ------------------------------------------------------------------
     # Actions
@@ -325,6 +340,7 @@ class Agent:
             "pos": list(self.position),
             "health": round(self.health, 4),
             "hunger": round(self.hunger, 4),
+            "age": self.age,
             "resistances": {k: round(v, 4) for k, v in self.resistances.items()},
             "intakes": {k: round(v, 4) for k, v in self._intakes.items()},
             "adventure_spirit": round(self.adventure_spirit, 4),

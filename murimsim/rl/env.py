@@ -199,6 +199,7 @@ class SurvivalEnv(gym.Env):
             cfg["world"]["action_ticks"] = int(self._rng.integers(lo, hi + 1))
 
         self._action_ticks = int(cfg["world"].get("action_ticks", 1))
+        self._max_age: int = int(cfg.get("agent", {}).get("max_age", 0))
 
         self._world = World(cfg, rng=np.random.default_rng(effective_seed))
         self._resource_configs = self._world.resources
@@ -311,7 +312,7 @@ class SurvivalEnv(gym.Env):
         # --- World + agent advance for action_ticks ticks (one action = n real ticks) ---
         for _ in range(self._action_ticks):
             self._world.step()
-            agent.tick()
+            agent.tick(self._max_age)
 
         # Track episode-level stats for F-metric
         if agent.alive:

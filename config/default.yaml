@@ -109,6 +109,7 @@ agent:
   strength_max: 0.8
   adventure_spirit_min: 0.1
   adventure_spirit_max: 0.9
+  max_age: 3000  # world ticks before natural death; at action_ticks=5 this is ~600 env steps
 
 # Domain randomisation — disabled here; enabled via training.yaml during RL training.
 domain_randomization:

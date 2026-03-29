@@ -367,3 +367,65 @@ def test_train_capped_at_one():
     for _ in range(50):
         agent.train(on_qi_tile=True)
     assert agent.strength <= 1.0
+
+
+def test_age_increments_per_tick():
+    """Agent.age must increment by 1 on each tick."""
+    from murimsim.agent import Agent
+    a = Agent(agent_id="x", position=(0, 0), health=1.0, hunger=0.0, strength=0.5)
+    assert a.age == 0
+    a.tick()
+    assert a.age == 1
+    a.tick()
+    assert a.age == 2
+
+
+def test_agent_dies_of_old_age():
+    """Agent must die (alive=False) when age reaches max_age."""
+    from murimsim.agent import Agent
+    a = Agent(agent_id="x", position=(0, 0), health=1.0, hunger=0.0, strength=0.5)
+    for i in range(9):
+        died = a.tick(max_age=10)
+        assert not died, f"Died too early at tick {i + 1}"
+    assert a.alive
+    died = a.tick(max_age=10)   # 10th tick: age == 10 >= max_age
+    assert died, "tick() should return True when agent dies of old age"
+    assert not a.alive
+
+
+def test_aging_disabled_when_max_age_zero():
+    """With max_age=0 (disabled), tick() never returns True for age-death."""
+    from murimsim.agent import Agent
+    a = Agent(agent_id="x", position=(0, 0), health=1.0, hunger=0.0, strength=0.5)
+    for _ in range(100):
+        died = a.tick(max_age=0)
+        assert not died, "tick() should never return True when max_age=0"
+        # Reset hunger to keep agent alive for the test
+        a.hunger = 0.0
+        a.health = 1.0
+    assert a.alive
+
+
+def test_ep_deaths_by_age_tracked():
+    """MultiAgentEnv tracks deaths by age in _ep_deaths_by_age and ep_deaths_by_age info."""
+    import yaml
+    from pathlib import Path
+    from murimsim.rl.multi_env import MultiAgentEnv
+
+    cfg = yaml.safe_load(Path("config/default.yaml").read_text())
+    # Set max_age very low (2 ticks) so agents die fast
+    cfg["agent"]["max_age"] = 2
+    env = MultiAgentEnv(config=cfg, n_agents=3, seed=5)
+    env.reset(seed=5)
+
+    terminal_info = None
+    for _ in range(200):
+        _, _, terminated, _, info = env.step(env.action_space.sample())
+        if terminated:
+            terminal_info = info
+            break
+
+    assert terminal_info is not None
+    assert "ep_deaths_by_age" in terminal_info
+    # With max_age=2, most agents should die of age
+    assert terminal_info["ep_deaths_by_age"] >= 1, "Expected at least one aging death"
