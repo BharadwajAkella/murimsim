@@ -92,7 +92,7 @@ def main() -> None:
         envs_dir / "poison_heavy.yaml",
         envs_dir / "resource_scarce.yaml",
         envs_dir / "resource_dense.yaml",
-        envs_dir / "resource_dense.yaml",
+        envs_dir / "dense_patch.yaml",
     ]
     variant_cfgs: list[dict] = []
     for override_path in env_variants[:n_envs]:
@@ -153,7 +153,7 @@ def main() -> None:
                 warmstart_path = detected
 
     if warmstart_path and warmstart_path.exists():
-        print(f"Warm-starting from {warmstart_path}")
+        print(f"Warm-starting from {warmstart_path}", flush=True)
         try:
             warm_model = RecurrentPPO.load(str(warmstart_path), device="cpu")
             src = warm_model.policy.state_dict()
@@ -162,13 +162,13 @@ def main() -> None:
                           if k in dst and dst[k].shape == v.shape}
             dst.update(compatible)
             model.policy.load_state_dict(dst)
-            print(f"  Transferred {len(compatible)}/{len(dst)} layers.")
+            print(f"  Transferred {len(compatible)}/{len(dst)} layers.", flush=True)
         except Exception as e:
-            print(f"  Weight transfer failed ({e}). Training from scratch.")
+            print(f"  Weight transfer failed ({e}). Training from scratch.", flush=True)
     elif args.no_warmstart:
-        print("Training from scratch (--no-warmstart).")
+        print("Training from scratch (--no-warmstart).", flush=True)
     else:
-        print("No prior checkpoint found — training from scratch.")
+        print("No prior checkpoint found — training from scratch.", flush=True)
 
     class ProgressCallback(BaseCallback):
         def __init__(self, total: int, n_lines: int) -> None:
@@ -198,10 +198,10 @@ def main() -> None:
 
     print(f"\nTraining RecurrentPPO  run={args.run_name}  {total_timesteps:,} steps  "
           f"{n_envs} envs  {args.n_agents} agents/env  "
-          f"lstm_hidden={lstm_hidden_size}  seed={args.seed}")
-    print(f"  Curriculum: combat prob 0.2 → 1.0 over first {curriculum_ramp_steps:,} steps")
-    print(f"  Checkpoint dir: {checkpoint_dir}")
-    print(f"  Dashboard: logs/dashboard_data.js\n")
+          f"lstm_hidden={lstm_hidden_size}  seed={args.seed}", flush=True)
+    print(f"  Curriculum: combat prob 0.2 → 1.0 over first {curriculum_ramp_steps:,} steps", flush=True)
+    print(f"  Checkpoint dir: {checkpoint_dir}", flush=True)
+    print(f"  Dashboard: logs/dashboard_data.js\n", flush=True)
 
     model.learn(
         total_timesteps=total_timesteps,
@@ -210,7 +210,7 @@ def main() -> None:
 
     final_path = checkpoint_dir / f"{run_prefix}_final.zip"
     model.save(str(final_path))
-    print(f"\nDone. Saved → {final_path}")
+    print(f"\nDone. Saved → {final_path}", flush=True)
     vec_env.close()
 
 
