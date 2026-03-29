@@ -65,8 +65,8 @@ OBS_CHANNEL_ENEMY_STASH: int = 7
 OBS_CHANNEL_ORDER: list[str] = ["food", "qi", "materials", "poison", "mountain", "flame"]
 
 OBS_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_CHANNELS  # 200
-OBS_STATS_SIZE: int = 10  # health, hunger, inv_food, inv_poison, poison_resistance, poison_intake, flame_resistance, qi_drain_resistance, action_ticks, strength
-OBS_TOTAL_SIZE: int = OBS_GRID_SIZE + OBS_STATS_SIZE  # 210
+OBS_STATS_SIZE: int = 11  # health, hunger, inv_food, inv_poison, poison_resistance, poison_intake, flame_resistance, qi_drain_resistance, action_ticks, strength, hunger_resistance
+OBS_TOTAL_SIZE: int = OBS_GRID_SIZE + OBS_STATS_SIZE  # 211
 
 # action_ticks normalisation: divide by this so 10 ticks → 1.0
 OBS_ACTION_TICKS_MAX: float = 10.0
@@ -392,9 +392,10 @@ class SurvivalEnv(gym.Env):
                      Channels: food, qi, materials, poison, mountain, flame,
                                my_stash, enemy_stash
                      Missing resources (not in world) are padded with zeros.
-            [200:210] own stats: health, hunger, inv_food, inv_poison,
+            [200:211] own stats: health, hunger, inv_food, inv_poison,
                       poison_resistance, poison_intake, flame_resistance,
-                      qi_drain_resistance, action_ticks (normalised), strength
+                      qi_drain_resistance, action_ticks (normalised), strength,
+                      hunger_resistance
         """
         agent = self._agent
         world = self._world
@@ -452,6 +453,7 @@ class SurvivalEnv(gym.Env):
                 agent.resistances.get("qi_drain", 0.0),
                 min(1.0, self._action_ticks / OBS_ACTION_TICKS_MAX),
                 agent.strength,
+                agent.hunger_resistance,
             ],
             dtype=np.float32,
         )

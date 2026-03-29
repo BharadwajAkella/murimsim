@@ -19,11 +19,19 @@ HUNGER_PER_TICK: float = 0.01
 # How much hunger eating one food item restores (loaded from resource config at runtime)
 DEFAULT_HUNGER_RESTORE: float = 0.3
 
+# How much health eating one food item restores (flat, regardless of hunger level)
+FOOD_HEALTH_RESTORE: float = 0.05
+
 # Resistance gained per survival event (generalised: poison eat, terrain traversal, etc.)
 RESISTANCE_GAIN: float = 0.05
 
-# Health lost per tick when hunger is full (starving)
-STARVATION_DAMAGE_PER_TICK: float = 0.02
+# Hunger threshold above which health starts draining each tick
+STARVATION_THRESHOLD: float = 0.80
+
+# Health drained per tick = (hunger - STARVATION_THRESHOLD) * STARVATION_HEALTH_DRAIN_SCALE
+# At hunger=1.0 (fully starved): drain = 0.20 * 0.10 = 0.02/tick (same as before at threshold)
+# Escalates: the longer without food, the harder the drain
+STARVATION_HEALTH_DRAIN_SCALE: float = 0.10
 
 # Minimum health damage from eating poison (deprecated — immunity allowed at resistance=1.0)
 POISON_MIN_DAMAGE: float = 0.0
@@ -108,6 +116,7 @@ class Agent:
     strength: float
     adventure_spirit: float = 0.5   # default mid-range; overridden by spawn()
     sociability: float = 0.5        # [0, 1]: 0 = fully independent, 1 = highly social
+    hunger_resistance: float = 0.3  # [0, 1]: mitigates strength penalty and health drain when hungry
     resistances: dict[str, float] = dataclasses.field(default_factory=dict)
     inventory: AgentInventory = dataclasses.field(default_factory=AgentInventory)
     alive: bool = True
@@ -117,6 +126,32 @@ class Agent:
     _intakes: dict[str, float] = dataclasses.field(
         default_factory=dict, init=False, repr=False
     )
+
+    # ------------------------------------------------------------------
+    # Derived properties
+    # ------------------------------------------------------------------
+
+    @property
+    def effective_strength(self) -> float:
+        """Combat and training strength after applying the hunger penalty.
+
+        When the agent is hungry (above STARVATION_THRESHOLD), strength is
+        penalised proportionally.  ``hunger_resistance`` [0, 1] reduces this
+        penalty — a value of 1.0 means no penalty at all.
+
+        Formula: strength × (1 − hunger_excess × (1 − hunger_resistance))
+        where hunger_excess = max(0, hunger − STARVATION_THRESHOLD) / (1 − STARVATION_THRESHOLD)
+        so that it is 0 at the threshold and 1 at maximum hunger.
+
+        Returns:
+            Effective strength in [0, 1].
+        """
+        threshold_range = 1.0 - STARVATION_THRESHOLD
+        if threshold_range <= 0:
+            return self.strength
+        hunger_excess = max(0.0, self.hunger - STARVATION_THRESHOLD) / threshold_range
+        penalty = hunger_excess * (1.0 - float(np.clip(self.hunger_resistance, 0.0, 1.0)))
+        return float(np.clip(self.strength * (1.0 - penalty), 0.0, 1.0))
 
     # ------------------------------------------------------------------
     # Factory
@@ -168,9 +203,10 @@ class Agent:
             position=position,
             health=1.0,
             hunger=0.0,
-            strength=         inherit_value(parent1.strength,         parent2.strength,         rng, sigma),
-            adventure_spirit= inherit_value(parent1.adventure_spirit, parent2.adventure_spirit, rng, sigma),
-            sociability=      inherit_value(parent1.sociability,      parent2.sociability,      rng, sigma),
+            strength=          inherit_value(parent1.strength,          parent2.strength,          rng, sigma),
+            adventure_spirit=  inherit_value(parent1.adventure_spirit,  parent2.adventure_spirit,  rng, sigma),
+            sociability=       inherit_value(parent1.sociability,       parent2.sociability,       rng, sigma),
+            hunger_resistance= inherit_value(parent1.hunger_resistance, parent2.hunger_resistance, rng, sigma),
             resistances=inherited_resistances,
             sect_id=sect,
         )
@@ -204,15 +240,18 @@ class Agent:
         as_max  = float(agent_cfg.get("adventure_spirit_max",   0.9))
         soc_min = float(agent_cfg.get("sociability_min",        0.1))
         soc_max = float(agent_cfg.get("sociability_max",        0.9))
+        hr_min  = float(agent_cfg.get("hunger_resistance_min",  0.1))
+        hr_max  = float(agent_cfg.get("hunger_resistance_max",  0.5))
 
         return cls(
             agent_id=agent_id,
             position=position,
             health=1.0,
             hunger=0.0,
-            strength=         float(np.clip(rng.uniform(str_min, str_max), 0.0, 1.0)),
-            adventure_spirit= float(np.clip(rng.uniform(as_min,  as_max),  0.0, 1.0)),
-            sociability=      float(np.clip(rng.uniform(soc_min, soc_max), 0.0, 1.0)),
+            strength=          float(np.clip(rng.uniform(str_min, str_max), 0.0, 1.0)),
+            adventure_spirit=  float(np.clip(rng.uniform(as_min,  as_max),  0.0, 1.0)),
+            sociability=       float(np.clip(rng.uniform(soc_min, soc_max), 0.0, 1.0)),
+            hunger_resistance= float(np.clip(rng.uniform(hr_min,  hr_max),  0.0, 1.0)),
             resistances={
                 "poison":   float(np.clip(rng.uniform(pr_min, pr_max), 0.0, 1.0)),
                 "flame":    float(np.clip(rng.uniform(fr_min, fr_max), 0.0, 1.0)),
@@ -242,8 +281,13 @@ class Agent:
             self.alive = False
             return True
         self.hunger = min(1.0, self.hunger + HUNGER_PER_TICK)
-        if self.hunger >= 1.0:
-            self.health = max(0.0, self.health - STARVATION_DAMAGE_PER_TICK)
+        # Escalating health drain: once hunger exceeds STARVATION_THRESHOLD,
+        # health drains at (hunger - threshold) * scale per tick.
+        # hunger_resistance reduces this drain.
+        if self.hunger > STARVATION_THRESHOLD:
+            excess = self.hunger - STARVATION_THRESHOLD
+            drain = excess * STARVATION_HEALTH_DRAIN_SCALE * (1.0 - float(np.clip(self.hunger_resistance, 0.0, 1.0)))
+            self.health = max(0.0, self.health - drain)
         for stat in list(self._intakes):
             self._intakes[stat] = max(0.0, self._intakes[stat] - INTAKE_DECAY_PER_TICK)
         self._check_death()
@@ -346,6 +390,9 @@ class Agent:
         Eat priority: food first. If no food, tries poison (agent is desperate).
         If inventory is empty, no-op.
 
+        Food eating: restores hunger AND a flat amount of health
+        (``FOOD_HEALTH_RESTORE``), representing nutrition as medicine.
+
         Poison damage: max(0, potency - effective_resistance)
         Surviving poison: resistance increases by RESISTANCE_GAIN * (1 - resistance)
 
@@ -369,6 +416,8 @@ class Agent:
                 else DEFAULT_HUNGER_RESTORE
             )
             self.hunger = max(0.0, self.hunger - restore)
+            # Food also restores a small amount of health (nutrition as medicine)
+            self.health = min(1.0, self.health + FOOD_HEALTH_RESTORE)
 
         elif self.inventory.poison > 0:
             self.inventory.poison -= 1
@@ -382,11 +431,26 @@ class Agent:
 
         return damage
 
+    REST_HEALTH_RESTORE: float = 0.05   # max health restored by a single REST action
+
     def rest(self) -> None:
-        """Recover a small amount of health. No-op if dead."""
+        """Recover health via rest. Less effective when hungry.
+
+        A well-fed agent recovers ``REST_HEALTH_RESTORE`` per action.  When
+        hungry (above STARVATION_THRESHOLD), recovery is penalised
+        proportionally — the agent cannot heal properly without nutrition.
+        ``hunger_resistance`` partially mitigates this penalty.
+        """
         if not self.alive:
             return
-        self.health = min(1.0, self.health + 0.02)
+        if self.hunger > STARVATION_THRESHOLD:
+            threshold_range = max(1e-6, 1.0 - STARVATION_THRESHOLD)
+            hunger_excess = (self.hunger - STARVATION_THRESHOLD) / threshold_range
+            penalty = hunger_excess * (1.0 - float(np.clip(self.hunger_resistance, 0.0, 1.0)))
+            gain = self.REST_HEALTH_RESTORE * (1.0 - penalty)
+        else:
+            gain = self.REST_HEALTH_RESTORE
+        self.health = min(1.0, self.health + gain)
 
     # Cultivation rates (per action tick)
     TRAIN_RATE_QI_TILE: float = 0.01    # strength growth on a qi tile
@@ -430,6 +494,9 @@ class Agent:
             "health": round(self.health, 4),
             "hunger": round(self.hunger, 4),
             "age": self.age,
+            "strength": round(self.strength, 4),
+            "effective_strength": round(self.effective_strength, 4),
+            "hunger_resistance": round(self.hunger_resistance, 4),
             "resistances": {k: round(v, 4) for k, v in self.resistances.items()},
             "intakes": {k: round(v, 4) for k, v in self._intakes.items()},
             "adventure_spirit": round(self.adventure_spirit, 4),

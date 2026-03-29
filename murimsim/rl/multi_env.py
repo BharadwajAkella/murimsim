@@ -7,18 +7,20 @@ remaining agents follow a simple heuristic, then the focal index advances.
 This design keeps the standard gym.Env interface so the env works directly
 with SB3 PPO through DummyVecEnv / SubprocVecEnv.
 
-Observation layout (Phase 5 — 261 floats total):
+Observation layout (Phase 6b — 263 floats total):
     [0:100]   5×5 local grid × 4 resource channels  (food, qi, materials, poison)
     [100:200] 5×5 local grid × 4 agent channels     (agent_present, health, strength, sociability)
     [200:250] 5×5 local grid × 2 stash channels     (my_stash, enemy_stash)
-    [250:261] Self stats × 11:
+    [250:263] Self stats × 13:
                 health, hunger, inv_food, inv_poison,
                 poison_resistance, poison_intake,
                 combat_experience,      # fights survived / 100
                 terrain_familiarity,    # ticks near food / TERRAIN_FAM_SCALE, capped 1.0
                 recent_reward_ema,      # EMA of per-step rewards, normalised to [0,1]
                 sociability,            # own personality trait
-                in_group                # 1.0 if currently in a group, 0.0 otherwise
+                in_group,               # 1.0 if currently in a group, 0.0 otherwise
+                strength,               # current base strength
+                hunger_resistance       # trait: how well agent tolerates hunger
 
 Action space (Phase 3b): Discrete(7) — same as SurvivalEnv
 Action space (Phase 3c): Discrete(9) — adds ATTACK, DEFEND
@@ -51,8 +53,8 @@ OBS_CHANNEL_ORDER: list[str] = ["food", "qi", "materials", "poison"]
 OBS_RESOURCE_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_RESOURCE_CH  # 100
 OBS_AGENT_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_AGENT_CH        # 100
 OBS_STASH_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_STASH_CH        # 50
-OBS_STATS_SIZE: int = 12  # health, hunger, inv_food, inv_poison, pr, pi, combat_exp, terrain_fam, reward_ema, sociability, in_group, strength
-OBS_TOTAL_SIZE: int = OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE + OBS_STASH_GRID_SIZE + OBS_STATS_SIZE  # 262
+OBS_STATS_SIZE: int = 13  # health, hunger, inv_food, inv_poison, pr, pi, combat_exp, terrain_fam, reward_ema, sociability, in_group, strength, hunger_resistance
+OBS_TOTAL_SIZE: int = OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE + OBS_STASH_GRID_SIZE + OBS_STATS_SIZE  # 263
 
 # ── History signal constants ──────────────────────────────────────────────────
 TERRAIN_FAM_SCALE: float = 200.0   # ticks_near_food / SCALE → [0, 1]
@@ -78,7 +80,9 @@ REWARD_INV_SECURITY_SCALE: float = 0.12
 INV_SECURITY_CAP: float = 5.0                      # normalise over first 5 food items
 # Starvation proximity penalty: discourages approaching the danger zone
 PENALTY_STARVATION_APPROACH: float = -0.08
-STARVATION_THRESHOLD: float = 0.70
+STARVATION_THRESHOLD: float = 0.80                 # synced with Agent.STARVATION_THRESHOLD
+# Health recovery bonus: reward regaining health (e.g., from eating)
+REWARD_HEALTH_RECOVERY_SCALE: float = 0.30
 # δ-reward for TRAIN action: incentivises training (strength delta × scale)
 REWARD_TRAIN_STRENGTH_SCALE: float = 2.0
 
@@ -272,6 +276,7 @@ class MultiAgentEnv(gym.Env):
 
         focal = self._agents[self._focal_idx]
         hunger_prev = focal.hunger
+        health_prev = focal.health
         inv_food_prev = focal.inventory.food
         strength_prev = focal.strength
         food_gathered = 0
@@ -370,7 +375,7 @@ class MultiAgentEnv(gym.Env):
                 self._ticks_near_food[self._focal_idx] += 1.0
 
         # 5. Compute reward for focal agent's action
-        reward = self._compute_reward(hunger_prev, food_gathered, hazard_damage, focal, exploration_reward, inv_food_prev)
+        reward = self._compute_reward(hunger_prev, health_prev, food_gathered, hazard_damage, focal, exploration_reward, inv_food_prev)
         if focal.alive:
             reward += food_share_reward
             reward += stash_bonus
@@ -704,6 +709,7 @@ class MultiAgentEnv(gym.Env):
             agent.sociability,
             in_group,
             agent.strength,
+            agent.hunger_resistance,
         ], dtype=np.float32)
 
         return np.concatenate([flat_resources, flat_agents, flat_stashes, stats])
@@ -713,6 +719,7 @@ class MultiAgentEnv(gym.Env):
     def _compute_reward(
         self,
         hunger_prev: float,
+        health_prev: float,
         food_gathered: int,
         hazard_damage: float,
         agent: Agent,
@@ -727,6 +734,9 @@ class MultiAgentEnv(gym.Env):
         - Starvation proximity penalty: discourages drifting into the danger zone
           rather than waiting until death.
         - Exploration is survival-gated (passed in pre-scaled by caller).
+
+        Stage 6b additions:
+        - Health recovery bonus: rewards regaining health after eating or resting.
         """
         reward = REWARD_ALIVE
         hunger_relief = hunger_prev - agent.hunger
@@ -741,6 +751,10 @@ class MultiAgentEnv(gym.Env):
         # Starvation proximity penalty
         if agent.hunger > STARVATION_THRESHOLD:
             reward += PENALTY_STARVATION_APPROACH * (agent.hunger - STARVATION_THRESHOLD)
+        # Health recovery bonus: reward regaining health
+        health_delta = agent.health - health_prev
+        if health_delta > 0:
+            reward += REWARD_HEALTH_RECOVERY_SCALE * health_delta
         if not agent.alive:
             reward += REWARD_DEATH
         return float(reward)
@@ -1046,6 +1060,7 @@ class CombatEnv(MultiAgentEnv):
 
         focal = self._agents[self._focal_idx]
         hunger_prev = focal.hunger
+        health_prev = focal.health
         inv_food_prev = focal.inventory.food
         strength_prev = focal.strength
         food_gathered = 0
@@ -1184,7 +1199,7 @@ class CombatEnv(MultiAgentEnv):
 
         # 6. Compute reward (group formation bonus + cohesion bonus added on top)
         reward = self._compute_combat_reward(
-            hunger_prev, food_gathered, hazard_damage, focal,
+            hunger_prev, health_prev, food_gathered, hazard_damage, focal,
             exploration_reward, damage_dealt, damage_taken, defeat_bonus,
             inv_food_prev,
         )
@@ -1328,12 +1343,13 @@ class CombatEnv(MultiAgentEnv):
     ) -> float:
         """Compute combat damage.
 
-        Formula: attacker.strength*0.3 − defender.strength*0.1*is_defending
+        Formula: attacker.effective_strength*0.3 − defender.effective_strength*0.1*is_defending
+        Using effective_strength means hungry fighters deal less damage and defend less.
         Clamped to [0, COMBAT_MAX_DAMAGE].
         """
         raw = (
-            attacker.strength * COMBAT_ATTACKER_SCALE
-            - defender.strength * COMBAT_DEFENDER_SCALE * (1.0 if is_defending else 0.0)
+            attacker.effective_strength * COMBAT_ATTACKER_SCALE
+            - defender.effective_strength * COMBAT_DEFENDER_SCALE * (1.0 if is_defending else 0.0)
         )
         return float(np.clip(raw, 0.0, COMBAT_MAX_DAMAGE))
 
@@ -1412,6 +1428,7 @@ class CombatEnv(MultiAgentEnv):
     def _compute_combat_reward(
         self,
         hunger_prev: float,
+        health_prev: float,
         food_gathered: int,
         hazard_damage: float,
         agent: Agent,
@@ -1422,7 +1439,7 @@ class CombatEnv(MultiAgentEnv):
         inv_food_prev: int = 0,
     ) -> float:
         """Phase 3c reward: Phase 3b reward + combat shaping."""
-        reward = self._compute_reward(hunger_prev, food_gathered, hazard_damage, agent, exploration_reward, inv_food_prev)
+        reward = self._compute_reward(hunger_prev, health_prev, food_gathered, hazard_damage, agent, exploration_reward, inv_food_prev)
         reward += REWARD_DAMAGE_TAKEN_SCALE * damage_taken
         reward += defeat_bonus
         return reward

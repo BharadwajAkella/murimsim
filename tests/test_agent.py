@@ -5,10 +5,12 @@ import numpy as np
 import pytest
 
 from murimsim.agent import (
+    FOOD_HEALTH_RESTORE,
     HUNGER_PER_TICK,
     INHERIT_SIGMA,
     RESISTANCE_GAIN,
-    STARVATION_DAMAGE_PER_TICK,
+    STARVATION_HEALTH_DRAIN_SCALE,
+    STARVATION_THRESHOLD,
     Agent,
     AgentInventory,
     inherit_value,
@@ -85,10 +87,12 @@ def test_hunger_capped_at_one():
 
 
 def test_starvation_damages_health():
-    """When hunger is already 1.0, ticking reduces health."""
+    """When hunger is at 1.0, ticking reduces health based on escalating drain."""
     agent = _make_agent(health=1.0, hunger=1.0)
+    agent.hunger_resistance = 0.0  # max effect
+    before = agent.health
     agent.tick()
-    assert abs(agent.health - (1.0 - STARVATION_DAMAGE_PER_TICK)) < 1e-6
+    assert agent.health < before
 
 
 def test_agent_dies_starvation():
@@ -188,10 +192,10 @@ def test_poison_immunity_at_one():
 
 
 def test_rest_restores_health():
-    """rest() increases health by 0.02, capped at 1.0."""
+    """rest() increases health by REST_HEALTH_RESTORE when well-fed, capped at 1.0."""
     agent = _make_agent(health=0.5)
     agent.rest()
-    assert abs(agent.health - 0.52) < 1e-6
+    assert abs(agent.health - (0.5 + Agent.REST_HEALTH_RESTORE)) < 1e-6
 
 
 def test_move_changes_position():
@@ -552,3 +556,132 @@ def test_reproduction_tracked_in_env():
     assert "ep_reproductions" in terminal_info
     # With max_age=3 and 4 agents, reproductions are expected
     assert terminal_info["ep_reproductions"] >= 0  # may be 0 if <2 survived each death
+
+
+# ─── Health overhaul tests ──────────────────────────────────────────────────
+
+
+def _make_agent_hr(hunger_resistance: float = 0.5, hunger: float = 0.0) -> Agent:
+    """Create a minimal agent with a specific hunger_resistance and hunger level."""
+    a = Agent(
+        agent_id="hr_test",
+        position=(5, 5),
+        health=1.0,
+        hunger=hunger,
+        strength=0.5,
+        adventure_spirit=0.5,
+        sociability=0.5,
+        hunger_resistance=hunger_resistance,
+    )
+    return a
+
+
+_FOOD_RCFG: dict = {}  # minimal resource_configs for eat(): no special food config
+
+
+def test_eat_restores_health():
+    """Eating food should restore FOOD_HEALTH_RESTORE health."""
+    a = _make_agent_hr(hunger=0.5)
+    a.inventory.food = 1
+    a.health = 0.5
+    before = a.health
+    a.eat(_FOOD_RCFG)
+    assert a.health > before
+
+
+def test_eat_restores_health_by_expected_amount():
+    """Health restore after eating should match FOOD_HEALTH_RESTORE constant."""
+    a = _make_agent_hr(hunger=0.5)
+    a.inventory.food = 1
+    a.health = 0.5
+    a.eat(_FOOD_RCFG)
+    assert abs(a.health - (0.5 + FOOD_HEALTH_RESTORE)) < 1e-6
+
+
+def test_eat_does_not_overheal():
+    """Health should not exceed 1.0 from eating."""
+    a = _make_agent_hr(hunger=0.3)
+    a.inventory.food = 1
+    a.health = 1.0
+    a.eat(_FOOD_RCFG)
+    assert a.health <= 1.0
+
+
+def test_health_drain_starts_above_threshold():
+    """Ticking an agent with hunger > STARVATION_THRESHOLD should drain health."""
+    a = _make_agent_hr(hunger_resistance=0.0, hunger=1.0)
+    a.health = 0.8
+    before = a.health
+    a.tick()
+    assert a.health < before
+
+
+def test_health_drain_does_not_trigger_below_threshold():
+    """Ticking an agent with hunger below threshold should not drain health."""
+    a = _make_agent_hr(hunger_resistance=0.0, hunger=STARVATION_THRESHOLD - 0.05)
+    a.health = 0.8
+    before = a.health
+    a.tick()
+    # After one tick hunger may still be below threshold — no starvation drain
+    assert a.health >= before - 1e-9
+
+
+def test_hunger_resistance_reduces_health_drain():
+    """Higher hunger_resistance should result in less health drain."""
+    a_low  = _make_agent_hr(hunger_resistance=0.0, hunger=1.0)
+    a_high = _make_agent_hr(hunger_resistance=0.9, hunger=1.0)
+    a_low.health = a_high.health = 0.8
+    a_low.tick()
+    a_high.tick()
+    assert a_low.health < a_high.health
+
+
+def test_effective_strength_reduced_when_starving():
+    """effective_strength should be less than strength when hunger > threshold."""
+    a = _make_agent_hr(hunger_resistance=0.0, hunger=1.0)
+    assert a.effective_strength < a.strength
+
+
+def test_effective_strength_equals_strength_when_not_hungry():
+    """effective_strength should equal strength when hunger is below threshold."""
+    a = _make_agent_hr(hunger_resistance=0.0, hunger=0.0)
+    assert abs(a.effective_strength - a.strength) < 1e-6
+
+
+def test_effective_strength_equals_strength_with_full_resistance():
+    """Even at max hunger, full hunger_resistance should prevent strength penalty."""
+    a = _make_agent_hr(hunger_resistance=1.0, hunger=1.0)
+    assert abs(a.effective_strength - a.strength) < 1e-6
+
+
+def test_rest_less_effective_when_starving():
+    """REST health restore should be lower when agent is heavily starving."""
+    a_fed      = _make_agent_hr(hunger=0.0)
+    a_starving = _make_agent_hr(hunger=1.0)
+    a_fed.health = a_starving.health = 0.5
+    a_fed.rest()
+    starving_before = a_starving.health
+    a_starving.rest()
+    assert a_fed.health > a_starving.health
+
+
+def test_spawn_includes_hunger_resistance():
+    """spawn() should produce a hunger_resistance within the config range."""
+    import yaml, pathlib
+    cfg_path = pathlib.Path("config/default.yaml")
+    cfg = yaml.safe_load(cfg_path.read_text())
+    rng = np.random.default_rng(42)
+    a = Agent.spawn("s0", (0, 0), rng, cfg)
+    hr_min = cfg["agent"]["hunger_resistance_min"]
+    hr_max = cfg["agent"]["hunger_resistance_max"]
+    assert hr_min <= a.hunger_resistance <= hr_max
+
+
+def test_spawn_from_parents_inherits_hunger_resistance():
+    """spawn_from_parents() should inherit hunger_resistance from both parents."""
+    p1 = _make_agent_hr(hunger_resistance=0.2)
+    p2 = _make_agent_hr(hunger_resistance=0.8)
+    p1.agent_id = "p1"; p2.agent_id = "p2"
+    rng = np.random.default_rng(7)
+    child = Agent.spawn_from_parents("c0", (0, 0), p1, p2, rng)
+    assert 0.0 <= child.hunger_resistance <= 1.0

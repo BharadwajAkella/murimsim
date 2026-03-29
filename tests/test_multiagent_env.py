@@ -42,16 +42,16 @@ def _make_env(n_agents: int = 3, seed: int = 0) -> MultiAgentEnv:
 # ---------------------------------------------------------------------------
 
 def test_agent_obs_size() -> None:
-    """Obs vector must be exactly OBS_TOTAL_SIZE (262) floats."""
+    """Obs vector must be exactly OBS_TOTAL_SIZE (263) floats."""
     assert OBS_RESOURCE_GRID_SIZE == 100, f"Expected 100, got {OBS_RESOURCE_GRID_SIZE}"
     assert OBS_AGENT_GRID_SIZE == 100, f"Expected 100, got {OBS_AGENT_GRID_SIZE}"
     assert OBS_STASH_GRID_SIZE == 50, f"Expected 50, got {OBS_STASH_GRID_SIZE}"
-    assert OBS_STATS_SIZE == 12, f"Expected 12, got {OBS_STATS_SIZE}"
-    assert OBS_TOTAL_SIZE == 262, f"Expected 262, got {OBS_TOTAL_SIZE}"
+    assert OBS_STATS_SIZE == 13, f"Expected 13, got {OBS_STATS_SIZE}"
+    assert OBS_TOTAL_SIZE == 263, f"Expected 263, got {OBS_TOTAL_SIZE}"
 
     env = _make_env(n_agents=5)
     obs, _ = env.reset(seed=0)
-    assert obs.shape == (262,), f"Expected obs shape (262,), got {obs.shape}"
+    assert obs.shape == (263,), f"Expected obs shape (263,), got {obs.shape}"
     assert obs.dtype == np.float32
     assert np.all(np.isfinite(obs)), "Obs contains non-finite values"
 
