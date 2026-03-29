@@ -222,6 +222,9 @@ class MultiAgentEnv(gym.Env):
         self._ep_groups_formed: int = 0         # how many times _form_group was called
         self._ep_group_member_ticks: int = 0    # sum of group sizes across all steps
 
+        # Foraging-outward tracking: max Chebyshev dist from own stash since last deposit
+        self._max_dist_since_deposit: list[float] = [0.0] * self._n_agents
+
         self._stash_registry.reset()
 
         return self._build_obs(self._focal_idx), {}
@@ -242,7 +245,7 @@ class MultiAgentEnv(gym.Env):
         prev_pos = focal.position
         pre_hazard_dists = {h: self._nearest_hazard_dist(prev_pos, h) for h in HAZARD_RESOURCE_IDS}
 
-        food_gathered, poison_damage = self._apply_action(focal, action_enum)
+        food_gathered, poison_damage, stash_bonus = self._apply_action(focal, action_enum, self._focal_idx)
 
         # Update approach/flee counters for MOVE actions
         if action_enum in MOVE_DELTAS:
@@ -326,6 +329,8 @@ class MultiAgentEnv(gym.Env):
         reward = self._compute_reward(hunger_prev, food_gathered, poison_damage, focal, exploration_reward, inv_food_prev)
         if focal.alive:
             reward += food_share_reward
+            reward += stash_bonus
+            reward += self._stash_proximity_reward(self._focal_idx)
         ema = self._reward_ema[self._focal_idx]
         self._reward_ema[self._focal_idx] = (1.0 - REWARD_EMA_ALPHA) * ema + REWARD_EMA_ALPHA * reward
 
@@ -444,6 +449,25 @@ class MultiAgentEnv(gym.Env):
             if len(pruned) >= 2:
                 new_groups.append(frozenset(pruned))
         self._groups = new_groups
+
+    def _stash_proximity_reward(self, agent_idx: int) -> float:
+        """Per-tick bonus when agent is hungry and standing near its own stash.
+
+        Incentivises agents to return to base when food-stressed rather than
+        wandering. Active only when hunger > STASH_HUNGER_GATE and agent has
+        a stash within STASH_PROXIMITY_RANGE Chebyshev tiles.
+        """
+        agent = self._agents[agent_idx]
+        if agent.hunger <= STASH_HUNGER_GATE:
+            return 0.0
+        stashes = self._stash_registry.get_stashes_for_owner(agent.agent_id)
+        if not stashes:
+            return 0.0
+        ax, ay = agent.position
+        for s in stashes:
+            if max(abs(ax - s.position[0]), abs(ay - s.position[1])) <= STASH_PROXIMITY_RANGE:
+                return REWARD_STASH_PROXIMITY
+        return 0.0
 
     def _group_cohesion_reward(self, agent_idx: int) -> float:
         """Return a per-tick reward for each live group member within GROUP_COHESION_RANGE.
@@ -630,14 +654,30 @@ class MultiAgentEnv(gym.Env):
 
     # ── Action application ────────────────────────────────────────────────────
 
-    def _apply_action(self, agent: Agent, action_enum: Action) -> tuple[int, float]:
-        """Apply action_enum to agent. Returns (food_gathered, poison_damage)."""
+    def _apply_action(self, agent: Agent, action_enum: Action, agent_idx: int = -1) -> tuple[int, float, float]:
+        """Apply action_enum to agent. Returns (food_gathered, poison_damage, stash_bonus).
+
+        stash_bonus is non-zero only when a DEPOSIT qualifies for the
+        foraging-outward reward (agent was >= FORAGE_OUTWARD_MIN_DIST tiles from
+        the stash between this and its previous deposit).
+        """
         food_gathered = 0
         poison_damage = 0.0
+        stash_bonus = 0.0
 
         if action_enum in MOVE_DELTAS:
             dx, dy = MOVE_DELTAS[action_enum]
             agent.move(dx, dy, self._world.grid_size)
+            # Update max distance from own stash since last deposit
+            if agent_idx >= 0:
+                stashes = self._stash_registry.get_stashes_for_owner(agent.agent_id)
+                if stashes:
+                    dist = min(
+                        max(abs(agent.position[0] - s.position[0]), abs(agent.position[1] - s.position[1]))
+                        for s in stashes
+                    )
+                    if dist > self._max_dist_since_deposit[agent_idx]:
+                        self._max_dist_since_deposit[agent_idx] = dist
 
         elif action_enum == Action.GATHER:
             x, y = agent.position
@@ -660,16 +700,26 @@ class MultiAgentEnv(gym.Env):
             stash = self._stash_registry.deposit(agent)
             if stash:
                 self._ep_items_deposited += stash.total()
+                if agent_idx >= 0 and self._max_dist_since_deposit[agent_idx] >= FORAGE_OUTWARD_MIN_DIST:
+                    stash_bonus += REWARD_FORAGE_OUTWARD
+                if agent_idx >= 0:
+                    self._max_dist_since_deposit[agent_idx] = 0.0
 
         elif action_enum == Action.WITHDRAW:
-            at_pos = self._stash_registry.get_own_stash_at(agent.agent_id, *agent.position)
-            self._ep_items_withdrawn += sum(s.total() for s in at_pos)
-            self._stash_registry.withdraw(agent)
+            group = self._get_group(agent_idx) if agent_idx >= 0 else None
+            if group:
+                member_ids = [self._agents[i].agent_id for i in group]
+                food_got = self._stash_registry.withdraw_group(agent, member_ids)
+                self._ep_items_withdrawn += food_got
+            else:
+                at_pos = self._stash_registry.get_own_stash_at(agent.agent_id, *agent.position)
+                self._ep_items_withdrawn += sum(s.total() for s in at_pos)
+                self._stash_registry.withdraw(agent)
 
         elif action_enum == Action.STEAL:
             self._stash_registry.steal(agent)
 
-        return food_gathered, poison_damage
+        return food_gathered, poison_damage, stash_bonus
 
     # ── Heuristic for non-focal agents ───────────────────────────────────────
 
@@ -785,6 +835,17 @@ RECIPROCITY_BOOSTED: float = 0.85     # boosted chance if ally helped me recentl
 RECIPROCITY_WINDOW: int = 100         # steps within which past help is remembered
 REWARD_FOOD_SHARE: float = 0.04       # reward focal receives when it shares or is shared with
 
+# Shared stash rewards
+# Foraging-outward: deposit after having been >=N tiles away from stash since last deposit
+FORAGE_OUTWARD_MIN_DIST: int = 5      # Chebyshev tiles away from stash to qualify
+REWARD_FORAGE_OUTWARD: float = 0.03   # bonus for depositing after a foraging excursion
+# Group withdrawal bonus: received by stash owner when a group member withdraws their food
+REWARD_GROUP_WITHDRAW_BONUS: float = 0.02
+# Stash proximity hunger shield: per-tick bonus when hungry and near own stash
+STASH_PROXIMITY_RANGE: int = 3        # Chebyshev tiles
+STASH_HUNGER_GATE: float = 0.50       # only active when hunger > this
+REWARD_STASH_PROXIMITY: float = 0.01  # per-tick bonus
+
 # Group combat mechanics
 # Combat requires attacker and target to be within Chebyshev distance 1 (8 directions incl. diagonals)
 # Attack bonus: +X% damage per group member flanking from any of the 8 surrounding cells
@@ -861,6 +922,7 @@ class CombatEnv(MultiAgentEnv):
         defeat_bonus = 0.0
         focal_defending = (action_enum == Action.DEFEND)
         group_formed = False
+        stash_bonus = 0.0
 
         # Snapshot hazard distances before the action for approach/flee tracking
         prev_pos = focal.position
@@ -883,7 +945,7 @@ class CombatEnv(MultiAgentEnv):
         elif action_enum == Action.WALK_AWAY:
             self._walk_away(focal)
         else:
-            food_gathered, poison_damage = self._apply_action(focal, action_enum)
+            food_gathered, poison_damage, stash_bonus = self._apply_action(focal, action_enum, self._focal_idx)
 
         # Track action counts and hazard approach/flee for dashboard
         key = action_enum.name.lower()
@@ -990,6 +1052,8 @@ class CombatEnv(MultiAgentEnv):
         # Food sharing: reward focal for participating in mutual aid
         if focal.alive:
             reward += food_share_reward
+            reward += stash_bonus
+            reward += self._stash_proximity_reward(self._focal_idx)
         ema = self._reward_ema[self._focal_idx]
         self._reward_ema[self._focal_idx] = (1.0 - REWARD_EMA_ALPHA) * ema + REWARD_EMA_ALPHA * reward
 

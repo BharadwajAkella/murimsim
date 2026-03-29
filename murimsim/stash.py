@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Qi cost (in inventory units) to place a stash
-STASH_QI_COST: int = 1
+STASH_QI_COST: int = 0   # free to deposit — qi cost removed to unblock stash usage
 
 
 @dataclasses.dataclass
@@ -84,29 +84,23 @@ class StashRegistry:
     def deposit(self, agent: Agent, qi_cost: float = 0.2) -> Stash | None:
         """Create a stash at ``agent.position`` with the agent's full inventory.
 
-        Costs ``STASH_QI_COST`` qi items from the agent's inventory. If the
-        agent has no qi, the action is a no-op and ``None`` is returned.
+        No qi cost (STASH_QI_COST = 0). Requires at least 1 food item to deposit
+        (prevents empty no-op deposits).
 
-        After a successful deposit:
-        - ``STASH_QI_COST`` qi is deducted from the agent's inventory.
-        - ALL remaining inventory (food, remaining qi, materials, poison) is
-          moved into the new stash.
-        - The agent's inventory is zeroed out.
+        After a successful deposit all inventory is moved into the new stash and
+        the agent's inventory is zeroed out.
 
         Args:
             agent:    The depositing agent.
-            qi_cost:  Reserved parameter (ignored; cost is always STASH_QI_COST).
+            qi_cost:  Unused — kept for API compatibility.
 
         Returns:
-            The newly created :class:`Stash`, or ``None`` if the deposit failed.
+            The newly created :class:`Stash`, or ``None`` if deposit failed
+            (empty inventory).
         """
-        if agent.inventory.qi < STASH_QI_COST:
+        if agent.inventory.food < 1:
             return None
 
-        # Deduct placement cost
-        agent.inventory.qi -= STASH_QI_COST
-
-        # Build stash id
         owner_id = agent.agent_id
         idx = self._next_idx.get(owner_id, 0)
         stash_id = f"{owner_id}_stash_{idx}"
@@ -122,7 +116,6 @@ class StashRegistry:
             poison=agent.inventory.poison,
         )
 
-        # Zero out agent inventory
         agent.inventory.food = 0
         agent.inventory.qi = 0
         agent.inventory.materials = 0
@@ -157,6 +150,37 @@ class StashRegistry:
             logger.debug("Agent %s withdrew stash %s", agent.agent_id, stash.stash_id)
 
         return transferred
+
+    def withdraw_group(self, agent: Agent, group_member_ids: list[str]) -> int:
+        """Withdraw food from any group member's stash at ``agent.position``.
+
+        Merges food-only from stashes owned by any member of ``group_member_ids``
+        (including agent itself) at the agent's current position.
+        Non-food items stay in the stash (food is the shared resource).
+
+        Args:
+            agent:            The withdrawing agent.
+            group_member_ids: Agent IDs of all group members including ``agent``.
+
+        Returns:
+            Total food items transferred (0 if nothing was available).
+        """
+        food_transferred = 0
+        pos = agent.position
+        for mid in group_member_ids:
+            stashes = self.get_own_stash_at(mid, *pos)
+            for stash in stashes:
+                if stash.food > 0:
+                    food_transferred += stash.food
+                    agent.inventory.food += stash.food
+                    stash.food = 0
+                    if stash.total() == 0:
+                        del self._stashes[stash.stash_id]
+                    logger.debug(
+                        "Agent %s group-withdrew food from stash %s (owner %s)",
+                        agent.agent_id, stash.stash_id, mid,
+                    )
+        return food_transferred
 
     def steal(self, agent: Agent) -> Stash | None:
         """Take the first enemy stash at ``agent.position``.

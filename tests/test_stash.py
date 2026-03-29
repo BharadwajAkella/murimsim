@@ -1,8 +1,8 @@
 """Tests for the personal stash system (Phase 3+).
 
 Covers:
-  1. deposit_transfers_inventory — inventory moves into stash, qi cost deducted
-  2. deposit_requires_qi — agent with no qi cannot deposit
+  1. deposit_transfers_inventory — inventory moves into stash, no qi cost
+  2. deposit_requires_food — agent with no food cannot deposit (returns None)
   3. withdraw_returns_resources — deposit then withdraw restores inventory
   4. steal_takes_enemy_stash — agent B steals agent A's stash
   5. stash_obs_channels — my_stash / enemy_stash channels populated correctly
@@ -39,7 +39,7 @@ def _make_agent(agent_id: str = "agent_0", pos: tuple[int, int] = (5, 5)) -> Age
 # ---------------------------------------------------------------------------
 
 def test_deposit_transfers_inventory() -> None:
-    """Depositing should empty the agent's inventory into the stash (minus qi cost)."""
+    """Depositing should empty the agent's full inventory into the stash (no qi cost)."""
     registry = StashRegistry()
     agent = _make_agent()
     agent.inventory = AgentInventory(food=5, qi=3, materials=2, poison=1)
@@ -50,9 +50,9 @@ def test_deposit_transfers_inventory() -> None:
     assert stash.owner_id == agent.agent_id
     assert stash.position == agent.position
 
-    # qi cost deducted, remaining qi moved to stash
+    # All inventory moved to stash — no qi cost deducted
     assert stash.food == 5
-    assert stash.qi == 3 - STASH_QI_COST  # 2
+    assert stash.qi == 3
     assert stash.materials == 2
     assert stash.poison == 1
 
@@ -68,22 +68,20 @@ def test_deposit_transfers_inventory() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 2: deposit requires at least 1 qi
+# Test 2: deposit requires at least 1 food item
 # ---------------------------------------------------------------------------
 
-def test_deposit_requires_qi() -> None:
-    """An agent with no qi should not be able to deposit; returns None."""
+def test_deposit_requires_food() -> None:
+    """An agent with no food should not be able to deposit; returns None."""
     registry = StashRegistry()
     agent = _make_agent()
-    agent.inventory = AgentInventory(food=10, qi=0, materials=0, poison=0)
+    agent.inventory = AgentInventory(food=0, qi=3, materials=2, poison=0)
 
     result = registry.deposit(agent)
 
-    assert result is None, "deposit() should return None when agent has no qi"
+    assert result is None, "deposit() should return None when agent has no food"
     assert len(registry.all_stashes()) == 0, "No stash should be created"
-    # Inventory unchanged
-    assert agent.inventory.food == 10
-    assert agent.inventory.qi == 0
+    assert agent.inventory.qi == 3, "Inventory unchanged"
 
 
 # ---------------------------------------------------------------------------
@@ -245,3 +243,66 @@ def test_stash_resets_on_env_reset() -> None:
     assert len(env._stash_registry.all_stashes()) == 0, (
         "StashRegistry must be cleared on env.reset()"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 7: group withdraw transfers food from ally stash
+# ---------------------------------------------------------------------------
+
+def test_group_withdraw_transfers_food() -> None:
+    """withdraw_group() should pull food from a nearby group member's stash."""
+    registry = StashRegistry()
+    owner = _make_agent("agent_0", (5, 5))
+    recipient = _make_agent("agent_1", (5, 5))  # same tile
+
+    # Owner deposits food into stash
+    owner.inventory = AgentInventory(food=4, qi=0, materials=0, poison=0)
+    stash = registry.deposit(owner)
+    assert stash is not None
+    assert stash.food == 4
+
+    # Recipient starts with no food
+    recipient.inventory = AgentInventory(food=0, qi=0, materials=0, poison=0)
+
+    # Group withdraw: recipient takes from owner's stash
+    registry.withdraw_group(recipient, group_member_ids=["agent_0"])
+
+    assert recipient.inventory.food > 0, "Recipient should receive food from group withdraw"
+    assert stash.food < 4, "Stash food should be reduced after group withdraw"
+
+
+# ---------------------------------------------------------------------------
+# Test 8: stash proximity reward triggers when hungry and close
+# ---------------------------------------------------------------------------
+
+def test_stash_proximity_reward() -> None:
+    """_stash_proximity_reward returns nonzero when agent is hungry and near its stash."""
+    from murimsim.rl.multi_env import MultiAgentEnv, STASH_HUNGER_GATE
+
+    cfg = _load_cfg()
+    cfg["n_agents"] = 2
+    env = MultiAgentEnv(config=cfg, seed=0)
+    env.reset(seed=0)
+
+    agent = env._agents[0]
+    # Make agent hungry enough to trigger proximity reward
+    agent.hunger = STASH_HUNGER_GATE + 0.1
+
+    # Manually create a stash at the agent's position
+    env._stash_registry._stashes.clear()
+    from murimsim.stash import Stash
+    s = Stash(
+        stash_id=f"{agent.agent_id}_stash_0",
+        owner_id=agent.agent_id,
+        position=agent.position,
+        food=5,
+    )
+    env._stash_registry._stashes[s.stash_id] = s
+
+    reward = env._stash_proximity_reward(0)
+    assert reward > 0.0, "Should get proximity reward when hungry and at own stash"
+
+    # Not hungry — no reward
+    agent.hunger = 0.1
+    reward_sated = env._stash_proximity_reward(0)
+    assert reward_sated == 0.0, "Should not get proximity reward when sated"

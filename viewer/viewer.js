@@ -28,7 +28,7 @@ const RESOURCE_COLORS = {
   mountain:  "rgba(120, 80, 40, 0.85)",   // brown
 };
 
-const SECT_COLORS = {};  // sects not yet implemented — all agents share AGENT_COLOR
+// No per-sect colors yet — sects scaffold comes in Phase 6a
 
 const DEAD_AGENT_COLOR = "#555";
 const AGENT_COLOR = "#a78bfa";         // unified alive-agent color (soft purple)
@@ -425,7 +425,6 @@ function updateAgentPanel(tick) {
   agentPanel.innerHTML = `
     <h3>${agent.id}</h3>
     <table class="stat-table">
-      <tr><th>Sect</th><td>${agent.sect}</td></tr>
       <tr><th>Position</th><td>(${agent.pos[0]}, ${agent.pos[1]})</td></tr>
       <tr><th>Alive</th><td>${agent.alive ? "✅" : "💀"}</td></tr>
       <tr><th>Health</th><td>
@@ -433,7 +432,7 @@ function updateAgentPanel(tick) {
         ${fmt(agent.health)}
       </td></tr>
       <tr><th>Hunger</th><td>
-        <div class="bar-wrap"><div class="bar hunger-bar" style="width:${barW(agent.hunger)}%"></div></div>
+        <div class="bar-wrap"><div class="bar hunger-bar" style="width:${barW(agent.hunger ?? 0)}%"></div></div>
         ${Math.round((agent.hunger ?? 0) * 100)}
       </td></tr>
       ${resRows}
@@ -473,7 +472,7 @@ function updateTilePanel(tick) {
     : `<tr><td colspan="2" class="muted" style="padding:4px 0">Empty tile</td></tr>`;
 
   const agentRows = here.map(a =>
-    `<tr><th>Agent</th><td style="color:${SECT_COLORS[a.sect] || '#fff'}">${a.id} ${a.alive ? "✅" : "💀"}</td></tr>`
+    `<tr><th>Agent</th><td style="color:#fff">${a.id} ${a.alive ? "✅" : "💀"}</td></tr>`
   ).join("");
 
   agentPanel.innerHTML = `
