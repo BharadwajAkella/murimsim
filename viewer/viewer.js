@@ -28,10 +28,14 @@ const RESOURCE_COLORS = {
   mountain:  "rgba(120, 80, 40, 0.85)",   // brown
 };
 
-// No per-sect colors yet — sects scaffold comes in Phase 6a
-
+// Per-sect agent colors — Phase 6a
+const SECT_COLORS = {
+  iron_fang:   "#e74c3c",   // red
+  jade_lotus:  "#2ecc71",   // green
+  shadow_root: "#9b59b6",   // purple
+};
 const DEAD_AGENT_COLOR = "#555";
-const AGENT_COLOR = "#a78bfa";         // unified alive-agent color (soft purple)
+const AGENT_COLOR = "#a78bfa";         // fallback color when sect is "none"
 const AGENT_COMBAT_COLOR = "#ef4444";  // bright red during attack or defend
 const AGENT_RADIUS_FRAC = 0.28;        // fraction of cell size
 const DEFAULT_FPS = 3;
@@ -286,7 +290,7 @@ function render() {
       // Flash between two reds: bright on even render frames, darker on odd
       ctx.fillStyle = (state.currentIndex % 2 === 0) ? AGENT_COMBAT_COLOR : "#b91c1c";
     } else {
-      ctx.fillStyle = AGENT_COLOR;
+      ctx.fillStyle = SECT_COLORS[agent.sect] || AGENT_COLOR;
     }
     ctx.fill();
 

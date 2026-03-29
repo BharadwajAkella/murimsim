@@ -23,25 +23,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from murimsim.actions import Action
 from murimsim.replay import ReplayLogger
 from murimsim.rl.multi_env import CombatEnv
+from murimsim.sect import DEFAULT_SECTS
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "default.yaml"
 TRAIN_CONFIG_PATH = Path(__file__).parent.parent / "config" / "training.yaml"
 OUTPUT_DIR = Path("/mnt/c/Users/bhara/Downloads/replays")
 DEFAULT_MODEL = Path(__file__).parent.parent / "checkpoints" / "limbic_lstm_v2" / "limbic_lstm_v2_final.zip"
-
-# Assign a distinct "sect" colour to each agent slot for the viewer
-_SECT_PALETTE = [
-    "iron_fang",    # red
-    "jade_lotus",   # green
-    "shadow_root",  # purple
-    "iron_fang",
-    "jade_lotus",
-    "shadow_root",
-    "iron_fang",
-    "jade_lotus",
-    "shadow_root",
-    "iron_fang",
-]
 
 
 def _world_resources(env: CombatEnv) -> dict[str, list[list[int | float]]]:
@@ -61,16 +48,10 @@ def _agent_snapshots(
     last_details: list[str],
 ) -> list[dict]:
     """Snapshot of all agents' current state for the viewer."""
-    records = []
-    for i, agent in enumerate(env._agents):
-        sect = _SECT_PALETTE[i % len(_SECT_PALETTE)]
-        rec = agent.to_replay_dict(
-            action=last_actions[i],
-            action_detail=last_details[i],
-        )
-        rec["sect"] = sect
-        records.append(rec)
-    return records
+    return [
+        agent.to_replay_dict(action=last_actions[i], action_detail=last_details[i])
+        for i, agent in enumerate(env._agents)
+    ]
 
 
 def main() -> None:
@@ -120,6 +101,11 @@ def main() -> None:
     env = CombatEnv(config=config, n_agents=args.agents, seed=args.seed)
     env_obs_size: int = env.observation_space.shape[0]
 
+    # Assign round-robin sect IDs for viewer coloring (no home-region spawning in recording mode)
+    def _assign_sect_ids() -> None:
+        for i, agent in enumerate(env._agents):
+            agent.sect_id = DEFAULT_SECTS.by_index(i).sect_id
+
     # Compat shim: if model was trained on a smaller obs space (e.g. M3=209 vs M4=234),
     # strip the extra features by dropping the enemy-stash channel from the stash section.
     # Layout: resources(100) + agents(75) + stash(N) + stats(9)
@@ -143,6 +129,7 @@ def main() -> None:
         return obs[:model_obs_size]
 
     obs, _ = env.reset(seed=args.seed)
+    _assign_sect_ids()
 
     # Enable full combat immediately (skip curriculum ramp for interesting replays)
     if not args.no_combat:

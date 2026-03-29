@@ -36,6 +36,7 @@ from gymnasium import spaces
 
 from murimsim.actions import Action, MOVE_DELTAS, N_ACTIONS_PHASE2, N_ACTIONS_PHASE3, N_ACTIONS_PHASE5, N_ACTIONS_PHASE6
 from murimsim.agent import Agent
+from murimsim.sect import SectConfig
 from murimsim.stash import StashRegistry
 from murimsim.world import World
 
@@ -169,6 +170,14 @@ class MultiAgentEnv(gym.Env):
 
     # ── Gymnasium API ────────────────────────────────────────────────────────
 
+    def _initial_position(self, idx: int, grid_size: int) -> tuple[int, int]:
+        """Return the starting ``(x, y)`` position for agent *idx* at episode reset.
+
+        Subclasses may override this to constrain agents to a home region.
+        By default, positions are uniformly random within the grid.
+        """
+        return (int(self._rng.integers(0, grid_size)), int(self._rng.integers(0, grid_size)))
+
     def reset(
         self,
         seed: int | None = None,
@@ -202,7 +211,7 @@ class MultiAgentEnv(gym.Env):
         self._agents = [
             Agent.spawn(
                 f"agent_{i}",
-                (int(self._rng.integers(0, gs)), int(self._rng.integers(0, gs))),
+                self._initial_position(i, gs),
                 self._rng,
                 cfg,
             )
@@ -927,6 +936,7 @@ class CombatEnv(MultiAgentEnv):
         seed: int | None = None,
         render_mode: str | None = None,
         curriculum_ramp_steps: int = CURRICULUM_RAMP_STEPS,
+        sect_config: SectConfig | None = None,
     ) -> None:
         super().__init__(
             config=config,
@@ -937,6 +947,19 @@ class CombatEnv(MultiAgentEnv):
         )
         self._curriculum_ramp_steps: int = curriculum_ramp_steps
         self._global_step_count: int = 0  # persists across episodes
+        self._sect_config: SectConfig | None = sect_config
+
+    # ── Sect home-region spawning ─────────────────────────────────────────────
+
+    def _initial_position(self, idx: int, grid_size: int) -> tuple[int, int]:
+        """Spawn agents inside the sect's home region when a sect is configured."""
+        if self._sect_config is None:
+            return super()._initial_position(idx, grid_size)
+        x_lo, x_hi = self._sect_config.home_x_range
+        y_lo, y_hi = self._sect_config.home_y_range
+        x = int(self._rng.integers(x_lo, x_hi + 1))
+        y = int(self._rng.integers(y_lo, y_hi + 1))
+        return (x, y)
 
     # ── Curriculum ────────────────────────────────────────────────────────────
 
@@ -945,6 +968,20 @@ class CombatEnv(MultiAgentEnv):
         """Current probability that a combat action is allowed (not masked to REST)."""
         frac = min(1.0, self._global_step_count / max(1, self._curriculum_ramp_steps))
         return CURRICULUM_START_PROB + (CURRICULUM_END_PROB - CURRICULUM_START_PROB) * frac
+
+    # ── reset override ────────────────────────────────────────────────────────
+
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict | None = None,
+    ) -> tuple[np.ndarray, dict]:
+        """Reset the environment and assign sect_id to all agents if configured."""
+        obs, info = super().reset(seed=seed, options=options)
+        if self._sect_config is not None:
+            for agent in self._agents:
+                agent.sect_id = self._sect_config.sect_id
+        return obs, info
 
     # ── step override ─────────────────────────────────────────────────────────
 
@@ -1132,6 +1169,7 @@ class CombatEnv(MultiAgentEnv):
             "ep_action_rates": action_rates,
             "ep_hazard_approaches": dict(self._ep_hazard_approaches),
             "ep_hazard_flees": dict(self._ep_hazard_flees),
+            "ep_sect_id": self._sect_config.sect_id if self._sect_config is not None else "none",
         }
         if terminated:
             info["ep_lifespan"] = self._ep_steps

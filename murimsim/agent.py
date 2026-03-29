@@ -82,6 +82,7 @@ class Agent:
     resistances: dict[str, float] = dataclasses.field(default_factory=dict)
     inventory: AgentInventory = dataclasses.field(default_factory=AgentInventory)
     alive: bool = True
+    sect_id: str = "none"           # assigned by CombatEnv when sect_config is set
     # Tracks cumulative recent exposure per resistance_stat; decays per tick
     _intakes: dict[str, float] = dataclasses.field(
         default_factory=dict, init=False, repr=False
@@ -320,7 +321,7 @@ class Agent:
         """Return a dict matching the replay format spec."""
         return {
             "id": self.agent_id,
-            "sect": "none",
+            "sect": self.sect_id,
             "pos": list(self.position),
             "health": round(self.health, 4),
             "hunger": round(self.hunger, 4),
