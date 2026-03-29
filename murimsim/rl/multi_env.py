@@ -35,7 +35,7 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from murimsim.actions import Action, MOVE_DELTAS, N_ACTIONS_PHASE2, N_ACTIONS_PHASE3, N_ACTIONS_PHASE5, N_ACTIONS_PHASE6
-from murimsim.agent import Agent
+from murimsim.agent import Agent, inherit_value  # noqa: F401 (inherit_value re-exported for tests)
 from murimsim.sect import SectConfig
 from murimsim.stash import StashRegistry
 from murimsim.world import World
@@ -258,6 +258,7 @@ class MultiAgentEnv(gym.Env):
         self._ep_groups_formed: int = 0         # how many times _form_group was called
         self._ep_group_member_ticks: int = 0    # sum of group sizes across all steps
         self._ep_deaths_by_age: int = 0         # agents that died of natural old age
+        self._ep_reproductions: int = 0         # offspring spawned from parent pairs
 
         # Foraging-outward tracking: max Chebyshev dist from own stash since last deposit
         self._max_dist_since_deposit: list[float] = [0.0] * self._n_agents
@@ -315,6 +316,7 @@ class MultiAgentEnv(gym.Env):
                 if died_of_age:
                     self._ep_deaths_by_age += 1
                     self._drop_inventory(agent)
+                    self._try_reproduce(agent)
 
         self._prune_dead_from_groups()
 
@@ -434,6 +436,7 @@ class MultiAgentEnv(gym.Env):
                 if self._ep_groups_formed > 0 else 0.0
             )
             info["ep_deaths_by_age"] = self._ep_deaths_by_age
+            info["ep_reproductions"] = self._ep_reproductions
         return obs, reward, terminated, False, info
 
     def render(self) -> None:
@@ -509,6 +512,34 @@ class MultiAgentEnv(gym.Env):
         if self._world.get_grid_view("food")[y, x] == 0.0:
             self._world._grid["food"][y, x] = 1.0
         agent.inventory.food = 0
+
+    def _try_reproduce(self, deceased: Agent) -> None:
+        """Replace a dead (age-death) agent with an offspring of two random survivors.
+
+        Two living agents are chosen at random from the current population.  The
+        deceased agent's slot is revived in-place with inherited traits via
+        :meth:`Agent.spawn_from_parents`.  The offspring is placed at a random
+        empty position (or the deceased's last position if no empty cell is
+        found).  Nothing happens if fewer than 2 survivors are alive.
+        """
+        survivors = [a for a in self._agents if a.alive and a is not deceased]
+        if len(survivors) < 2:
+            return
+        parent1, parent2 = self._rng.choice(survivors, size=2, replace=False)  # type: ignore[arg-type]
+        # Find a random spawn position
+        grid_size = self._world.grid_size
+        pos = self._initial_position(len(self._agents), grid_size)
+        offspring = Agent.spawn_from_parents(
+            agent_id=deceased.agent_id,
+            position=pos,
+            parent1=parent1,
+            parent2=parent2,
+            rng=self._rng,
+        )
+        # Replace the deceased in the _agents list
+        idx = self._agents.index(deceased)
+        self._agents[idx] = offspring
+        self._ep_reproductions += 1
 
     def _stash_proximity_reward(self, agent_idx: int) -> float:
         """Per-tick stash proximity bonus — currently disabled (REWARD_STASH_PROXIMITY=0.0).
@@ -1091,6 +1122,7 @@ class CombatEnv(MultiAgentEnv):
                 if died_of_age:
                     self._ep_deaths_by_age += 1
                     self._drop_inventory(agent)
+                    self._try_reproduce(agent)
 
         # Remove dead agents from any groups
         self._prune_dead_from_groups()
@@ -1232,6 +1264,7 @@ class CombatEnv(MultiAgentEnv):
                 if self._ep_groups_formed > 0 else 0.0
             )
             info["ep_deaths_by_age"] = self._ep_deaths_by_age
+            info["ep_reproductions"] = self._ep_reproductions
         return obs, reward, terminated, False, info
 
     # ── Combat helpers ────────────────────────────────────────────────────────

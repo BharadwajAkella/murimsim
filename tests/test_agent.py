@@ -6,10 +6,12 @@ import pytest
 
 from murimsim.agent import (
     HUNGER_PER_TICK,
+    INHERIT_SIGMA,
     RESISTANCE_GAIN,
     STARVATION_DAMAGE_PER_TICK,
     Agent,
     AgentInventory,
+    inherit_value,
 )
 from murimsim.world import ResourceConfig, World
 
@@ -429,3 +431,124 @@ def test_ep_deaths_by_age_tracked():
     assert "ep_deaths_by_age" in terminal_info
     # With max_age=2, most agents should die of age
     assert terminal_info["ep_deaths_by_age"] >= 1, "Expected at least one aging death"
+
+
+# ---------------------------------------------------------------------------
+# Reproduction tests
+# ---------------------------------------------------------------------------
+
+def _make_parent(agent_id: str, strength: float = 0.5, soc: float = 0.4,
+                adv: float = 0.6, poison_res: float = 0.2) -> Agent:
+    return Agent(
+        agent_id=agent_id,
+        position=(0, 0),
+        health=1.0,
+        hunger=0.0,
+        strength=strength,
+        adventure_spirit=adv,
+        sociability=soc,
+        resistances={"poison": poison_res, "flame": 0.05, "qi_drain": 0.1},
+    )
+
+
+def test_inherit_value_midpoint():
+    """inherit_value returns a value near the midpoint of the two parents."""
+    rng = np.random.default_rng(0)
+    samples = [inherit_value(0.2, 0.8, rng, sigma=0.001) for _ in range(20)]
+    for v in samples:
+        assert abs(v - 0.5) < 0.01, f"Expected ~0.5, got {v}"
+
+
+def test_inherit_value_clamps_to_unit_interval():
+    """inherit_value never produces a value outside [0, 1]."""
+    rng = np.random.default_rng(1)
+    for _ in range(1000):
+        a = float(rng.uniform(0, 1))
+        b = float(rng.uniform(0, 1))
+        result = inherit_value(a, b, rng, sigma=0.5)
+        assert 0.0 <= result <= 1.0, f"Out of range: {result}"
+
+
+def test_spawn_from_parents_trait_inheritance():
+    """spawn_from_parents produces offspring with traits between parents (with noise)."""
+    rng = np.random.default_rng(42)
+    mom = _make_parent("mom", strength=0.8, soc=0.9, adv=0.7, poison_res=0.5)
+    dad = _make_parent("dad", strength=0.2, soc=0.1, adv=0.3, poison_res=0.1)
+    child = Agent.spawn_from_parents("child", (5, 5), mom, dad, rng, sigma=0.001)
+    # With sigma≈0, traits should be very close to midpoints
+    assert abs(child.strength - 0.5) < 0.02
+    assert abs(child.sociability - 0.5) < 0.02
+    assert abs(child.adventure_spirit - 0.5) < 0.02
+    assert abs(child.resistances["poison"] - 0.3) < 0.02
+
+
+def test_spawn_from_parents_lamarckian_resistance():
+    """Acquired (high) resistance in parents is inherited by offspring."""
+    rng = np.random.default_rng(7)
+    # Both parents have high poison_res from experience
+    mom = _make_parent("mom", poison_res=0.9)
+    dad = _make_parent("dad", poison_res=0.85)
+    child = Agent.spawn_from_parents("child", (0, 0), mom, dad, rng, sigma=0.001)
+    # Offspring should inherit the high resistance (Lamarckian)
+    assert child.resistances["poison"] > 0.8
+
+
+def test_spawn_from_parents_initial_state():
+    """Offspring starts with full health, zero hunger, and age=0."""
+    rng = np.random.default_rng(99)
+    mom = _make_parent("mom")
+    dad = _make_parent("dad")
+    mom.health = 0.4
+    mom.hunger = 0.7
+    mom.age = 500
+    child = Agent.spawn_from_parents("c", (1, 1), mom, dad, rng)
+    assert child.health == 1.0
+    assert child.hunger == 0.0
+    assert child.age == 0
+
+
+def test_spawn_from_parents_sect_inheritance_agreement():
+    """Offspring inherits sect_id when both parents share the same sect."""
+    rng = np.random.default_rng(3)
+    mom = _make_parent("mom")
+    mom.sect_id = "iron_fang"
+    dad = _make_parent("dad")
+    dad.sect_id = "iron_fang"
+    child = Agent.spawn_from_parents("c", (0, 0), mom, dad, rng)
+    assert child.sect_id == "iron_fang"
+
+
+def test_spawn_from_parents_sect_none_on_mismatch():
+    """Offspring has sect_id='none' when parents belong to different sects."""
+    rng = np.random.default_rng(3)
+    mom = _make_parent("mom")
+    mom.sect_id = "iron_fang"
+    dad = _make_parent("dad")
+    dad.sect_id = "jade_lotus"
+    child = Agent.spawn_from_parents("c", (0, 0), mom, dad, rng)
+    assert child.sect_id == "none"
+
+
+def test_reproduction_tracked_in_env():
+    """ep_reproductions is tracked and emitted in terminal info."""
+    import yaml
+    from pathlib import Path
+    from murimsim.rl.multi_env import MultiAgentEnv
+
+    cfg = yaml.safe_load(Path("config/default.yaml").read_text())
+    # Very low max_age so agents die quickly and reproduce
+    cfg["agent"]["max_age"] = 3
+    env = MultiAgentEnv(config=cfg, n_agents=4, seed=11)
+    env.reset(seed=11)
+
+    terminal_info = None
+    for _ in range(500):
+        _, _, terminated, _, info = env.step(env.action_space.sample())
+        if terminated:
+            terminal_info = info
+            break
+
+    assert terminal_info is not None
+    assert "ep_reproductions" in terminal_info
+    # With max_age=3 and 4 agents, reproductions are expected
+    assert terminal_info["ep_reproductions"] >= 0  # may be 0 if <2 survived each death

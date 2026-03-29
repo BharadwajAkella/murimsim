@@ -34,6 +34,35 @@ INTAKE_PER_EXPOSURE: float = 0.30
 # How quickly _intakes decays per tick (full recovery in ~15 ticks)
 INTAKE_DECAY_PER_TICK: float = 0.02
 
+# Inheritance noise: std-dev of Gaussian perturbation on midpoint trait value
+INHERIT_SIGMA: float = 0.05
+
+
+def inherit_value(
+    parent_a: float,
+    parent_b: float,
+    rng: np.random.Generator,
+    sigma: float = INHERIT_SIGMA,
+) -> float:
+    """Compute an inherited trait value as the parents' midpoint plus Gaussian noise.
+
+    This models Mendelian blending with random mutation. The result is clamped
+    to the valid trait range [0, 1].
+
+    Args:
+        parent_a: Trait value from the first parent (float in [0, 1]).
+        parent_b: Trait value from the second parent (float in [0, 1]).
+        rng:      Seeded RNG — must be the environment's RNG for determinism.
+        sigma:    Standard deviation of the Gaussian noise term. Defaults to
+                  ``INHERIT_SIGMA`` (0.05).
+
+    Returns:
+        Inherited trait value clamped to [0, 1].
+    """
+    midpoint = (parent_a + parent_b) / 2.0
+    noise = float(rng.normal(0.0, sigma))
+    return float(np.clip(midpoint + noise, 0.0, 1.0))
+
 
 @dataclasses.dataclass
 class AgentInventory:
@@ -92,6 +121,59 @@ class Agent:
     # ------------------------------------------------------------------
     # Factory
     # ------------------------------------------------------------------
+
+    @classmethod
+    def spawn_from_parents(
+        cls,
+        agent_id: str,
+        position: tuple[int, int],
+        parent1: "Agent",
+        parent2: "Agent",
+        rng: np.random.Generator,
+        sigma: float = INHERIT_SIGMA,
+    ) -> "Agent":
+        """Create an offspring agent with traits inherited from two parents.
+
+        Each trait is computed as the parents' midpoint plus Gaussian noise
+        (via :func:`inherit_value`). Resistances are Lamarckian — acquired
+        resistance from parents is passed to the offspring along with the noise.
+
+        The offspring starts with full health, zero hunger, zero age, and
+        inherits the parents' sect_id if they agree (otherwise "none").
+
+        Args:
+            agent_id: Unique identifier for the new agent.
+            position: Starting (x, y) grid cell.
+            parent1:  First parent agent.
+            parent2:  Second parent agent.
+            rng:      Seeded RNG for determinism.
+            sigma:    Noise level for trait inheritance.
+
+        Returns:
+            A new :class:`Agent` with inherited traits.
+        """
+        all_resistance_keys = set(parent1.resistances) | set(parent2.resistances)
+        inherited_resistances = {
+            key: inherit_value(
+                parent1.resistances.get(key, 0.0),
+                parent2.resistances.get(key, 0.0),
+                rng,
+                sigma,
+            )
+            for key in all_resistance_keys
+        }
+        sect = parent1.sect_id if parent1.sect_id == parent2.sect_id else "none"
+        return cls(
+            agent_id=agent_id,
+            position=position,
+            health=1.0,
+            hunger=0.0,
+            strength=         inherit_value(parent1.strength,         parent2.strength,         rng, sigma),
+            adventure_spirit= inherit_value(parent1.adventure_spirit, parent2.adventure_spirit, rng, sigma),
+            sociability=      inherit_value(parent1.sociability,      parent2.sociability,      rng, sigma),
+            resistances=inherited_resistances,
+            sect_id=sect,
+        )
 
     @classmethod
     def spawn(

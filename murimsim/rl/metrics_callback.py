@@ -74,6 +74,8 @@ class MetricsDashboardCallback(BaseCallback):
         self._final_powers: deque[float] = deque(maxlen=_ROLLING_WINDOW)
         # aging death tracking
         self._deaths_by_age: deque[float] = deque(maxlen=_ROLLING_WINDOW)
+        # reproduction tracking
+        self._reproductions: deque[float] = deque(maxlen=_ROLLING_WINDOW)
         # timestep history for sparkline
         self._history: list[dict[str, Any]] = []
 
@@ -126,6 +128,8 @@ class MetricsDashboardCallback(BaseCallback):
             self._final_powers.append(float(info["ep_final_power"]))
         if "ep_deaths_by_age" in info:
             self._deaths_by_age.append(float(info["ep_deaths_by_age"]))
+        if "ep_reproductions" in info:
+            self._reproductions.append(float(info["ep_reproductions"]))
 
     def _rolling_mean(self, buf: deque) -> float | None:
         if not buf:
@@ -197,6 +201,7 @@ class MetricsDashboardCallback(BaseCallback):
             "avg_power": self._rolling_mean(self._avg_powers),
             "avg_final_power": self._rolling_mean(self._final_powers),
             "avg_deaths_by_age": self._rolling_mean(self._deaths_by_age),
+            "avg_reproductions": self._rolling_mean(self._reproductions),
             "history": self._history[-500:],  # cap sparkline history
         }
 
