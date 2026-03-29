@@ -235,3 +235,25 @@ def test_terrain_permanent():
 
     w.step()
     assert w.get_grid("poison")[y, x] == 1.0, "Poison did not regenerate after regen_ticks"
+
+
+def test_corner_patch_denser_than_sparse() -> None:
+    """dense_patch.yaml corner patches must be significantly denser than the sparse background."""
+    import yaml
+    from pathlib import Path
+    from murimsim.rl.train_multienv import _deep_merge_env_override
+
+    with open("config/default.yaml") as f:
+        cfg = yaml.safe_load(f)
+    cfg = _deep_merge_env_override(cfg, Path("config/envs/dense_patch.yaml"))
+
+    world = World(cfg, rng=np.random.default_rng(42))
+    food = world.get_grid_view("food")
+    H, W = food.shape
+
+    tl_density = food[:H // 2, :W // 2].mean()
+    sparse_density = food[:H // 2, W // 2:].mean()  # top-right has no patch
+
+    assert tl_density > sparse_density * 5, (
+        f"Top-left patch ({tl_density:.3f}) should be >5x denser than sparse ({sparse_density:.3f})"
+    )

@@ -1,0 +1,23 @@
+# Env override: dense-patch settlement benchmark map
+#
+# Two high-food corner patches (top-left, bottom-right) surrounded by sparse
+# food elsewhere. Designed to create natural settlement pressure: groups that
+# discover and hold a corner survive better than roamers.
+#
+# Settlement hypothesis: agents trained here should show lower revisit_entropy
+# (concentrated movement) and higher stash_fill_rate vs the default map.
+#
+# Food patch layout (30x30 grid):
+#   - Top-left  8x8 region: 60% fill probability
+#   - Bottom-right 8x8 region: 60% fill probability
+#   - Elsewhere: 0.02 spawn_density (sparse background)
+#
+# Regen is faster (120 ticks vs 200) so patches stay productive once claimed.
+
+resource_overrides:
+  - id: food
+    spawn_density: 0.02
+    regen_ticks: 120
+    spawn_corners: 2
+    corner_radius: 8
+    corner_density: 0.60

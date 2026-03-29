@@ -35,6 +35,11 @@ class ResourceConfig:
     cluster_radius: int = 0
     cluster_fill_prob: float = 0.5  # fill probability within cluster radius
     traversal_effects: tuple = dataclasses.field(default_factory=tuple)  # effect dicts for on_enter etc.
+    # Corner-patch spawning: if set, creates high-density patches in N corners.
+    # spawn_density still applies everywhere outside the patches.
+    spawn_corners: int = 0           # number of corners (1-4) to place dense patches
+    corner_radius: int = 5           # Chebyshev radius of each corner patch
+    corner_density: float = 0.5      # fill probability within corner patch
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ResourceConfig:
@@ -53,6 +58,9 @@ class ResourceConfig:
             cluster_radius=int(d.get("cluster_radius", 0)),
             cluster_fill_prob=float(d.get("cluster_fill_prob", 0.5)),
             traversal_effects=tuple(dict(e) for e in raw_effects),
+            spawn_corners=int(d.get("spawn_corners", 0)),
+            corner_radius=int(d.get("corner_radius", 5)),
+            corner_density=float(d.get("corner_density", 0.5)),
         )
 
 
@@ -228,6 +236,8 @@ class World:
         else:
             mask = (self._rng.random((H, W)) < rcfg.spawn_density) & ~occupied
             grid = mask.astype(np.float32)
+        if rcfg.spawn_corners > 0:
+            grid = self._apply_corner_patches(rcfg, H, W, occupied, grid)
         return grid, countdown
 
     def _spawn_clustered(
@@ -257,6 +267,40 @@ class World:
                         if not occupied[ny, nx] and self._rng.random() < fill_prob:
                             grid[ny, nx] = 1.0
 
+        return grid
+
+    def _apply_corner_patches(
+        self, rcfg: ResourceConfig, H: int, W: int,
+        occupied: np.ndarray, grid: np.ndarray,
+    ) -> np.ndarray:
+        """Overlay dense resource patches at grid corners.
+
+        Corners are selected from the four possible corners in order:
+        top-left, bottom-right, top-right, bottom-left.
+        Each patch is a square region of side ``corner_radius`` tiles from the corner.
+        Tiles within the patch are filled with probability ``corner_density``.
+        Already-occupied tiles (other resources) are skipped.
+
+        Args:
+            rcfg:     Resource config containing corner patch parameters.
+            H, W:     Grid height and width.
+            occupied: Boolean mask of already-placed resources.
+            grid:     Existing resource grid to overlay patches onto.
+
+        Returns:
+            Updated grid with corner patches applied in-place (copy returned).
+        """
+        grid = grid.copy()
+        radius = max(1, rcfg.corner_radius)
+        density = float(np.clip(rcfg.corner_density, 0.0, 1.0))
+        corners = [(0, 0), (H - 1, W - 1), (0, W - 1), (H - 1, 0)]
+        for cy, cx in corners[: rcfg.spawn_corners]:
+            for dy in range(radius):
+                for dx in range(radius):
+                    row = int(np.clip(cy + (dy if cy == 0 else -dy), 0, H - 1))
+                    col = int(np.clip(cx + (dx if cx == 0 else -dx), 0, W - 1))
+                    if not occupied[row, col] and self._rng.random() < density:
+                        grid[row, col] = 1.0
         return grid
 
     def _process_regen(self, resource_id: str) -> None:
