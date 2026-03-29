@@ -208,6 +208,10 @@ class StashRegistry:
             if s.owner_id != agent_id and s.position == (x, y)
         ]
 
+    def get_stashes_for_owner(self, agent_id: str) -> list[Stash]:
+        """Return all stashes owned by ``agent_id`` regardless of position."""
+        return [s for s in self._stashes.values() if s.owner_id == agent_id]
+
     def all_stashes(self) -> list[Stash]:
         """Return all registered stashes."""
         return list(self._stashes.values())

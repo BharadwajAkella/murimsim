@@ -27,6 +27,7 @@ Action space (Phase 5):  Discrete(14) — adds COLLABORATE, WALK_AWAY
 from __future__ import annotations
 
 import copy
+import math
 from typing import Any
 
 import numpy as np
@@ -210,6 +211,17 @@ class MultiAgentEnv(gym.Env):
         self._ep_hazard_approaches: dict[str, int] = {h: 0 for h in HAZARD_RESOURCE_IDS}
         self._ep_hazard_flees: dict[str, int] = {h: 0 for h in HAZARD_RESOURCE_IDS}
 
+        # Settlement metrics (reset each episode)
+        # visit_counts[i][(x,y)] = number of times agent i visited that tile
+        self._visit_counts: list[dict[tuple[int, int], int]] = [{} for _ in range(self._n_agents)]
+        self._ep_items_gathered: int = 0        # total items picked up from world
+        self._ep_items_deposited: int = 0       # total items moved into stashes
+        self._ep_items_withdrawn: int = 0       # total items retrieved from own stashes
+        self._ep_dist_from_stash_sum: float = 0.0   # sum of per-(agent,step) min Chebyshev dist to own stash
+        self._ep_dist_from_stash_count: int = 0     # denominator for the above
+        self._ep_groups_formed: int = 0         # how many times _form_group was called
+        self._ep_group_member_ticks: int = 0    # sum of group sizes across all steps
+
         self._stash_registry.reset()
 
         return self._build_obs(self._focal_idx), {}
@@ -260,6 +272,21 @@ class MultiAgentEnv(gym.Env):
                 agent.tick()
 
         self._prune_dead_from_groups()
+
+        # Settlement tracking: per-step updates for all agents
+        self._ep_group_member_ticks += sum(len(g) for g in self._groups)
+        for i, agent in enumerate(self._agents):
+            if agent.alive:
+                pos = agent.position
+                self._visit_counts[i][pos] = self._visit_counts[i].get(pos, 0) + 1
+                stashes = self._stash_registry.get_stashes_for_owner(agent.agent_id)
+                if stashes:
+                    min_dist = min(
+                        max(abs(pos[0] - s.position[0]), abs(pos[1] - s.position[1]))
+                        for s in stashes
+                    )
+                    self._ep_dist_from_stash_sum += min_dist
+                    self._ep_dist_from_stash_count += 1
 
         # Food sharing: each live agent attempts to share with critically hungry group allies
         food_share_reward = 0.0
@@ -339,10 +366,37 @@ class MultiAgentEnv(gym.Env):
                 r / max(1, s)
                 for r, s in zip(self._ep_agent_rewards, self._ep_agent_steps)
             ]
+            # Settlement metrics
+            info["ep_stash_fill_rate"] = self._ep_items_deposited / max(1, self._ep_items_gathered)
+            info["ep_stash_withdraw_rate"] = self._ep_items_withdrawn / max(1, self._ep_items_deposited)
+            info["ep_avg_dist_from_stash"] = (
+                self._ep_dist_from_stash_sum / self._ep_dist_from_stash_count
+                if self._ep_dist_from_stash_count > 0 else 0.0
+            )
+            info["ep_revisit_entropy"] = self._compute_revisit_entropy()
+            info["ep_group_persistence"] = (
+                self._ep_group_member_ticks / self._ep_groups_formed
+                if self._ep_groups_formed > 0 else 0.0
+            )
         return obs, reward, terminated, False, info
 
     def render(self) -> None:
         pass  # Rendering handled by web viewer
+
+    def _compute_revisit_entropy(self) -> float:
+        """Mean per-agent Shannon entropy of tile-visit frequency distribution.
+
+        Low entropy means an agent visited few distinct tiles many times (settled).
+        High entropy means visits are spread across many tiles (roaming).
+        """
+        entropies: list[float] = []
+        for counts in self._visit_counts:
+            total = sum(counts.values())
+            if total == 0:
+                continue
+            h = -sum((c / total) * math.log(c / total) for c in counts.values())
+            entropies.append(h)
+        return float(np.mean(entropies)) if entropies else 0.0
 
     # ── Group helpers ─────────────────────────────────────────────────────────
 
@@ -369,6 +423,7 @@ class MultiAgentEnv(gym.Env):
         else:
             members.add(idx_b)
         self._groups.append(frozenset(members))
+        self._ep_groups_formed += 1
 
     def _leave_group(self, agent_idx: int) -> None:
         """Remove an agent from its group; dissolve group if only 1 member remains."""
@@ -592,6 +647,7 @@ class MultiAgentEnv(gym.Env):
                     agent.gather(rid)
                     if rid == "food":
                         food_gathered = 1
+                    self._ep_items_gathered += 1
                     break
 
         elif action_enum == Action.EAT:
@@ -601,9 +657,13 @@ class MultiAgentEnv(gym.Env):
             agent.rest()
 
         elif action_enum == Action.DEPOSIT:
-            self._stash_registry.deposit(agent)
+            stash = self._stash_registry.deposit(agent)
+            if stash:
+                self._ep_items_deposited += stash.total()
 
         elif action_enum == Action.WITHDRAW:
+            at_pos = self._stash_registry.get_own_stash_at(agent.agent_id, *agent.position)
+            self._ep_items_withdrawn += sum(s.total() for s in at_pos)
             self._stash_registry.withdraw(agent)
 
         elif action_enum == Action.STEAL:
@@ -858,6 +918,21 @@ class CombatEnv(MultiAgentEnv):
         # Remove dead agents from any groups
         self._prune_dead_from_groups()
 
+        # Settlement tracking: per-step updates for all agents
+        self._ep_group_member_ticks += sum(len(g) for g in self._groups)
+        for i, agent in enumerate(self._agents):
+            if agent.alive:
+                pos = agent.position
+                self._visit_counts[i][pos] = self._visit_counts[i].get(pos, 0) + 1
+                stashes = self._stash_registry.get_stashes_for_owner(agent.agent_id)
+                if stashes:
+                    min_dist = min(
+                        max(abs(pos[0] - s.position[0]), abs(pos[1] - s.position[1]))
+                        for s in stashes
+                    )
+                    self._ep_dist_from_stash_sum += min_dist
+                    self._ep_dist_from_stash_count += 1
+
         # Food sharing: each live agent attempts to share with critically hungry group allies.
         # Focal agent gets a reward signal; heuristic agents share silently.
         food_share_reward = 0.0
@@ -954,6 +1029,18 @@ class CombatEnv(MultiAgentEnv):
                 r / max(1, s)
                 for r, s in zip(self._ep_agent_rewards, self._ep_agent_steps)
             ]
+            # Settlement metrics
+            info["ep_stash_fill_rate"] = self._ep_items_deposited / max(1, self._ep_items_gathered)
+            info["ep_stash_withdraw_rate"] = self._ep_items_withdrawn / max(1, self._ep_items_deposited)
+            info["ep_avg_dist_from_stash"] = (
+                self._ep_dist_from_stash_sum / self._ep_dist_from_stash_count
+                if self._ep_dist_from_stash_count > 0 else 0.0
+            )
+            info["ep_revisit_entropy"] = self._compute_revisit_entropy()
+            info["ep_group_persistence"] = (
+                self._ep_group_member_ticks / self._ep_groups_formed
+                if self._ep_groups_formed > 0 else 0.0
+            )
         return obs, reward, terminated, False, info
 
     # ── Combat helpers ────────────────────────────────────────────────────────

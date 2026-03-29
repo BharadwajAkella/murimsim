@@ -543,3 +543,106 @@ def test_food_share_no_share_when_not_in_group() -> None:
     shared = env._try_food_share(ally_idx, focal_idx)
     assert not shared, "Should not share food without a group"
     assert ally.inventory.food == 3, "Sharer food should be unchanged"
+
+
+# ── Settlement metrics ────────────────────────────────────────────────────────
+
+def test_settlement_metrics_present_on_termination() -> None:
+    """All 5 settlement metrics must be present in info when episode terminates."""
+    import numpy as np
+
+    env = _make_combat_env(n_agents=2, seed=42)
+    obs, _ = env.reset(seed=42)
+
+    # Run until terminated
+    info: dict = {}
+    for _ in range(2000):
+        obs, _, terminated, _, info = env.step(env.action_space.sample())
+        if terminated:
+            break
+
+    assert terminated, "Episode should have terminated within 2000 steps"
+    for key in (
+        "ep_stash_fill_rate",
+        "ep_stash_withdraw_rate",
+        "ep_avg_dist_from_stash",
+        "ep_revisit_entropy",
+        "ep_group_persistence",
+    ):
+        assert key in info, f"Missing settlement metric: {key}"
+        assert isinstance(info[key], float), f"{key} should be a float"
+
+
+def test_visit_counts_accumulate() -> None:
+    """_visit_counts should grow with each step and include starting position."""
+    env = _make_combat_env(n_agents=2, seed=10)
+    env.reset(seed=10)
+
+    # All agents should have their starting position recorded already via reset
+    for _ in range(10):
+        env.step(4)  # GATHER action — stays in place or moves
+
+    total_visits = sum(sum(counts.values()) for counts in env._visit_counts)
+    assert total_visits > 0, "Visit counts should be non-zero after steps"
+
+
+def test_items_gathered_counted() -> None:
+    """_ep_items_gathered increments when GATHER succeeds on a resource tile."""
+    from murimsim.actions import Action
+
+    env = _make_combat_env(n_agents=2, seed=99)
+    env.reset(seed=99)
+
+    # Manually place food under the focal agent so GATHER definitely works
+    focal = env._agents[env._focal_idx]
+    x, y = focal.position
+    env._world._grid["food"][y, x] = 1.0
+
+    before = env._ep_items_gathered
+    env.step(Action.GATHER.value)
+    assert env._ep_items_gathered == before + 1, "Should have counted one gathered item"
+
+
+def test_items_deposited_counted() -> None:
+    """_ep_items_deposited increments when DEPOSIT action creates a stash."""
+    from murimsim.actions import Action
+
+    env = _make_combat_env(n_agents=2, seed=77)
+    env.reset(seed=77)
+
+    focal = env._agents[env._focal_idx]
+    # Give agent enough qi to deposit and some food to store
+    focal.inventory.qi = 2
+    focal.inventory.food = 3
+
+    before = env._ep_items_deposited
+    env.step(Action.DEPOSIT.value)
+    assert env._ep_items_deposited > before, "Should have counted deposited items"
+
+
+def test_revisit_entropy_non_negative() -> None:
+    """Revisit entropy must be >= 0 at all times."""
+    env = _make_combat_env(n_agents=2, seed=55)
+    env.reset(seed=55)
+
+    for _ in range(50):
+        env.step(env.action_space.sample())
+
+    entropy = env._compute_revisit_entropy()
+    assert entropy >= 0.0, "Revisit entropy must be non-negative"
+
+
+def test_group_persistence_tracks_formations() -> None:
+    """_ep_group_member_ticks and _ep_groups_formed update when groups form."""
+    env = _make_combat_env(n_agents=3, seed=22)
+    env.reset(seed=22)
+
+    assert env._ep_groups_formed == 0
+    assert env._ep_group_member_ticks == 0
+
+    env._form_group(0, 1)
+    assert env._ep_groups_formed == 1, "_ep_groups_formed should increment in _form_group"
+
+    # Step once so group_member_ticks accumulates
+    env.step(env.action_space.sample())
+    assert env._ep_group_member_ticks > 0, "Group member ticks should accumulate while group is active"

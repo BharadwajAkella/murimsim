@@ -34,7 +34,7 @@ const DEAD_AGENT_COLOR = "#555";
 const AGENT_COLOR = "#a78bfa";         // unified alive-agent color (soft purple)
 const AGENT_COMBAT_COLOR = "#ef4444";  // bright red during attack or defend
 const AGENT_RADIUS_FRAC = 0.28;        // fraction of cell size
-const DEFAULT_FPS = 8;
+const DEFAULT_FPS = 3;
 const MIN_FPS = 1;
 const MAX_FPS = 60;
 
