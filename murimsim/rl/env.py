@@ -65,8 +65,8 @@ OBS_CHANNEL_ENEMY_STASH: int = 7
 OBS_CHANNEL_ORDER: list[str] = ["food", "qi", "materials", "poison", "mountain", "flame"]
 
 OBS_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_CHANNELS  # 200
-OBS_STATS_SIZE: int = 9   # health, hunger, inv_food, inv_poison, poison_resistance, poison_intake, flame_resistance, qi_drain_resistance, action_ticks
-OBS_TOTAL_SIZE: int = OBS_GRID_SIZE + OBS_STATS_SIZE  # 209
+OBS_STATS_SIZE: int = 10  # health, hunger, inv_food, inv_poison, poison_resistance, poison_intake, flame_resistance, qi_drain_resistance, action_ticks, strength
+OBS_TOTAL_SIZE: int = OBS_GRID_SIZE + OBS_STATS_SIZE  # 210
 
 # action_ticks normalisation: divide by this so 10 ticks → 1.0
 OBS_ACTION_TICKS_MAX: float = 10.0
@@ -111,6 +111,8 @@ REWARD_RESISTANCE_GAIN_SCALE: float = 0.50
 # Continuous reward: incentivises *being* strong (immunity pays every step)
 # At full immunity (3 stats × 1.0) → 0.008 × 3.0 = 0.024/step > REWARD_ALIVE
 REWARD_STRENGTH_SCALE: float = 0.008
+# δ-reward for TRAIN action: incentivises training (strength delta × scale)
+REWARD_TRAIN_STRENGTH_SCALE: float = 2.0
 
 # Hazard resource IDs are loaded from YAML at env init (effect == "negative")
 # — no hardcoded list here.
@@ -228,11 +230,13 @@ class SurvivalEnv(gym.Env):
         hunger_prev = agent.hunger
         inv_food_prev = agent.inventory.food
         resistances_prev = dict(agent.resistances)
+        strength_prev = agent.strength
         food_gathered = 0
         hazard_damage = 0.0
         reward_deposit = 0.0
         reward_withdraw = 0.0
         reward_steal = 0.0
+        reward_train = 0.0
 
         action_enum = Action(action)
 
@@ -298,6 +302,12 @@ class SurvivalEnv(gym.Env):
             food_stolen = agent.inventory.food - food_before
             reward_steal = REWARD_STEAL_FOOD_SCALE * max(0, food_stolen)
 
+        elif action_enum == Action.TRAIN:
+            x, y = agent.position
+            on_qi = self._world.get_grid_view("qi")[y, x] > 0 if "qi" in self._world.resources else False
+            strength_delta = agent.train(on_qi_tile=on_qi)
+            reward_train = REWARD_TRAIN_STRENGTH_SCALE * strength_delta
+
         # --- World + agent advance for action_ticks ticks (one action = n real ticks) ---
         for _ in range(self._action_ticks):
             self._world.step()
@@ -342,7 +352,7 @@ class SurvivalEnv(gym.Env):
             food_density,
             inv_food_prev,
         )
-        reward += reward_deposit + reward_withdraw + reward_steal + reward_resistance + reward_strength
+        reward += reward_deposit + reward_withdraw + reward_steal + reward_train + reward_resistance + reward_strength
 
         # Track food eaten for F-metric
         hunger_after = agent.hunger
@@ -381,9 +391,9 @@ class SurvivalEnv(gym.Env):
                      Channels: food, qi, materials, poison, mountain, flame,
                                my_stash, enemy_stash
                      Missing resources (not in world) are padded with zeros.
-            [200:209] own stats: health, hunger, inv_food, inv_poison,
+            [200:210] own stats: health, hunger, inv_food, inv_poison,
                       poison_resistance, poison_intake, flame_resistance,
-                      qi_drain_resistance, action_ticks (normalised)
+                      qi_drain_resistance, action_ticks (normalised), strength
         """
         agent = self._agent
         world = self._world
@@ -440,6 +450,7 @@ class SurvivalEnv(gym.Env):
                 agent.resistances.get("flame", 0.0),
                 agent.resistances.get("qi_drain", 0.0),
                 min(1.0, self._action_ticks / OBS_ACTION_TICKS_MAX),
+                agent.strength,
             ],
             dtype=np.float32,
         )

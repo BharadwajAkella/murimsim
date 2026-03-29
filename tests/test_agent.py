@@ -320,3 +320,50 @@ def test_gatherable_false_not_gathered():
     assert inv_after.qi == inv_before.qi
     assert inv_after.materials == inv_before.materials
     assert inv_after.poison == inv_before.poison
+
+
+def test_train_grows_strength_on_qi_tile():
+    """TRAIN action on qi tile grows strength faster than anywhere."""
+    from murimsim.agent import Agent
+    rng = np.random.default_rng(0)
+    cfg = {"agent": {
+        "health_min": 1.0, "health_max": 1.0,
+        "hunger_min": 0.0, "hunger_max": 0.0,
+        "strength_min": 0.3, "strength_max": 0.3,
+        "adventure_spirit_min": 0.5, "adventure_spirit_max": 0.5,
+        "sociability_min": 0.5, "sociability_max": 0.5,
+        "poison_resistance_min": 0.0, "poison_resistance_max": 0.0,
+        "flame_resistance_min": 0.0, "flame_resistance_max": 0.0,
+        "qi_drain_resistance_min": 0.0, "qi_drain_resistance_max": 0.0,
+    }}
+    agent = Agent.spawn("a0", (0, 0), rng, cfg)
+    agent.strength = 0.3
+
+    delta_qi = agent.train(on_qi_tile=True)
+    assert abs(delta_qi - Agent.TRAIN_RATE_QI_TILE * 0.7) < 1e-6
+    assert agent.strength > 0.3
+
+    agent.strength = 0.3
+    delta_anywhere = agent.train(on_qi_tile=False)
+    assert delta_anywhere < delta_qi, "qi-tile training must be faster"
+
+
+def test_train_capped_at_one():
+    """TRAIN cannot push strength above 1.0."""
+    from murimsim.agent import Agent
+    rng = np.random.default_rng(0)
+    cfg = {"agent": {
+        "health_min": 1.0, "health_max": 1.0,
+        "hunger_min": 0.0, "hunger_max": 0.0,
+        "strength_min": 0.99, "strength_max": 0.99,
+        "adventure_spirit_min": 0.5, "adventure_spirit_max": 0.5,
+        "sociability_min": 0.5, "sociability_max": 0.5,
+        "poison_resistance_min": 0.0, "poison_resistance_max": 0.0,
+        "flame_resistance_min": 0.0, "flame_resistance_max": 0.0,
+        "qi_drain_resistance_min": 0.0, "qi_drain_resistance_max": 0.0,
+    }}
+    agent = Agent.spawn("a0", (0, 0), rng, cfg)
+    agent.strength = 0.99
+    for _ in range(50):
+        agent.train(on_qi_tile=True)
+    assert agent.strength <= 1.0

@@ -34,7 +34,7 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
-from murimsim.actions import Action, MOVE_DELTAS, N_ACTIONS_PHASE2, N_ACTIONS_PHASE3, N_ACTIONS_PHASE5
+from murimsim.actions import Action, MOVE_DELTAS, N_ACTIONS_PHASE2, N_ACTIONS_PHASE3, N_ACTIONS_PHASE5, N_ACTIONS_PHASE6
 from murimsim.agent import Agent
 from murimsim.stash import StashRegistry
 from murimsim.world import World
@@ -50,8 +50,8 @@ OBS_CHANNEL_ORDER: list[str] = ["food", "qi", "materials", "poison"]
 OBS_RESOURCE_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_RESOURCE_CH  # 100
 OBS_AGENT_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_AGENT_CH        # 100
 OBS_STASH_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_STASH_CH        # 50
-OBS_STATS_SIZE: int = 11  # health, hunger, inv_food, inv_poison, pr, pi, combat_exp, terrain_fam, reward_ema, sociability, in_group
-OBS_TOTAL_SIZE: int = OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE + OBS_STASH_GRID_SIZE + OBS_STATS_SIZE  # 261
+OBS_STATS_SIZE: int = 12  # health, hunger, inv_food, inv_poison, pr, pi, combat_exp, terrain_fam, reward_ema, sociability, in_group, strength
+OBS_TOTAL_SIZE: int = OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE + OBS_STASH_GRID_SIZE + OBS_STATS_SIZE  # 262
 
 # ── History signal constants ──────────────────────────────────────────────────
 TERRAIN_FAM_SCALE: float = 200.0   # ticks_near_food / SCALE → [0, 1]
@@ -78,6 +78,8 @@ INV_SECURITY_CAP: float = 5.0                      # normalise over first 5 food
 # Starvation proximity penalty: discourages approaching the danger zone
 PENALTY_STARVATION_APPROACH: float = -0.08
 STARVATION_THRESHOLD: float = 0.70
+# δ-reward for TRAIN action: incentivises training (strength delta × scale)
+REWARD_TRAIN_STRENGTH_SCALE: float = 2.0
 
 
 class MultiAgentEnv(gym.Env):
@@ -236,6 +238,7 @@ class MultiAgentEnv(gym.Env):
         focal = self._agents[self._focal_idx]
         hunger_prev = focal.hunger
         inv_food_prev = focal.inventory.food
+        strength_prev = focal.strength
         food_gathered = 0
         hazard_damage = 0.0
 
@@ -332,6 +335,10 @@ class MultiAgentEnv(gym.Env):
             reward += food_share_reward
             reward += stash_bonus
             reward += self._stash_proximity_reward(self._focal_idx)
+            # TRAIN action strength reward: delta(strength) * scale (potential-based)
+            strength_delta = focal.strength - strength_prev
+            if strength_delta > 0:
+                reward += REWARD_TRAIN_STRENGTH_SCALE * strength_delta
         ema = self._reward_ema[self._focal_idx]
         self._reward_ema[self._focal_idx] = (1.0 - REWARD_EMA_ALPHA) * ema + REWARD_EMA_ALPHA * reward
 
@@ -613,6 +620,7 @@ class MultiAgentEnv(gym.Env):
             reward_ema_norm,
             agent.sociability,
             in_group,
+            agent.strength,
         ], dtype=np.float32)
 
         return np.concatenate([flat_resources, flat_agents, flat_stashes, stats])
@@ -720,6 +728,12 @@ class MultiAgentEnv(gym.Env):
 
         elif action_enum == Action.STEAL:
             self._stash_registry.steal(agent)
+
+        elif action_enum == Action.TRAIN:
+            x, y = agent.position
+            on_qi = self._world.get_grid_view("qi")[y, x] > 0 if "qi" in self._world.resources else False
+            agent.train(on_qi_tile=on_qi)
+            # Training reward is applied in _compute_reward via strength_delta tracking.
 
         return food_gathered, hazard_damage, stash_bonus
 
@@ -891,7 +905,7 @@ class CombatEnv(MultiAgentEnv):
             n_agents=n_agents,
             seed=seed,
             render_mode=render_mode,
-            n_actions=N_ACTIONS_PHASE5,
+            n_actions=N_ACTIONS_PHASE6,
         )
         self._curriculum_ramp_steps: int = curriculum_ramp_steps
         self._global_step_count: int = 0  # persists across episodes
@@ -919,6 +933,7 @@ class CombatEnv(MultiAgentEnv):
         focal = self._agents[self._focal_idx]
         hunger_prev = focal.hunger
         inv_food_prev = focal.inventory.food
+        strength_prev = focal.strength
         food_gathered = 0
         hazard_damage = 0.0
         damage_dealt = 0.0
@@ -1057,6 +1072,10 @@ class CombatEnv(MultiAgentEnv):
             reward += food_share_reward
             reward += stash_bonus
             reward += self._stash_proximity_reward(self._focal_idx)
+            # TRAIN action strength reward: delta(strength) * scale (potential-based)
+            strength_delta = focal.strength - strength_prev
+            if strength_delta > 0:
+                reward += REWARD_TRAIN_STRENGTH_SCALE * strength_delta
         ema = self._reward_ema[self._focal_idx]
         self._reward_ema[self._focal_idx] = (1.0 - REWARD_EMA_ALPHA) * ema + REWARD_EMA_ALPHA * reward
 
