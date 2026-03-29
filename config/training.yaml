@@ -69,3 +69,26 @@ lstm:
   shared_lstm: false          # if true, actor and critic share the LSTM
   n_steps: 512                # shorter rollout chunks suit recurrent training
   batch_size: 64              # must divide n_steps * n_envs evenly
+
+# v12 fine-tuning config — warm-started from v11, focused on policy stability.
+# Key changes vs v11:
+#   - Linear LR decay: 3e-4 → 3e-5 (10x reduction by end)
+#   - Linear clip_range decay: 0.2 → 0.1 (prevents late-stage policy oscillation)
+#   - ent_coef raised to 0.02 (maintains exploration, reduces premature collapse)
+#   - curriculum_ramp_steps = 1 (combat fully on from step 1 — already trained)
+#   - Shorter run: 1M steps (fine-tuning, not full retraining)
+lstm_v12:
+  total_timesteps: 1_000_000
+  checkpoint_freq: 100_000
+  n_envs: 4
+  curriculum_ramp_steps: 1        # combat already learned; ramp immediately to max
+  lstm_hidden_size: 64
+  n_lstm_layers: 1
+  shared_lstm: false
+  n_steps: 512
+  batch_size: 64
+  learning_rate: 0.0001           # lower start (warm-start is already well-trained)
+  learning_rate_final: 0.00001    # 10x decay by end
+  clip_range: 0.15                # tighter than default 0.2
+  clip_range_final: 0.05          # very tight at end — lock in good policy
+  ent_coef: 0.02                  # higher entropy → more exploration, less collapse

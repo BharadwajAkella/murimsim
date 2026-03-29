@@ -41,6 +41,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--config", type=Path, default=Path("config/default.yaml"))
     parser.add_argument("--train-config", type=Path, default=Path("config/training.yaml"))
+    parser.add_argument("--train-section", type=str, default=None,
+                        help="training.yaml section to use for hyperparams (default: 'lstm'). "
+                             "E.g. 'lstm_v12' to use the v12 fine-tuning config.")
     parser.add_argument("--n-agents", type=int, default=10)
     parser.add_argument("--warmstart", type=Path, default=None,
                         help="Explicit warmstart checkpoint path. "
@@ -70,7 +73,9 @@ def main() -> None:
         base_cfg["domain_randomization"] = train_cfg["domain_randomization"]
 
     p3c = train_cfg.get("phase3c", {})
-    lstm_cfg = train_cfg.get("lstm", {})
+    # --train-section selects which YAML section drives hyperparams (default: "lstm")
+    train_section = args.train_section or "lstm"
+    lstm_cfg = train_cfg.get(train_section, train_cfg.get("lstm", {}))
 
     total_timesteps = args.timesteps or int(lstm_cfg.get("total_timesteps", 2_000_000))
     n_envs = int(lstm_cfg.get("n_envs", p3c.get("n_envs", 4)))
@@ -119,6 +124,20 @@ def main() -> None:
     n_steps = int(lstm_cfg.get("n_steps", ppo_cfg["n_steps"]))
     batch_size = int(lstm_cfg.get("batch_size", ppo_cfg["batch_size"]))
 
+    # Linear decay schedule: LR and clip_range ramp from initial → final value.
+    # This stabilises late-stage training where a fixed LR causes policy oscillation.
+    lr_initial = float(lstm_cfg.get("learning_rate", ppo_cfg["learning_rate"]))
+    lr_final = float(lstm_cfg.get("learning_rate_final", lr_initial * 0.1))
+    clip_initial = float(lstm_cfg.get("clip_range", ppo_cfg["clip_range"]))
+    clip_final = float(lstm_cfg.get("clip_range_final", clip_initial * 0.5))
+
+    def _linear_decay(initial: float, final: float):
+        """Return an SB3 schedule callable that decays linearly from initial → final."""
+        def schedule(progress_remaining: float) -> float:
+            # progress_remaining: 1.0 at start, 0.0 at end
+            return final + (initial - final) * progress_remaining
+        return schedule
+
     model = RecurrentPPO(
         policy="MlpLstmPolicy",
         env=vec_env,
@@ -127,9 +146,9 @@ def main() -> None:
         n_epochs=int(ppo_cfg["n_epochs"]),
         gamma=float(ppo_cfg["gamma"]),
         gae_lambda=float(ppo_cfg["gae_lambda"]),
-        learning_rate=float(ppo_cfg["learning_rate"]),
-        clip_range=float(ppo_cfg["clip_range"]),
-        ent_coef=float(ppo_cfg["ent_coef"]),
+        learning_rate=_linear_decay(lr_initial, lr_final),
+        clip_range=_linear_decay(clip_initial, clip_final),
+        ent_coef=float(lstm_cfg.get("ent_coef", ppo_cfg["ent_coef"])),
         policy_kwargs={
             "net_arch": list(ppo_cfg["policy_kwargs"]["net_arch"]),
             "lstm_hidden_size": lstm_hidden_size,
@@ -199,6 +218,10 @@ def main() -> None:
     print(f"\nTraining RecurrentPPO  run={args.run_name}  {total_timesteps:,} steps  "
           f"{n_envs} envs  {args.n_agents} agents/env  "
           f"lstm_hidden={lstm_hidden_size}  seed={args.seed}", flush=True)
+    print(f"  Config section:    {train_section}", flush=True)
+    print(f"  LR:                {lr_initial} → {lr_final} (linear decay)", flush=True)
+    print(f"  Clip range:        {clip_initial} → {clip_final} (linear decay)", flush=True)
+    print(f"  ent_coef:          {lstm_cfg.get('ent_coef', ppo_cfg['ent_coef'])}", flush=True)
     print(f"  Curriculum: combat prob 0.2 → 1.0 over first {curriculum_ramp_steps:,} steps", flush=True)
     print(f"  Checkpoint dir: {checkpoint_dir}", flush=True)
     print(f"  Dashboard: logs/dashboard_data.js\n", flush=True)
