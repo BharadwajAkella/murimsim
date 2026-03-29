@@ -236,6 +236,32 @@ function render() {
   ctx.fillStyle = "#1a1a2e";
   ctx.fillRect(0, 0, W, H);
 
+  // Sect home-region overlays (subtle tinted bands — Phase 6a)
+  const SECT_HOME_REGIONS = [
+    { sect: "iron_fang",   y_lo: 0,  y_hi: 9 },
+    { sect: "jade_lotus",  y_lo: 10, y_hi: 19 },
+    { sect: "shadow_root", y_lo: 20, y_hi: 29 },
+  ];
+  for (const region of SECT_HOME_REGIONS) {
+    const color = SECT_COLORS[region.sect];
+    ctx.fillStyle = color.replace("#", "rgba(") + "19)"; // ~10% opacity
+    // Convert hex to rgba properly
+    const r = parseInt(color.slice(1, 3), 16);
+    const g = parseInt(color.slice(3, 5), 16);
+    const b = parseInt(color.slice(5, 7), 16);
+    ctx.fillStyle = `rgba(${r},${g},${b},0.07)`;
+    ctx.fillRect(0, region.y_lo * cellH, W, (region.y_hi - region.y_lo + 1) * cellH);
+    // Thin border on the bottom edge of each band (except last)
+    if (region.y_hi < state.gridSize - 1) {
+      ctx.strokeStyle = `rgba(${r},${g},${b},0.25)`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, (region.y_hi + 1) * cellH);
+      ctx.lineTo(W, (region.y_hi + 1) * cellH);
+      ctx.stroke();
+    }
+  }
+
   // Grid lines (subtle)
   ctx.strokeStyle = "rgba(255,255,255,0.04)";
   ctx.lineWidth = 0.5;

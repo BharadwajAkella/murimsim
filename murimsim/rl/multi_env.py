@@ -867,6 +867,9 @@ COMBAT_MAX_DAMAGE: float = 0.5
 
 REWARD_DEFEAT_OPPONENT: float = 0.3
 REWARD_DAMAGE_TAKEN_SCALE: float = -0.2
+# Sect-aware combat bonuses (Phase 6a): only active when both agents have named sects.
+REWARD_INTER_SECT_DEFEAT_BONUS: float = 0.15   # extra reward for defeating an enemy-sect agent
+REWARD_SAME_SECT_ATTACK_PENALTY: float = -0.10 # penalty for attacking a same-sect ally
 REWARD_GROUP_FORMATION: float = 0.05   # small bonus when bilateral COLLABORATE succeeds
 # Per-tick bonus for each live group member within proximity range.
 # Rewards staying in a live, nearby group rather than just being "in" a group.
@@ -1006,6 +1009,7 @@ class CombatEnv(MultiAgentEnv):
         focal_defending = (action_enum == Action.DEFEND)
         group_formed = False
         stash_bonus = 0.0
+        sect_attack_penalty = 0.0
 
         # Snapshot hazard distances before the action for approach/flee tracking
         prev_pos = focal.position
@@ -1019,8 +1023,17 @@ class CombatEnv(MultiAgentEnv):
             if pre_target is not None:
                 flankers = self._adjacent_group_allies(self._focal_idx, pre_target)
                 flanking_bonus_earned = len(flankers) > 0
+                # Sect-aware reward shaping (only when both agents belong to named sects)
+                if focal.sect_id != "none" and pre_target.sect_id != "none":
+                    if focal.sect_id == pre_target.sect_id:
+                        sect_attack_penalty = REWARD_SAME_SECT_ATTACK_PENALTY
             damage_dealt, defeated = self._do_attack(focal)
             defeat_bonus = REWARD_DEFEAT_OPPONENT if defeated else 0.0
+            # Extra defeat bonus when eliminating an enemy-sect agent
+            if defeated and pre_target is not None:
+                if focal.sect_id != "none" and pre_target.sect_id != "none":
+                    if focal.sect_id != pre_target.sect_id:
+                        defeat_bonus += REWARD_INTER_SECT_DEFEAT_BONUS
         elif action_enum == Action.DEFEND:
             focal.rest()  # defending = hold ground + minor health recovery
         elif action_enum == Action.COLLABORATE:
@@ -1133,6 +1146,8 @@ class CombatEnv(MultiAgentEnv):
         # Coordinated attack: bonus when focal attacks with a flanking group ally
         if flanking_bonus_earned and focal.alive:
             reward += REWARD_COORDINATED_ATTACK
+        # Sect-aware combat penalty: discourage attacking same-sect allies
+        reward += sect_attack_penalty
         # Food sharing: reward focal for participating in mutual aid
         if focal.alive:
             reward += food_share_reward

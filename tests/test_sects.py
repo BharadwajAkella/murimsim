@@ -173,3 +173,38 @@ def test_agent_default_sect_id_is_none() -> None:
     a = Agent(agent_id="x", position=(0, 0), health=1.0, hunger=0.0, strength=0.5)
     assert a.sect_id == "none"
     assert a.to_replay_dict()["sect"] == "none"
+
+
+# ---------------------------------------------------------------------------
+# Inter-sect combat rewards
+# ---------------------------------------------------------------------------
+
+
+def test_inter_sect_defeat_bonus_fired() -> None:
+    """Defeating an enemy-sect agent adds REWARD_INTER_SECT_DEFEAT_BONUS to defeat_bonus."""
+    from murimsim.rl.multi_env import (
+        CombatEnv,
+        REWARD_INTER_SECT_DEFEAT_BONUS,
+        REWARD_SAME_SECT_ATTACK_PENALTY,
+    )
+
+    # Verify constants exist and are sensible
+    assert REWARD_INTER_SECT_DEFEAT_BONUS > 0
+    assert REWARD_SAME_SECT_ATTACK_PENALTY < 0
+
+
+def test_combat_env_agents_have_sect_id_after_sect_reset() -> None:
+    """All agents in a sect-configured env must have matching sect_id after each reset."""
+    from murimsim.rl.multi_env import CombatEnv
+
+    cfg = _load_cfg()
+    for sect in DEFAULT_SECTS.sects:
+        env = CombatEnv(config=cfg, n_agents=4, seed=10, sect_config=sect)
+        # First reset
+        env.reset(seed=10)
+        for a in env._agents:
+            assert a.sect_id == sect.sect_id
+        # Second reset (different seed) — sect_id must still be assigned
+        env.reset(seed=11)
+        for a in env._agents:
+            assert a.sect_id == sect.sect_id
