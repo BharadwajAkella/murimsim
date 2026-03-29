@@ -2,7 +2,7 @@
 
 A multi-agent survival simulation where emergent group behavior (alliances, cooperation, combat tactics) arises naturally from reinforcement learning — not hand-coded rules.
 
-**Current state:** 88 tests passing, LSTM v8 trained to 2M steps, lifespan of 105.7 (peak 115.0), group food sharing and coordinated combat active, replay viewer running.
+**Current state:** 97 tests passing, LSTM v9 trained to 2M steps (warm-started from v8), shared-stash mechanics active, dense-patch settlement map added, group food sharing and coordinated combat active, replay viewer running.
 
 ---
 
@@ -16,7 +16,7 @@ A multi-agent survival simulation where emergent group behavior (alliances, coop
 6. [Group Mechanics (Phase 5)](#6-group-mechanics-phase-5)
 7. [Training Pipeline](#7-training-pipeline)
 8. [Replay Viewer](#8-replay-viewer)
-9. [Training History — LSTM v1 → v8](#9-training-history--lstm-v1--v8)
+9. [Training History — LSTM v1 → v9](#9-training-history--lstm-v1--v9)
 10. [Reward Function Reference](#10-reward-function-reference)
 11. [Key Design Decisions](#11-key-design-decisions)
 12. [What Comes Next](#12-what-comes-next)
@@ -299,7 +299,7 @@ Replay files are `.jsonl` — one JSON object per tick, containing all agent sta
 
 ---
 
-## 9. Training History — LSTM v1 → v8
+## 9. Training History — LSTM v1 → v9
 
 | Version | Steps | Lifespan | Key Changes |
 |---------|-------|----------|-------------|
@@ -314,6 +314,7 @@ Replay files are `.jsonl` — one JSON object per tick, containing all agent sta
 | LSTM v6 | 2M | 93.7 | Flanking bonus, cohesion reward, damage split |
 | LSTM v7 | 600K* | 85.5 | 8-dir combat, coordinated attack reward (*config bug cut short) |
 | **LSTM v8** | **2M** | **105.7** | Food sharing + reciprocity. Peak 115.0 at 1.74M steps |
+| **LSTM v9** | **2M** | *pending eval* | Shared stash mechanics, dense-patch map, foraging-outward reward |
 
 \* v7 was cut off by a config bug (`training.yaml` had 600K instead of 2M). Despite the short run, collaborate jumped to 7.1% (best ever) before recovery was interrupted.
 
@@ -321,6 +322,7 @@ Replay files are `.jsonl` — one JSON object per tick, containing all agent sta
 - **v5 → v6:** Agents discovered collaborative actions (collaborate 0% → 3.2% → 4.6%)
 - **v7:** Collaborate hit 7.1% — best ever — demonstrating 8-dir flanking mechanics working
 - **v8:** Lifespan 85.5 → **105.7** (+20 points). Attack rate 1.7% → **0.3%** (near-zero). Food sharing confirmed active via eat rate 22% → 32%.
+- **v9:** Warm-started from v8. Added shared stash mechanics (free deposit, group withdraw, foraging-outward reward, stash proximity reward). Trained on rotation including dense-patch settlement map.
 
 ---
 
@@ -410,4 +412,4 @@ def inherit_value(mom, dad, rng, sigma):
 
 ---
 
-*Last updated after LSTM v8 training — lifespan 105.7, peak 115.0, 88 tests passing.*
+*Last updated after LSTM v9 training — 97 tests passing, shared stash mechanics active, dense-patch map added.*
