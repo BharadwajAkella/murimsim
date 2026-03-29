@@ -276,8 +276,11 @@ def test_group_withdraw_transfers_food() -> None:
 # ---------------------------------------------------------------------------
 
 def test_stash_proximity_reward() -> None:
-    """_stash_proximity_reward returns nonzero when agent is hungry and near its stash."""
-    from murimsim.rl.multi_env import MultiAgentEnv, STASH_HUNGER_GATE
+    """_stash_proximity_reward is disabled (REWARD_STASH_PROXIMITY=0.0) to prevent
+    anti-cooperative individual-stash-pull behaviour."""
+    from murimsim.rl.multi_env import MultiAgentEnv, STASH_HUNGER_GATE, REWARD_STASH_PROXIMITY
+
+    assert REWARD_STASH_PROXIMITY == 0.0, "Proximity reward must stay disabled until re-tuned"
 
     cfg = _load_cfg()
     cfg["n_agents"] = 2
@@ -285,11 +288,8 @@ def test_stash_proximity_reward() -> None:
     env.reset(seed=0)
 
     agent = env._agents[0]
-    # Make agent hungry enough to trigger proximity reward
     agent.hunger = STASH_HUNGER_GATE + 0.1
 
-    # Manually create a stash at the agent's position
-    env._stash_registry._stashes.clear()
     from murimsim.stash import Stash
     s = Stash(
         stash_id=f"{agent.agent_id}_stash_0",
@@ -299,10 +299,5 @@ def test_stash_proximity_reward() -> None:
     )
     env._stash_registry._stashes[s.stash_id] = s
 
-    reward = env._stash_proximity_reward(0)
-    assert reward > 0.0, "Should get proximity reward when hungry and at own stash"
-
-    # Not hungry — no reward
-    agent.hunger = 0.1
-    reward_sated = env._stash_proximity_reward(0)
-    assert reward_sated == 0.0, "Should not get proximity reward when sated"
+    # Always zero when disabled
+    assert env._stash_proximity_reward(0) == 0.0

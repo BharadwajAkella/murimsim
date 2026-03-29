@@ -451,12 +451,13 @@ class MultiAgentEnv(gym.Env):
         self._groups = new_groups
 
     def _stash_proximity_reward(self, agent_idx: int) -> float:
-        """Per-tick bonus when agent is hungry and standing near its own stash.
+        """Per-tick stash proximity bonus — currently disabled (REWARD_STASH_PROXIMITY=0.0).
 
-        Incentivises agents to return to base when food-stressed rather than
-        wandering. Active only when hunger > STASH_HUNGER_GATE and agent has
-        a stash within STASH_PROXIMITY_RANGE Chebyshev tiles.
+        Was found to pull agents to individual stash locations, causing group
+        dispersal and WALK_AWAY rate spike. Kept as a hook for future tuning.
         """
+        if REWARD_STASH_PROXIMITY == 0.0:
+            return 0.0
         agent = self._agents[agent_idx]
         if agent.hunger <= STASH_HUNGER_GATE:
             return 0.0
@@ -841,10 +842,11 @@ FORAGE_OUTWARD_MIN_DIST: int = 5      # Chebyshev tiles away from stash to quali
 REWARD_FORAGE_OUTWARD: float = 0.03   # bonus for depositing after a foraging excursion
 # Group withdrawal bonus: received by stash owner when a group member withdraws their food
 REWARD_GROUP_WITHDRAW_BONUS: float = 0.02
-# Stash proximity hunger shield: per-tick bonus when hungry and near own stash
-STASH_PROXIMITY_RANGE: int = 3        # Chebyshev tiles
-STASH_HUNGER_GATE: float = 0.50       # only active when hunger > this
-REWARD_STASH_PROXIMITY: float = 0.01  # per-tick bonus
+# Stash proximity: disabled — per-tick pull toward individual stash was anti-cooperative,
+# causing agents to disperse from groups and spike WALK_AWAY rate.
+STASH_PROXIMITY_RANGE: int = 3        # kept for test compatibility
+STASH_HUNGER_GATE: float = 0.50       # kept for test compatibility
+REWARD_STASH_PROXIMITY: float = 0.0   # disabled
 
 # Group combat mechanics
 # Combat requires attacker and target to be within Chebyshev distance 1 (8 directions incl. diagonals)
