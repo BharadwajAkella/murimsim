@@ -86,8 +86,8 @@ STARVATION_THRESHOLD: float = 0.80                 # synced with Agent.STARVATIO
 REWARD_HEALTH_RECOVERY_SCALE: float = 0.20
 HEALTH_RECOVERY_GATE: float = 0.70                 # no recovery reward above this health level
 # δ-reward for TRAIN action: incentivises training (strength delta × scale)
-REWARD_TRAIN_STRENGTH_SCALE: float = 2.0
-REWARD_RESISTANCE_GAIN_SCALE: float = 1.0   # reward per unit of total resistance grown
+REWARD_TRAIN_STRENGTH_SCALE: float = 10.0
+REWARD_RESISTANCE_GAIN_SCALE: float = 5.0   # reward per unit of total resistance grown
 
 # Power score weights (used for ep_avg_power metric, logged per episode)
 POWER_WEIGHT_STRENGTH: float = 0.4

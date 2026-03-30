@@ -126,3 +126,24 @@ domain_randomization:
   food_cluster_count: [2, 4]
   food_cluster_radius: 3
   food_cluster_fill_prob: 0.70
+
+# lstm_v14: raise training reward signals + remove training hunger penalty
+#   - REWARD_TRAIN_STRENGTH_SCALE: 2.0 → 10.0 (makes training competitive with gather)
+#   - REWARD_RESISTANCE_GAIN_SCALE: 1.0 → 5.0 (resistance growth finally worthwhile)
+#   - TRAIN_HUNGER_MULTIPLIER removed (was suppressing training, backfired)
+#   - Warm-starts from v13 final
+lstm_v14:
+  total_timesteps: 1_500_000
+  checkpoint_freq: 100_000
+  n_envs: 4
+  curriculum_ramp_steps: 1
+  lstm_hidden_size: 64
+  n_lstm_layers: 1
+  shared_lstm: false
+  n_steps: 512
+  batch_size: 64
+  learning_rate: 0.0001
+  learning_rate_final: 0.00001
+  clip_range: 0.15
+  clip_range_final: 0.05
+  ent_coef: 0.02

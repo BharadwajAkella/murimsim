@@ -16,10 +16,6 @@ logger = logging.getLogger(__name__)
 # Hunger increment per tick (constant drain)
 HUNGER_PER_TICK: float = 0.01
 
-# Training costs 1.5× more hunger per tick than passive existence.
-# This creates mechanical pressure to be near food/stash while training.
-TRAIN_HUNGER_MULTIPLIER: float = 1.5
-
 # Maximum number of food items an agent can carry in inventory.
 # Small cap forces agents to use the stash rather than hoarding food.
 INVENTORY_CAP: int = 3
@@ -500,9 +496,6 @@ class Agent:
         When multiple qi sources overlap their contributions stack, creating
         "qi nexus" zones with maximum training effectiveness.
 
-        Training costs extra hunger (``TRAIN_HUNGER_MULTIPLIER`` × normal rate)
-        — this creates mechanical pressure to train near a food source or stash.
-
         Args:
             qi_field_value: Normalised qi influence at the agent's tile [0, 1].
                             0.0 = no nearby qi, 1.0 = maximum (saturated field).
@@ -518,9 +511,6 @@ class Agent:
         )
         delta = rate * (1.0 - self.strength)
         self.strength = min(1.0, self.strength + delta)
-        # Training burns extra hunger — pressure to stay near food/stash
-        extra_hunger = HUNGER_PER_TICK * (TRAIN_HUNGER_MULTIPLIER - 1.0)
-        self.hunger = min(1.0, self.hunger + extra_hunger)
         return delta
 
     # ------------------------------------------------------------------
