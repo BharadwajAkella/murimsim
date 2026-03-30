@@ -101,6 +101,69 @@ class MetricsDashboardCallback(BaseCallback):
 
     def _on_training_end(self) -> None:
         self._flush()
+        self._append_to_stage_history()
+
+    def _append_to_stage_history(self) -> None:
+        """Append a summary entry for this run to logs/stage_history.js.
+
+        Reads the existing file, strips the JS wrapper, appends the new entry,
+        and rewrites it. Safe to call multiple times — deduplicates by run_name.
+        """
+        import re
+
+        history_path = self._dashboard_path.parent / "stage_history.js"
+        if not history_path.exists():
+            return
+
+        raw = history_path.read_text()
+        # Extract the JSON array from the JS wrapper
+        match = re.search(r"window\.\w+\s*=\s*(\[.*\])\s*;", raw, re.DOTALL)
+        if not match:
+            return
+
+        try:
+            entries: list[dict] = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return
+
+        # Build new entry from final flush payload
+        avg_action_rates = self._mean_dict(self._action_rates)
+        new_entry: dict[str, Any] = {
+            "id": self._run_name.replace(" ", "_").replace("=", ""),
+            "label": self._run_name,
+            "phase": "auto",
+            "steps_trained": self.num_timesteps,
+            "metric_unit": "steps",
+            "avg_lifespan": self._rolling_mean(self._lifespans),
+            "avg_strength": self._rolling_mean(self._strengths),
+            "avg_power": self._rolling_mean(self._avg_powers),
+            "action_rates": {k: round(v, 4) for k, v in avg_action_rates.items()},
+            "gather_rate_pct": round(avg_action_rates.get("gather", 0) * 100, 1),
+            "eat_rate_pct": round(avg_action_rates.get("eat", 0) * 100, 1),
+            "train_rate_pct": round(avg_action_rates.get("train", 0) * 100, 1),
+            "deposit_rate_pct": round(avg_action_rates.get("deposit", 0) * 100, 1),
+            "avg_deaths_by_cause": self._mean_dict(self._deaths_by_cause),
+            "f_metric": self._rolling_mean(self._f_metrics),
+            "highlight": "latest",
+        }
+
+        # Remove stale "latest" highlight from all previous entries
+        for e in entries:
+            if e.get("highlight") == "latest":
+                del e["highlight"]
+
+        # Deduplicate: remove any prior entry with the same id
+        entries = [e for e in entries if e.get("id") != new_entry["id"]]
+        entries.append(new_entry)
+
+        json_str = json.dumps(entries, indent=2)
+        js_content = (
+            "// Auto-generated stage comparison data for MurimSim dashboard.\n"
+            f"window.STAGE_HISTORY = {json_str};\n"
+        )
+        tmp = history_path.with_suffix(".tmp")
+        tmp.write_text(js_content)
+        tmp.replace(history_path)
 
     # ------------------------------------------------------------------
     # Helpers

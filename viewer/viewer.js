@@ -42,7 +42,8 @@ const ACTION_COLORS = {
   STEAL:       "#c084fc",
 };
 
-const DEAD_AGENT_COLOR    = "#555";
+const DEAD_AGENT_COLOR    = "#64748b";   // slate-500 — clearly visible on dark bg
+const DEAD_AGENT_BORDER   = "#94a3b8";   // slate-400 ring
 const AGENT_COLOR         = "#a78bfa";
 const AGENT_COMBAT_COLOR  = "#ef4444";
 const AGENT_RADIUS_FRAC   = 0.28;
@@ -512,6 +513,23 @@ function render() {
     const hunger     = agent.hunger ?? 0;
     const actionKey  = (agent.action || "").toUpperCase();
 
+    // --- Dead agent: gray corpse circle, skip all living indicators ---
+    if (!agent.alive) {
+      ctx.globalAlpha = 0.55;
+      ctx.beginPath();
+      ctx.arc(cx, cy, agentRadius, 0, 2 * Math.PI);
+      ctx.fillStyle = DEAD_AGENT_COLOR;
+      ctx.fill();
+      // Thin border ring
+      ctx.beginPath();
+      ctx.arc(cx, cy, agentRadius + 1.5, 0, 2 * Math.PI);
+      ctx.strokeStyle = DEAD_AGENT_BORDER;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.globalAlpha = 1.0;
+      continue;
+    }
+
     // Health arc ring (faint background arc)
     const arcStart = -Math.PI / 2;
     const arcEnd   = arcStart + 2 * Math.PI * health;
@@ -534,15 +552,11 @@ function render() {
     // Agent fill — action-based tint
     ctx.beginPath();
     ctx.arc(cx, cy, agentRadius, 0, 2 * Math.PI);
-    if (!agent.alive) {
-      ctx.fillStyle = DEAD_AGENT_COLOR;
-    } else {
-      ctx.fillStyle = ACTION_COLORS[actionKey] || AGENT_COLOR;
-    }
+    ctx.fillStyle = ACTION_COLORS[actionKey] || AGENT_COLOR;
     ctx.fill();
 
     // Combat outer glow
-    if (agent.alive && (actionKey === "ATTACK" || actionKey === "DEFEND")) {
+    if (actionKey === "ATTACK" || actionKey === "DEFEND") {
       ctx.beginPath();
       ctx.arc(cx, cy, agentRadius + 5, 0, 2 * Math.PI);
       ctx.strokeStyle = AGENT_COMBAT_COLOR;
@@ -560,16 +574,14 @@ function render() {
     }
 
     // Hunger indicator dot
-    if (agent.alive) {
-      const dotY    = cy - agentRadius - 5;
-      const hungerC = hunger > 0.7 ? "#ef4444"
-                    : hunger > 0.4 ? "#f97316"
-                    :                "#94a3b8";
-      ctx.beginPath();
-      ctx.arc(cx, dotY, 3, 0, 2 * Math.PI);
-      ctx.fillStyle = hungerC;
-      ctx.fill();
-    }
+    const dotY    = cy - agentRadius - 5;
+    const hungerC = hunger > 0.7 ? "#ef4444"
+                  : hunger > 0.4 ? "#f97316"
+                  :                "#94a3b8";
+    ctx.beginPath();
+    ctx.arc(cx, dotY, 3, 0, 2 * Math.PI);
+    ctx.fillStyle = hungerC;
+    ctx.fill();
   }
 
   updateHUD(tick);
