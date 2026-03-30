@@ -230,6 +230,13 @@
     #fps-slider { width: 80px; accent-color: #4f46e5; }
     #fps-display { font-family: monospace; font-size: 11px; color: #94a3b8; width: 24px; }
 
+    #population-bar {
+      background: #0f172a;
+      border: 1px solid #1e293b;
+      border-top: none;
+      display: block;
+    }
+
     #gen-markers { font-size: 10px; color: #475569; font-family: monospace; }
   </style>
 </head>
@@ -251,12 +258,13 @@
     <div id="canvas-wrap">
       <div id="drop-hint">Load a run_*.jsonl file to begin</div>
       <canvas id="sim-canvas" width="600" height="600"></canvas>
+      <canvas id="population-bar" width="600" height="40" title="Alive agent count over episode (yellow = current tick)"></canvas>
     </div>
 
     <!-- Right sidebar -->
     <div id="sidebar">
 
-      <!-- Legend -->
+      <!-- Legend: resources + action color key -->
       <div id="legend">
         <div class="legend-item"><div class="legend-sq" style="background:rgba(52,168,83,0.85)"></div>Food</div>
         <div class="legend-item"><div class="legend-sq" style="background:rgba(66,133,244,0.85)"></div>Qi</div>
@@ -264,9 +272,11 @@
         <div class="legend-item"><div class="legend-sq" style="background:rgba(239,68,68,0.85)"></div>Flame</div>
         <div class="legend-item"><div class="legend-sq" style="background:rgba(147,51,234,0.85)"></div>Poison</div>
         <div class="legend-item"><div class="legend-sq" style="background:rgba(120,80,40,0.85)"></div>Mountain</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#e74c3c"></div>Iron Fang</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#2ecc71"></div>Jade Lotus</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#9b59b6"></div>Shadow Root</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div>Train</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#22c55e"></div>Gather</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ef4444"></div>Attack</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#818cf8"></div>Collab</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#555"></div>Dead</div>
       </div>
 
       <!-- Agent inspector -->
@@ -288,16 +298,28 @@
     <div id="controls-row">
       <button id="btn-rewind">⏮ Rewind</button>
       <button id="btn-play">▶ Play</button>
-      <button id="btn-step">⏭ Step</button>
+      <button id="btn-step-back">◀ Back</button>
+      <button id="btn-step">▶ Step</button>
       <input type="range" id="scrub" min="0" max="0" value="0" />
       <label class="ctrl-label">
         Speed:
         <input type="range" id="fps-slider" />
-        <span id="fps-display">8</span> fps
+        <span id="fps-display">3</span> fps
       </label>
+      <label class="ctrl-label"><input type="checkbox" id="toggle-qi"> Qi overlay</label>
+      <label class="ctrl-label"><input type="checkbox" id="toggle-trail"> Trail</label>
     </div>
     <div id="gen-markers"></div>
   </div>
+
+  <!-- Floating hover tooltip -->
+  <div id="agent-tooltip" style="
+    display:none; position:fixed; z-index:999;
+    background:#1e293b; border:1px solid #334155; border-radius:6px;
+    padding:6px 10px; font-size:11px; line-height:1.6;
+    color:#e2e8f0; pointer-events:none; white-space:nowrap;
+    box-shadow:0 4px 12px rgba(0,0,0,0.4);
+  "></div>
 
   <script src="viewer.js"></script>
 </body>

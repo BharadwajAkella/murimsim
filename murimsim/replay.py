@@ -9,6 +9,7 @@ Format per line:
         "generation": int,
         "agents": [ { agent fields } ],
         "resources": { rid: [[x, y, intensity], ...] },
+        "stashes": [ {"pos": [x, y], "owner": str, "is_own": bool} ],  # optional
         "events": [ { event fields } ]
     }
 
@@ -17,18 +18,20 @@ Design rules:
 - The logger owns the file handle; call close() or use it as a context manager.
 - No murimsim imports here — callers pass plain dicts/lists so this module
   stays decoupled from agent/world internals.
+- Output directory defaults to logs/replays (override via MURIM_REPLAY_DIR env var).
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Default output directory
-_DEFAULT_REPLAY_DIR = Path("/mnt/c/Users/bhara/Downloads/replays")
+# Default output directory — override with MURIM_REPLAY_DIR environment variable
+_DEFAULT_REPLAY_DIR = Path(os.environ.get("MURIM_REPLAY_DIR", "logs/replays"))
 
 
 class ReplayLogger:
@@ -78,6 +81,7 @@ class ReplayLogger:
         agents: list[dict[str, Any]],
         resources: dict[str, list[list[float | int]]],
         events: list[dict[str, Any]],
+        stashes: list[dict[str, Any]] | None = None,
     ) -> None:
         """Append one tick snapshot as a JSONL line.
 
@@ -85,12 +89,13 @@ class ReplayLogger:
             tick:       Current simulation tick.
             generation: Current generation number.
             agents:     List of agent state dicts. Each must include at minimum:
-                          id, sect, pos, health, hunger, poison_resistance,
-                          action, action_detail, alive.
+                          id, pos, health, hunger, action, action_detail, alive.
             resources:  Mapping of resource_id → list of [x, y, intensity] triples
                         for every present tile (intensity in [0,1]).
             events:     List of event dicts (combat, death, etc.) that occurred
                         this tick.
+            stashes:    Optional list of stash dicts: {pos:[x,y], owner:str, is_own:bool}.
+                        Rendered as diamond markers in the viewer.
         """
         if not self.enabled:
             return
@@ -102,7 +107,12 @@ class ReplayLogger:
             "resources": resources,
             "events": events,
         }
+        if stashes is not None:
+            record["stashes"] = stashes
         self._file.write(json.dumps(record, separators=(",", ":")) + "\n")
+        # Flush every 100 ticks so partial replays are readable on crash
+        if tick % 100 == 0:
+            self._file.flush()
 
     def close(self) -> None:
         """Flush and close the underlying file handle."""

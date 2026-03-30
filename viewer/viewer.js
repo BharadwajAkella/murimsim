@@ -20,37 +20,58 @@
 // ---------------------------------------------------------------------------
 
 const RESOURCE_COLORS = {
-  food:      "rgba(52, 168, 83, 0.75)",   // green
-  qi:        "rgba(66, 133, 244, 0.75)",  // blue
-  materials: "rgba(234, 179, 8, 0.85)",   // yellow
-  poison:    "rgba(147, 51, 234, 0.85)",  // purple
-  flame:     "rgba(239, 68, 68, 0.85)",   // red
-  mountain:  "rgba(120, 80, 40, 0.85)",   // brown
+  food:      "rgba(52, 168, 83, 0.75)",
+  qi:        "rgba(66, 133, 244, 0.75)",
+  materials: "rgba(234, 179, 8, 0.85)",
+  poison:    "rgba(147, 51, 234, 0.85)",
+  flame:     "rgba(239, 68, 68, 0.85)",
+  mountain:  "rgba(120, 80, 40, 0.85)",
 };
 
-// Per-sect agent colors — removed (no sects)
-const DEAD_AGENT_COLOR = "#555";
-const AGENT_COLOR = "#a78bfa";         // agent color
-const AGENT_COMBAT_COLOR = "#ef4444";  // bright red during attack or defend
-const AGENT_RADIUS_FRAC = 0.28;        // fraction of cell size
-const DEFAULT_FPS = 3;
-const MIN_FPS = 1;
-const MAX_FPS = 60;
+const ACTION_COLORS = {
+  TRAIN:       "#f59e0b",
+  GATHER:      "#22c55e",
+  EAT:         "#86efac",
+  REST:        "#60a5fa",
+  DEPOSIT:     "#34d399",
+  WITHDRAW:    "#6ee7b7",
+  COLLABORATE: "#818cf8",
+  WALK_AWAY:   "#94a3b8",
+  ATTACK:      "#ef4444",
+  DEFEND:      "#f97316",
+  STEAL:       "#c084fc",
+};
+
+const DEAD_AGENT_COLOR    = "#555";
+const AGENT_COLOR         = "#a78bfa";
+const AGENT_COMBAT_COLOR  = "#ef4444";
+const AGENT_RADIUS_FRAC   = 0.28;
+const DEFAULT_FPS         = 3;
+const MIN_FPS             = 1;
+const MAX_FPS             = 60;
+const TRAIL_TICKS         = 8;
+const SPARKLINE_TICKS     = 50;
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
 const state = {
-  ticks: [],           // parsed tick records (array of objects)
-  currentIndex: 0,     // index into ticks[]
-  playing: false,
-  fps: DEFAULT_FPS,
-  intervalId: null,
-  gridSize: 30,        // inferred from data
-  selectedAgentId: null,
-  selectedTile: null,  // {x, y} of last clicked tile (when no agent was hit)
-  generationMarkers: [], // tick indices where generation changes
+  ticks:              [],
+  currentIndex:       0,
+  playing:            false,
+  fps:                DEFAULT_FPS,
+  intervalId:         null,
+  gridSize:           30,
+  selectedAgentId:    null,
+  selectedTile:       null,
+  generationMarkers:  [],
+  // New fields
+  aliveCounts:        [],   // [tickIndex] => number of alive agents
+  agentHistories:     {},   // [agentId] => {health: [], hunger: []}
+  deathLocations:     [],   // [tickIndex] => [{x, y, id}]
+  showQiOverlay:      false,
+  showTrail:          false,
 };
 
 // ---------------------------------------------------------------------------
@@ -59,38 +80,82 @@ const state = {
 
 let canvas, ctx;
 let scrubBar, tickLabel, genLabel, fpsDisplay;
-let playBtn, stepBtn, rewindBtn;
+let playBtn, stepBtn, stepBackBtn, rewindBtn;
 let fpsSlider;
 let agentPanel, eventLog;
+let populationCanvas, popCtx;
+let tooltipEl;
+let toggleQiEl, toggleTrailEl;
 
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 document.addEventListener("DOMContentLoaded", () => {
-  canvas    = document.getElementById("sim-canvas");
-  ctx       = canvas.getContext("2d");
-  scrubBar  = document.getElementById("scrub");
-  tickLabel = document.getElementById("tick-label");
-  genLabel  = document.getElementById("gen-label");
-  fpsDisplay = document.getElementById("fps-display");
-  playBtn   = document.getElementById("btn-play");
-  stepBtn   = document.getElementById("btn-step");
-  rewindBtn = document.getElementById("btn-rewind");
-  fpsSlider = document.getElementById("fps-slider");
-  agentPanel = document.getElementById("agent-panel");
-  eventLog  = document.getElementById("event-log");
+  canvas          = document.getElementById("sim-canvas");
+  ctx             = canvas.getContext("2d");
+  scrubBar        = document.getElementById("scrub");
+  tickLabel       = document.getElementById("tick-label");
+  genLabel        = document.getElementById("gen-label");
+  fpsDisplay      = document.getElementById("fps-display");
+  playBtn         = document.getElementById("btn-play");
+  stepBtn         = document.getElementById("btn-step");
+  stepBackBtn     = document.getElementById("btn-step-back");
+  rewindBtn       = document.getElementById("btn-rewind");
+  fpsSlider       = document.getElementById("fps-slider");
+  agentPanel      = document.getElementById("agent-panel");
+  eventLog        = document.getElementById("event-log");
+  populationCanvas = document.getElementById("population-bar");
+  toggleQiEl      = document.getElementById("toggle-qi");
+  toggleTrailEl   = document.getElementById("toggle-trail");
+
+  // Create tooltip element dynamically if not in HTML
+  tooltipEl = document.getElementById("agent-tooltip");
+  if (!tooltipEl) {
+    tooltipEl = document.createElement("div");
+    tooltipEl.id = "agent-tooltip";
+    tooltipEl.style.cssText = [
+      "position:fixed", "display:none", "padding:6px 10px",
+      "background:rgba(15,15,30,0.92)", "color:#e2e8f0",
+      "border:1px solid rgba(167,139,250,0.4)", "border-radius:6px",
+      "font:12px/1.5 monospace", "pointer-events:none", "z-index:100",
+      "white-space:pre",
+    ].join(";");
+    document.body.appendChild(tooltipEl);
+  }
+
+  if (populationCanvas) {
+    popCtx = populationCanvas.getContext("2d");
+  }
 
   document.getElementById("file-input").addEventListener("change", onFileLoaded);
   playBtn.addEventListener("click", togglePlay);
   stepBtn.addEventListener("click", stepForward);
+  if (stepBackBtn) stepBackBtn.addEventListener("click", stepBack);
   rewindBtn.addEventListener("click", rewind);
   scrubBar.addEventListener("input", onScrub);
   fpsSlider.addEventListener("input", onFpsChange);
   canvas.addEventListener("click", onCanvasClick);
+  canvas.addEventListener("mousemove", onCanvasHover);
+  canvas.addEventListener("mouseleave", () => { tooltipEl.style.display = "none"; });
 
-  fpsSlider.min = MIN_FPS;
-  fpsSlider.max = MAX_FPS;
+  if (toggleQiEl) {
+    toggleQiEl.addEventListener("change", () => {
+      state.showQiOverlay = toggleQiEl.checked;
+      render();
+    });
+  }
+  if (toggleTrailEl) {
+    toggleTrailEl.addEventListener("change", () => {
+      state.showTrail = toggleTrailEl.checked;
+      render();
+    });
+  }
+
+  document.addEventListener("keydown", onKeyDown);
+
+  fpsSlider.min   = MIN_FPS;
+  fpsSlider.max   = MAX_FPS;
   fpsSlider.value = DEFAULT_FPS;
   fpsDisplay.textContent = DEFAULT_FPS;
 
@@ -143,17 +208,47 @@ function parseJSONL(text) {
     if (g !== lastGen) { state.generationMarkers.push(i); lastGen = g; }
   }
 
+  // Precompute alive counts
+  state.aliveCounts = state.ticks.map(tick =>
+    (tick.agents || []).filter(a => a.alive).length
+  );
+
+  // Precompute agent histories (last SPARKLINE_TICKS ticks per agent)
+  state.agentHistories = {};
+  for (let i = 0; i < state.ticks.length; i++) {
+    for (const agent of (state.ticks[i].agents || [])) {
+      if (!state.agentHistories[agent.id]) {
+        state.agentHistories[agent.id] = { health: [], hunger: [] };
+      }
+      state.agentHistories[agent.id].health.push(agent.health ?? 0);
+      state.agentHistories[agent.id].hunger.push(agent.hunger ?? 0);
+    }
+  }
+
+  // Precompute death locations per tick
+  state.deathLocations = state.ticks.map(tick =>
+    (tick.events || [])
+      .filter(ev => ev.type === "death")
+      .map(ev => {
+        const agent = (tick.agents || []).find(a => a.id === ev.agent);
+        if (!agent) return null;
+        return { x: agent.pos[0], y: agent.pos[1], id: ev.agent };
+      })
+      .filter(Boolean)
+  );
+
   // Reset playback
-  state.currentIndex = 0;
-  state.playing = false;
+  state.currentIndex  = 0;
+  state.playing       = false;
   clearInterval(state.intervalId);
-  state.intervalId = null;
+  state.intervalId    = null;
   playBtn.textContent = "▶ Play";
 
-  scrubBar.max = state.ticks.length - 1;
+  scrubBar.max   = state.ticks.length - 1;
   scrubBar.value = 0;
 
   render();
+  drawPopulationBar();
   document.getElementById("controls").style.display = "flex";
   document.getElementById("drop-hint").style.display = "none";
 }
@@ -180,8 +275,9 @@ function scheduleNext() {
       state.currentIndex++;
       scrubBar.value = state.currentIndex;
       render();
+      drawPopulationBar();
     } else {
-      togglePlay(); // stop at end
+      togglePlay();
     }
   }, 1000 / state.fps);
 }
@@ -191,25 +287,73 @@ function stepForward() {
     state.currentIndex++;
     scrubBar.value = state.currentIndex;
     render();
+    drawPopulationBar();
+  }
+}
+
+function stepBack() {
+  if (state.currentIndex > 0) {
+    state.currentIndex--;
+    scrubBar.value = state.currentIndex;
+    render();
+    drawPopulationBar();
   }
 }
 
 function rewind() {
   state.currentIndex = 0;
-  scrubBar.value = 0;
+  scrubBar.value     = 0;
   render();
+  drawPopulationBar();
 }
 
 function onScrub() {
   state.currentIndex = parseInt(scrubBar.value, 10);
   render();
-  if (state.playing) scheduleNext(); // reset interval to avoid drift
+  drawPopulationBar();
+  if (state.playing) scheduleNext();
 }
 
 function onFpsChange() {
   state.fps = parseInt(fpsSlider.value, 10);
   fpsDisplay.textContent = state.fps;
   if (state.playing) scheduleNext();
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard shortcuts
+// ---------------------------------------------------------------------------
+
+function onKeyDown(e) {
+  if (e.target && e.target.tagName === "INPUT") return;
+  switch (e.code) {
+    case "Space":      e.preventDefault(); togglePlay();    break;
+    case "ArrowRight": e.preventDefault(); stepForward();   break;
+    case "ArrowLeft":  e.preventDefault(); stepBack();      break;
+    case "KeyR":       e.preventDefault(); rewind();        break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Agent hit-test helper
+// ---------------------------------------------------------------------------
+
+function _agentAtMouse(mx, my) {
+  if (state.ticks.length === 0) return null;
+  const tick    = state.ticks[state.currentIndex];
+  const cellW   = canvas.width  / state.gridSize;
+  const cellH   = canvas.height / state.gridSize;
+  const baseR   = Math.min(cellW, cellH) * AGENT_RADIUS_FRAC;
+
+  for (const agent of (tick.agents || [])) {
+    const strength = agent.traits ? (agent.traits.strength ?? 0.5) : 0.5;
+    const r        = baseR * (0.8 + 0.6 * strength);
+    const [ax, ay] = agent.pos;
+    const cx       = ax * cellW + cellW / 2;
+    const cy       = ay * cellH + cellH / 2;
+    if (Math.hypot(mx - cx, my - cy) <= r + 4) return agent;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -220,10 +364,11 @@ function render() {
   if (state.ticks.length === 0) return;
   const tick = state.ticks[state.currentIndex];
 
-  const W = canvas.width;
-  const H = canvas.height;
+  const W     = canvas.width;
+  const H     = canvas.height;
   const cellW = W / state.gridSize;
   const cellH = H / state.gridSize;
+  const baseR = Math.min(cellW, cellH) * AGENT_RADIUS_FRAC;
 
   ctx.clearRect(0, 0, W, H);
 
@@ -231,11 +376,9 @@ function render() {
   ctx.fillStyle = "#1a1a2e";
   ctx.fillRect(0, 0, W, H);
 
-  // (sect home-region overlays removed)
-
   // Grid lines (subtle)
   ctx.strokeStyle = "rgba(255,255,255,0.04)";
-  ctx.lineWidth = 0.5;
+  ctx.lineWidth   = 0.5;
   for (let i = 0; i <= state.gridSize; i++) {
     ctx.beginPath(); ctx.moveTo(i * cellW, 0); ctx.lineTo(i * cellW, H); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(0, i * cellH); ctx.lineTo(W, i * cellH); ctx.stroke();
@@ -243,14 +386,28 @@ function render() {
 
   // Resources
   for (const [rid, tiles] of Object.entries(tick.resources || {})) {
+    if (rid === "qi" && state.showQiOverlay) continue; // drawn separately below
     const color = RESOURCE_COLORS[rid] || "rgba(200,200,200,0.5)";
     for (const [x, y, intensity] of tiles) {
       const alpha = Math.min(1, Math.max(0.2, intensity ?? 1));
       ctx.fillStyle = color.replace(/[\d.]+\)$/, `${alpha})`);
-      ctx.fillRect(
-        x * cellW + 1, y * cellH + 1,
-        cellW - 2, cellH - 2
-      );
+      ctx.fillRect(x * cellW + 1, y * cellH + 1, cellW - 2, cellH - 2);
+    }
+  }
+
+  // Qi field overlay
+  if (state.showQiOverlay) {
+    const qiTiles = (tick.resources || {}).qi || [];
+    for (const [x, y, intensity] of qiTiles) {
+      const cx   = x * cellW + cellW / 2;
+      const cy   = y * cellH + cellH / 2;
+      const r    = 2.5 * Math.min(cellW, cellH);
+      const alpha = (intensity ?? 1) * 0.18;
+      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      grad.addColorStop(0, `rgba(66,133,244,${alpha})`);
+      grad.addColorStop(1, "rgba(66,133,244,0)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
     }
   }
 
@@ -258,55 +415,142 @@ function render() {
   if (state.selectedTile) {
     const { x, y } = state.selectedTile;
     ctx.strokeStyle = "#ffe066";
-    ctx.lineWidth = 2;
+    ctx.lineWidth   = 2;
     ctx.strokeRect(x * cellW + 1, y * cellH + 1, cellW - 2, cellH - 2);
+  }
+
+  // Stash markers
+  if (Array.isArray(tick.stashes)) {
+    for (const stash of tick.stashes) {
+      const sx     = stash.x * cellW + cellW / 2;
+      const sy     = stash.y * cellH + cellH / 2;
+      const half   = Math.min(cellW, cellH) * 0.28;
+      const color  = stash.is_own ? "#2dd4bf" : "#fb923c";
+      ctx.beginPath();
+      ctx.moveTo(sx,        sy - half);
+      ctx.lineTo(sx + half, sy);
+      ctx.lineTo(sx,        sy + half);
+      ctx.lineTo(sx - half, sy);
+      ctx.closePath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth   = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = stash.is_own ? "rgba(45,212,191,0.15)" : "rgba(251,146,60,0.15)";
+      ctx.fill();
+    }
+  }
+
+  // Movement trail
+  if (state.showTrail) {
+    const trailDotR = Math.min(cellW, cellH) * 0.08;
+    for (let age = TRAIL_TICKS; age >= 1; age--) {
+      const ti = state.currentIndex - age;
+      if (ti < 0) continue;
+      const alpha = 0.55 * (1 - age / TRAIL_TICKS);
+      for (const agent of (state.ticks[ti].agents || [])) {
+        if (!agent.alive) continue;
+        const [ax, ay] = agent.pos;
+        const tx = ax * cellW + cellW / 2;
+        const ty = ay * cellH + cellH / 2;
+        ctx.beginPath();
+        ctx.arc(tx, ty, trailDotR, 0, 2 * Math.PI);
+        ctx.fillStyle = `rgba(167,139,250,${alpha})`;
+        ctx.fill();
+      }
+    }
+  }
+
+  // Death skull fade (last 10 ticks)
+  for (let age = 10; age >= 1; age--) {
+    const ti = state.currentIndex - age + 1;
+    if (ti < 0 || ti >= state.deathLocations.length) continue;
+    const alpha = 1 - age / 10;
+    for (const { x, y } of state.deathLocations[ti]) {
+      const dx   = x * cellW + cellW / 2;
+      const dy   = y * cellH + cellH / 2;
+      const half = Math.min(cellW, cellH) * 0.22;
+      ctx.strokeStyle = `rgba(255,80,80,${alpha})`;
+      ctx.lineWidth   = 2;
+      ctx.beginPath();
+      ctx.moveTo(dx - half, dy - half);
+      ctx.lineTo(dx + half, dy + half);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(dx + half, dy - half);
+      ctx.lineTo(dx - half, dy + half);
+      ctx.stroke();
+    }
   }
 
   // Agents
   const agents = tick.agents || [];
-  const agentRadius = Math.min(cellW, cellH) * AGENT_RADIUS_FRAC;
   for (const agent of agents) {
-    const [ax, ay] = agent.pos;
-    const cx = ax * cellW + cellW / 2;
-    const cy = ay * cellH + cellH / 2;
+    const strength   = agent.traits ? (agent.traits.strength ?? 0.5) : 0.5;
+    const agentRadius = baseR * (0.8 + 0.6 * strength);
+    const [ax, ay]   = agent.pos;
+    const cx         = ax * cellW + cellW / 2;
+    const cy         = ay * cellH + cellH / 2;
+    const health     = agent.health ?? 1;
+    const hunger     = agent.hunger ?? 0;
+    const actionKey  = (agent.action || "").toUpperCase();
 
-    // Outer ring: health indicator
+    // Health arc ring (faint background arc)
+    const arcStart = -Math.PI / 2;
+    const arcEnd   = arcStart + 2 * Math.PI * health;
+    const ringR    = agentRadius + 2.5;
+
     ctx.beginPath();
-    ctx.arc(cx, cy, agentRadius + 2, 0, 2 * Math.PI);
-    ctx.strokeStyle = agent.alive ? "rgba(255,255,255,0.35)" : "#333";
-    ctx.lineWidth = 1.5;
+    ctx.arc(cx, cy, ringR, arcEnd, arcStart + 2 * Math.PI);
+    ctx.strokeStyle = "rgba(255,255,255,0.08)";
+    ctx.lineWidth   = 2;
     ctx.stroke();
 
-    // Agent dot
+    // Colored health arc
+    const hue = health * 120; // 0=red, 120=green
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringR, arcStart, arcEnd);
+    ctx.strokeStyle = `hsl(${hue},90%,55%)`;
+    ctx.lineWidth   = 2;
+    ctx.stroke();
+
+    // Agent fill — action-based tint
     ctx.beginPath();
     ctx.arc(cx, cy, agentRadius, 0, 2 * Math.PI);
-    const inCombat = agent.alive && (agent.action === "attack" || agent.action === "defend");
     if (!agent.alive) {
       ctx.fillStyle = DEAD_AGENT_COLOR;
-    } else if (inCombat) {
-      // Flash between two reds: bright on even render frames, darker on odd
-      ctx.fillStyle = (state.currentIndex % 2 === 0) ? AGENT_COMBAT_COLOR : "#b91c1c";
     } else {
-      ctx.fillStyle = AGENT_COLOR;
+      ctx.fillStyle = ACTION_COLORS[actionKey] || AGENT_COLOR;
     }
     ctx.fill();
 
-    // Combat ring: extra glow when fighting
-    if (inCombat) {
+    // Combat outer glow
+    if (agent.alive && (actionKey === "ATTACK" || actionKey === "DEFEND")) {
       ctx.beginPath();
-      ctx.arc(cx, cy, agentRadius + 4, 0, 2 * Math.PI);
+      ctx.arc(cx, cy, agentRadius + 5, 0, 2 * Math.PI);
       ctx.strokeStyle = AGENT_COMBAT_COLOR;
-      ctx.lineWidth = 2;
+      ctx.lineWidth   = 2;
       ctx.stroke();
     }
 
     // Selection highlight
     if (agent.id === state.selectedAgentId) {
       ctx.beginPath();
-      ctx.arc(cx, cy, agentRadius + 4, 0, 2 * Math.PI);
+      ctx.arc(cx, cy, agentRadius + 5, 0, 2 * Math.PI);
       ctx.strokeStyle = "#ffe066";
-      ctx.lineWidth = 2;
+      ctx.lineWidth   = 2;
       ctx.stroke();
+    }
+
+    // Hunger indicator dot
+    if (agent.alive) {
+      const dotY    = cy - agentRadius - 5;
+      const hungerC = hunger > 0.7 ? "#ef4444"
+                    : hunger > 0.4 ? "#f97316"
+                    :                "#94a3b8";
+      ctx.beginPath();
+      ctx.arc(cx, dotY, 3, 0, 2 * Math.PI);
+      ctx.fillStyle = hungerC;
+      ctx.fill();
     }
   }
 
@@ -316,18 +560,37 @@ function render() {
 }
 
 // ---------------------------------------------------------------------------
-// HUD (tick / generation labels + scrub markers)
+// Population bar chart
+// ---------------------------------------------------------------------------
+
+function drawPopulationBar() {
+  if (!popCtx || state.aliveCounts.length === 0) return;
+  const W   = populationCanvas.width;
+  const H   = populationCanvas.height;
+  const n   = state.aliveCounts.length;
+  const max = Math.max(1, ...state.aliveCounts);
+
+  popCtx.clearRect(0, 0, W, H);
+  popCtx.fillStyle = "#0f0f1e";
+  popCtx.fillRect(0, 0, W, H);
+
+  const barW = W / n;
+  for (let i = 0; i < n; i++) {
+    const bH = (state.aliveCounts[i] / max) * (H - 2);
+    popCtx.fillStyle = (i === state.currentIndex) ? "#ffe066" : "rgba(167,139,250,0.55)";
+    popCtx.fillRect(i * barW, H - bH, Math.max(1, barW - 0.5), bH);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// HUD
 // ---------------------------------------------------------------------------
 
 function updateHUD(tick) {
   tickLabel.textContent = `Tick: ${tick.tick}`;
   genLabel.textContent  = `Generation: ${tick.generation ?? 0}`;
 
-  // Draw generation markers on scrub bar via a custom background gradient
-  // (CSS only approach — overlay divs would require DOM mutation each frame,
-  //  so we just annotate the label instead)
-  const idx = state.currentIndex;
-  const total = state.ticks.length;
+  const total   = state.ticks.length;
   const markers = state.generationMarkers
     .map(i => `${Math.round((i / total) * 100)}%`)
     .join(", ");
@@ -341,38 +604,44 @@ function updateHUD(tick) {
 
 function onCanvasClick(e) {
   if (state.ticks.length === 0) return;
-  const tick = state.ticks[state.currentIndex];
   const rect = canvas.getBoundingClientRect();
-  const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
-  const my = (e.clientY - rect.top)  * (canvas.height / rect.height);
-  const cellW = canvas.width  / state.gridSize;
-  const cellH = canvas.height / state.gridSize;
-  const agentRadius = Math.min(cellW, cellH) * AGENT_RADIUS_FRAC;
-
-  // Agent hit-test takes priority
-  let hitAgent = null;
-  for (const agent of (tick.agents || [])) {
-    const [ax, ay] = agent.pos;
-    const cx = ax * cellW + cellW / 2;
-    const cy = ay * cellH + cellH / 2;
-    if (Math.hypot(mx - cx, my - cy) <= agentRadius + 4) { hitAgent = agent; break; }
-  }
+  const mx   = (e.clientX - rect.left) * (canvas.width  / rect.width);
+  const my   = (e.clientY - rect.top)  * (canvas.height / rect.height);
+  const hitAgent = _agentAtMouse(mx, my);
 
   if (hitAgent) {
     state.selectedAgentId = hitAgent.id;
-    state.selectedTile = null;
+    state.selectedTile    = null;
   } else {
     state.selectedAgentId = null;
-    state.selectedTile = {
-      x: Math.floor(mx / cellW),
-      y: Math.floor(my / cellH),
-    };
+    const cellW = canvas.width  / state.gridSize;
+    const cellH = canvas.height / state.gridSize;
+    state.selectedTile = { x: Math.floor(mx / cellW), y: Math.floor(my / cellH) };
   }
   render();
 }
 
+function onCanvasHover(e) {
+  if (state.ticks.length === 0) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx   = (e.clientX - rect.left) * (canvas.width  / rect.width);
+  const my   = (e.clientY - rect.top)  * (canvas.height / rect.height);
+  const agent = _agentAtMouse(mx, my);
+
+  if (agent && agent.alive) {
+    const hp  = Math.round((agent.health  ?? 0) * 100);
+    const hun = Math.round((agent.hunger  ?? 0) * 100);
+    tooltipEl.textContent = `${agent.id}\nHP: ${hp}%  Hunger: ${hun}%\n${agent.action || "—"}`;
+    tooltipEl.style.left    = `${e.clientX + 14}px`;
+    tooltipEl.style.top     = `${e.clientY - 10}px`;
+    tooltipEl.style.display = "block";
+  } else {
+    tooltipEl.style.display = "none";
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Inspector panel — dispatches to agent or tile view
+// Inspector panel — agent + tile views
 // ---------------------------------------------------------------------------
 
 const RESOURCE_LABELS = {
@@ -401,9 +670,7 @@ function updateAgentPanel(tick) {
     return;
   }
 
-  const res = agent.resistances || {};
-
-  // Render a [0,1] value as 0–100, or "Immune" at 1.0
+  const res  = agent.resistances || {};
   const fmt  = v => (v == null || isNaN(v)) ? "—" : v >= 1.0 ? "Immune" : `${Math.round(v * 100)}`;
   const barW = v => `${Math.min(100, Math.round((v ?? 0) * 100))}`;
 
@@ -441,13 +708,55 @@ function updateAgentPanel(tick) {
       <tr><th>Action</th><td>${agent.action}</td></tr>
       <tr><th>Detail</th><td>${agent.action_detail || "—"}</td></tr>
     </table>
+    ${_buildSparkline(agent.id, state.currentIndex)}
   `;
+}
+
+/**
+ * Build an inline SVG sparkline showing last SPARKLINE_TICKS of health + hunger.
+ */
+function _buildSparkline(agentId, upToTick) {
+  const hist = state.agentHistories[agentId];
+  if (!hist) return "";
+
+  const end      = Math.min(upToTick + 1, hist.health.length);
+  const start    = Math.max(0, end - SPARKLINE_TICKS);
+  const healths  = hist.health.slice(start, end);
+  const hungers  = hist.hunger.slice(start, end);
+  if (healths.length < 2) return "";
+
+  const W = 190, H = 34, PAD = 2;
+  const IW = W - PAD * 2, IH = H - PAD * 2;
+
+  function toPath(values) {
+    if (values.length === 0) return "";
+    const step = IW / (values.length - 1);
+    return values.map((v, i) => {
+      const px = PAD + i * step;
+      const py = PAD + IH * (1 - v);
+      return `${i === 0 ? "M" : "L"}${px.toFixed(1)},${py.toFixed(1)}`;
+    }).join(" ");
+  }
+
+  const healthPath = toPath(healths);
+  const hungerPath = toPath(hungers);
+
+  return `
+  <div style="margin-top:8px">
+    <svg width="${W}" height="${H}" style="background:#0f172a;border-radius:4px;display:block">
+      <path d="${healthPath}" stroke="#22c55e" stroke-width="1.5" fill="none"/>
+      <path d="${hungerPath}" stroke="#f59e0b" stroke-width="1.5" fill="none"/>
+    </svg>
+    <div style="font:10px monospace;color:#64748b;margin-top:2px">
+      <span style="color:#22c55e">■</span> health &nbsp;
+      <span style="color:#f59e0b">■</span> hunger &nbsp; (last ${healths.length} ticks)
+    </div>
+  </div>`;
 }
 
 function updateTilePanel(tick) {
   const { x, y } = state.selectedTile;
 
-  // Collect all resources present at this cell
   const present = [];
   for (const [rid, tiles] of Object.entries(tick.resources || {})) {
     for (const [tx, ty, intensity] of tiles) {
@@ -458,7 +767,6 @@ function updateTilePanel(tick) {
     }
   }
 
-  // Agents standing on this cell
   const here = (tick.agents || []).filter(a => a.pos[0] === x && a.pos[1] === y);
 
   const resourceRows = present.length > 0
@@ -485,7 +793,6 @@ function updateTilePanel(tick) {
     </table>
   `;
 }
-
 
 // ---------------------------------------------------------------------------
 // Event log
@@ -518,7 +825,7 @@ function drawPlaceholder() {
   ctx.fillStyle = "#1a1a2e";
   ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = "rgba(255,255,255,0.15)";
-  ctx.font = "bold 16px monospace";
+  ctx.font      = "bold 16px monospace";
   ctx.textAlign = "center";
   ctx.fillText("Load a run_*.jsonl file to begin", W / 2, H / 2);
 }

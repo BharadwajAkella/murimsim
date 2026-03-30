@@ -31,7 +31,9 @@ from murimsim.world import World
 
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "default.yaml"
-OUTPUT_DIR  = Path("/mnt/c/Users/bhara/Downloads/replays")
+import os
+from pathlib import Path
+OUTPUT_DIR = Path(os.environ.get("MURIM_REPLAY_DIR", "logs/replays"))
 
 # Cardinal move actions in priority order for food scanning
 _CARDINAL_MOVES = [Action.MOVE_N, Action.MOVE_S, Action.MOVE_E, Action.MOVE_W]
@@ -45,6 +47,18 @@ def world_to_resource_snapshot(world: World) -> dict[str, list[list[int | float]
         ys, xs = np.where(grid > 0)
         snapshot[rid] = [[int(x), int(y), 1.0] for x, y in zip(xs, ys)]
     return snapshot
+
+
+def stash_snapshot(env: SurvivalEnv, focal_agent_id: str) -> list[dict]:
+    """Serialise all known stashes to viewer format: {pos, owner, is_own}."""
+    return [
+        {
+            "pos": list(s.position),
+            "owner": s.owner_id,
+            "is_own": s.owner_id == focal_agent_id,
+        }
+        for s in env._stash_registry.all_stashes()
+    ]
 
 
 class HeuristicPolicy:
@@ -234,6 +248,7 @@ def main() -> None:
                 generation=0,
                 agents=[agent.to_replay_dict(action=act_name, action_detail="")],
                 resources=world_to_resource_snapshot(world),
+                stashes=stash_snapshot(env, agent.agent_id),
                 events=[],
             )
 
@@ -260,6 +275,7 @@ def main() -> None:
                     generation=0,
                     agents=[agent.to_replay_dict(action="dead", action_detail="health reached 0")],
                     resources=world_to_resource_snapshot(world),
+                    stashes=stash_snapshot(env, agent.agent_id),
                     events=[{"type": "death", "agent_id": agent.agent_id, "tick": tick + 1}],
                 )
                 print(f"\n  [DIED] Agent died at tick {tick + 1}.")

@@ -10,6 +10,7 @@ Usage (from project root):
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from murimsim.world import World
 
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "default.yaml"
-OUTPUT_DIR  = Path("/mnt/c/Users/bhara/Downloads/replays")
+OUTPUT_DIR  = Path(os.environ.get("MURIM_REPLAY_DIR", "logs/replays"))
 
 
 def world_to_resource_snapshot(world: World) -> dict[str, list[list[int | float]]]:

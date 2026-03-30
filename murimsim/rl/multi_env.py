@@ -1,4 +1,4 @@
-"""multi_env.py — Phase 3b/3c multi-agent environment.
+"""multi_env.py — Multi-agent survival environment (active version).
 
 N agents share one World. The policy is trained on all agents via a round-robin
 focal-agent scheme: each call to step() acts on one focal agent while the
@@ -7,7 +7,7 @@ remaining agents follow a simple heuristic, then the focal index advances.
 This design keeps the standard gym.Env interface so the env works directly
 with SB3 PPO through DummyVecEnv / SubprocVecEnv.
 
-Observation layout (Phase 6b — 263 floats total):
+Observation layout (263 floats total):
     [0:100]   5×5 local grid × 4 resource channels  (food, qi, materials, poison)
     [100:200] 5×5 local grid × 4 agent channels     (agent_present, health, strength, sociability)
     [200:250] 5×5 local grid × 2 stash channels     (my_stash, enemy_stash)
@@ -22,9 +22,19 @@ Observation layout (Phase 6b — 263 floats total):
                 strength,               # current base strength
                 hunger_resistance       # trait: how well agent tolerates hunger
 
-Action space (Phase 3b): Discrete(7) — same as SurvivalEnv
-Action space (Phase 3c): Discrete(9) — adds ATTACK, DEFEND
-Action space (Phase 5):  Discrete(14) — adds COLLABORATE, WALK_AWAY
+Action space: Discrete(15) — N_ACTIONS_PHASE6
+    0–3:  MOVE (N/S/E/W)
+    4:    EAT
+    5:    GATHER
+    6:    REST
+    7:    DEPOSIT
+    8:    WITHDRAW
+    9:    STEAL
+    10:   ATTACK
+    11:   DEFEND
+    12:   COLLABORATE
+    13:   WALK_AWAY
+    14:   TRAIN
 """
 from __future__ import annotations
 

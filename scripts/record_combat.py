@@ -12,6 +12,7 @@ Usage (from project root):
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -27,7 +28,7 @@ from murimsim.sect import DEFAULT_SECTS
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "default.yaml"
 TRAIN_CONFIG_PATH = Path(__file__).parent.parent / "config" / "training.yaml"
-OUTPUT_DIR = Path("/mnt/c/Users/bhara/Downloads/replays")
+OUTPUT_DIR = Path(os.environ.get("MURIM_REPLAY_DIR", "logs/replays"))
 DEFAULT_MODEL = Path(__file__).parent.parent / "checkpoints" / "limbic_lstm_v2" / "limbic_lstm_v2_final.zip"
 
 
