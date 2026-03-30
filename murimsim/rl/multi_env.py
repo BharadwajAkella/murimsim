@@ -71,7 +71,7 @@ HEURISTIC_SCAN_RADIUS: int = 3      # Manhattan radius for food scan
 # ── Reward shaping (Stage 5: potential-based) ────────────────────────────────
 REWARD_ALIVE: float = 0.02
 REWARD_HUNGER_RELIEF_SCALE: float = 0.20
-REWARD_FOOD_GATHERED_SCALE: float = 0.10           # raised from 0.05 — gather was undervalued
+REWARD_FOOD_GATHERED_SCALE: float = 0.15           # raised: gather must outpace eat reward
 REWARD_HAZARD_DAMAGE_SCALE: float = -0.30          # unified: traversal + consumption damage
 REWARD_DEATH: float = -1.00
 REWARD_EXPLORE_BASE: float = 0.25                  # multiplied by (1-hunger) in step
@@ -81,8 +81,10 @@ INV_SECURITY_CAP: float = 5.0                      # normalise over first 5 food
 # Starvation proximity penalty: discourages approaching the danger zone
 PENALTY_STARVATION_APPROACH: float = -0.08
 STARVATION_THRESHOLD: float = 0.80                 # synced with Agent.STARVATION_THRESHOLD
-# Health recovery bonus: reward regaining health (e.g., from eating)
-REWARD_HEALTH_RECOVERY_SCALE: float = 0.30
+# Health recovery bonus: only fires when health is meaningfully low (< HEALTH_RECOVERY_GATE)
+# This prevents eat-farming when already healthy
+REWARD_HEALTH_RECOVERY_SCALE: float = 0.20
+HEALTH_RECOVERY_GATE: float = 0.70                 # no recovery reward above this health level
 # δ-reward for TRAIN action: incentivises training (strength delta × scale)
 REWARD_TRAIN_STRENGTH_SCALE: float = 2.0
 
@@ -751,9 +753,10 @@ class MultiAgentEnv(gym.Env):
         # Starvation proximity penalty
         if agent.hunger > STARVATION_THRESHOLD:
             reward += PENALTY_STARVATION_APPROACH * (agent.hunger - STARVATION_THRESHOLD)
-        # Health recovery bonus: reward regaining health
+        # Health recovery bonus: only reward recovering health when it's meaningfully low.
+        # Gate prevents eat-farming: no bonus when already healthy (>= HEALTH_RECOVERY_GATE).
         health_delta = agent.health - health_prev
-        if health_delta > 0:
+        if health_delta > 0 and health_prev < HEALTH_RECOVERY_GATE:
             reward += REWARD_HEALTH_RECOVERY_SCALE * health_delta
         if not agent.alive:
             reward += REWARD_DEATH

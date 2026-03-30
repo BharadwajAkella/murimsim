@@ -92,3 +92,24 @@ lstm_v12:
   clip_range: 0.15                # tighter than default 0.2
   clip_range_final: 0.05          # very tight at end — lock in good policy
   ent_coef: 0.02                  # higher entropy → more exploration, less collapse
+
+# lstm_v13: reward fix — gated health recovery, stronger gather reward
+#   - Same LR/clip decay as v12 (stable fine-tuning)
+#   - Warm-starts from v12 final
+#   - Fixes eat-farming: REWARD_HEALTH_RECOVERY only fires when health < 0.70
+#   - REWARD_FOOD_GATHERED_SCALE raised 0.10 → 0.15 (gather > eat incentive)
+lstm_v13:
+  total_timesteps: 1_500_000
+  checkpoint_freq: 100_000
+  n_envs: 4
+  curriculum_ramp_steps: 1
+  lstm_hidden_size: 64
+  n_lstm_layers: 1
+  shared_lstm: false
+  n_steps: 512
+  batch_size: 64
+  learning_rate: 0.0001
+  learning_rate_final: 0.00001
+  clip_range: 0.15
+  clip_range_final: 0.05
+  ent_coef: 0.02
