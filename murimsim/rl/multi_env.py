@@ -1084,6 +1084,35 @@ class CombatEnv(MultiAgentEnv):
 
     # ── step override ─────────────────────────────────────────────────────────
 
+    def _redirect_invalid_action(self, agent: Agent, action: Action) -> Action:
+        """Redirect context-invalid actions to REST.
+
+        Prevents no-op wasted turns where the model picks an action that has no
+        valid target or precondition (e.g. ATTACK with nobody adjacent, EAT with
+        empty inventory). Redirecting to REST gives the model a clear, correct
+        reward signal instead of a silent no-op.
+        """
+        if action == Action.ATTACK or action == Action.COLLABORATE or action == Action.WALK_AWAY:
+            if self._nearest_adjacent_agent(agent) is None:
+                return Action.REST
+        elif action == Action.EAT:
+            if agent.inventory.food == 0:
+                return Action.REST
+        elif action == Action.DEPOSIT:
+            if agent.inventory.food == 0:
+                return Action.REST
+        elif action == Action.WITHDRAW:
+            own = self._stash_registry.get_stashes_for_owner(agent.agent_id)
+            at_pos = [s for s in own if s.position == agent.position]
+            group = self._get_group(self._focal_idx)
+            if not at_pos and not group:
+                return Action.REST
+        elif action == Action.STEAL:
+            enemy = self._stash_registry.get_enemy_stashes_at(agent.agent_id, *agent.position)
+            if not enemy:
+                return Action.REST
+        return action
+
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
         assert self._world is not None
         self._global_step_count += 1
@@ -1095,6 +1124,9 @@ class CombatEnv(MultiAgentEnv):
                 action_enum = Action.REST
 
         focal = self._agents[self._focal_idx]
+
+        # Redirect actions that have no valid target/precondition → REST
+        action_enum = self._redirect_invalid_action(focal, action_enum)
         hunger_prev = focal.hunger
         health_prev = focal.health
         inv_food_prev = focal.inventory.food
