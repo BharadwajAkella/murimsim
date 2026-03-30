@@ -25,7 +25,7 @@ from murimsim.world import World
 
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "default.yaml"
-OUTPUT_DIR  = Path(os.environ.get("MURIM_REPLAY_DIR", "logs/replays"))
+OUTPUT_DIR  = Path(os.environ.get("MURIM_REPLAY_DIR", "/mnt/c/Users/bhara/Downloads/replays"))
 
 
 def world_to_resource_snapshot(world: World) -> dict[str, list[list[int | float]]]:

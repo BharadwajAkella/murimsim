@@ -43,7 +43,7 @@ from murimsim.rl.env import SurvivalEnv
 from murimsim.world import World
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "default.yaml"
-OUTPUT_DIR  = Path(os.environ.get("MURIM_REPLAY_DIR", "logs/replays"))
+OUTPUT_DIR  = Path(os.environ.get("MURIM_REPLAY_DIR", "/mnt/c/Users/bhara/Downloads/replays"))
 
 _CARDINAL_MOVES = [Action.MOVE_N, Action.MOVE_S, Action.MOVE_E, Action.MOVE_W]
 _SCAN_RADIUS    = 8   # how far each policy looks for food (Manhattan distance)

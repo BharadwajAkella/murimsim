@@ -33,7 +33,7 @@ from murimsim.world import World
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "default.yaml"
 import os
 from pathlib import Path
-OUTPUT_DIR = Path(os.environ.get("MURIM_REPLAY_DIR", "logs/replays"))
+OUTPUT_DIR = Path(os.environ.get("MURIM_REPLAY_DIR", "/mnt/c/Users/bhara/Downloads/replays"))
 
 # Cardinal move actions in priority order for food scanning
 _CARDINAL_MOVES = [Action.MOVE_N, Action.MOVE_S, Action.MOVE_E, Action.MOVE_W]

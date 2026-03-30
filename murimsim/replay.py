@@ -31,7 +31,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Default output directory — override with MURIM_REPLAY_DIR environment variable
-_DEFAULT_REPLAY_DIR = Path(os.environ.get("MURIM_REPLAY_DIR", "logs/replays"))
+_DEFAULT_REPLAY_DIR = Path(os.environ.get("MURIM_REPLAY_DIR", "/mnt/c/Users/bhara/Downloads/replays"))
 
 
 class ReplayLogger:
