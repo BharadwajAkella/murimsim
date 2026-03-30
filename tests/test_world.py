@@ -373,3 +373,23 @@ def test_get_qi_field_value_matches_array():
     for x in range(0, world.grid_size, 4):
         for y in range(0, world.grid_size, 4):
             assert world.get_qi_field_value(x, y) == field[y, x]
+
+
+def test_clustered_food_spawning():
+    """Food resource spawns in clusters when spawn_clusters=True."""
+    cfg = {
+        "world": {"grid_size": 20, "seed": 42, "action_ticks": 1},
+        "resources": [
+            {"id": "food", "display_name": "Food", "effect": "positive",
+             "spawn_density": 0.15, "regen_ticks": 10,
+             "spawn_clusters": True, "cluster_count": 3,
+             "cluster_radius": 3, "cluster_fill_prob": 0.70,
+             "spawn_corners": 0},
+        ],
+    }
+    world = World(cfg, rng=np.random.default_rng(42))
+    food_grid = world.get_grid("food")
+    # With clustered spawning at density 0.15, there should be some food tiles
+    assert food_grid.sum() > 0
+    # Food should not cover all tiles (clusters are sparse)
+    assert food_grid.sum() < food_grid.size

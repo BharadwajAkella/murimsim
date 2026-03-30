@@ -16,6 +16,14 @@ logger = logging.getLogger(__name__)
 # Hunger increment per tick (constant drain)
 HUNGER_PER_TICK: float = 0.01
 
+# Training costs 1.5× more hunger per tick than passive existence.
+# This creates mechanical pressure to be near food/stash while training.
+TRAIN_HUNGER_MULTIPLIER: float = 1.5
+
+# Maximum number of food items an agent can carry in inventory.
+# Small cap forces agents to use the stash rather than hoarding food.
+INVENTORY_CAP: int = 3
+
 # How much hunger eating one food item restores (loaded from resource config at runtime)
 DEFAULT_HUNGER_RESTORE: float = 0.3
 
@@ -152,6 +160,25 @@ class Agent:
         hunger_excess = max(0.0, self.hunger - STARVATION_THRESHOLD) / threshold_range
         penalty = hunger_excess * (1.0 - float(np.clip(self.hunger_resistance, 0.0, 1.0)))
         return float(np.clip(self.strength * (1.0 - penalty), 0.0, 1.0))
+
+    @property
+    def defense_power(self) -> float:
+        """Defensive capability combining combat skill and elemental resistances.
+
+        Formula: effective_strength × 0.5 + mean(resistances) × 0.5
+
+        This makes cultivation (training resistances) meaningful in combat —
+        an agent that has weathered hazards defends better than raw strength alone.
+
+        Returns:
+            Defense power in [0, 1].
+        """
+        avg_resistance = (
+            sum(self.resistances.values()) / len(self.resistances)
+            if self.resistances
+            else 0.0
+        )
+        return float(np.clip(self.effective_strength * 0.5 + avg_resistance * 0.5, 0.0, 1.0))
 
     # ------------------------------------------------------------------
     # Factory
@@ -307,17 +334,26 @@ class Agent:
             int(np.clip(y + dy, 0, grid_size - 1)),
         )
 
-    def gather(self, resource_id: str) -> None:
+    def gather(self, resource_id: str) -> bool:
         """Pick up one unit of resource_id into inventory.
 
+        Food gathering is capped at INVENTORY_CAP — agents cannot hoard food.
+        This forces them to deposit surplus in the stash rather than carry it.
         The world tile depletion is handled by the environment, not here.
+
+        Returns:
+            True if the item was gathered, False if inventory is full (food only).
         """
         if not self.alive:
-            return
+            return False
         field = _resource_to_inventory_field(resource_id)
         if field is not None:
             current = getattr(self.inventory, field)
+            if field == "food" and current >= INVENTORY_CAP:
+                return False  # inventory full — must deposit before gathering more
             setattr(self.inventory, field, current + 1)
+            return True
+        return False
 
     def apply_hazard(self, resistance_stat: str, raw_damage: float) -> float:
         """Core hazard application: apply raw_damage reduced by resistance and intake.
@@ -464,6 +500,9 @@ class Agent:
         When multiple qi sources overlap their contributions stack, creating
         "qi nexus" zones with maximum training effectiveness.
 
+        Training costs extra hunger (``TRAIN_HUNGER_MULTIPLIER`` × normal rate)
+        — this creates mechanical pressure to train near a food source or stash.
+
         Args:
             qi_field_value: Normalised qi influence at the agent's tile [0, 1].
                             0.0 = no nearby qi, 1.0 = maximum (saturated field).
@@ -479,6 +518,9 @@ class Agent:
         )
         delta = rate * (1.0 - self.strength)
         self.strength = min(1.0, self.strength + delta)
+        # Training burns extra hunger — pressure to stay near food/stash
+        extra_hunger = HUNGER_PER_TICK * (TRAIN_HUNGER_MULTIPLIER - 1.0)
+        self.hunger = min(1.0, self.hunger + extra_hunger)
         return delta
 
     # ------------------------------------------------------------------

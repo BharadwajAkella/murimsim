@@ -87,6 +87,7 @@ REWARD_HEALTH_RECOVERY_SCALE: float = 0.20
 HEALTH_RECOVERY_GATE: float = 0.70                 # no recovery reward above this health level
 # δ-reward for TRAIN action: incentivises training (strength delta × scale)
 REWARD_TRAIN_STRENGTH_SCALE: float = 2.0
+REWARD_RESISTANCE_GAIN_SCALE: float = 1.0   # reward per unit of total resistance grown
 
 # Power score weights (used for ep_avg_power metric, logged per episode)
 POWER_WEIGHT_STRENGTH: float = 0.4
@@ -206,6 +207,18 @@ class MultiAgentEnv(gym.Env):
                     resource["regen_ticks"] = int(self._rng.integers(lo, hi + 1))
                     lo, hi = dr.get("food_spawn_density", [0.03, 0.08])
                     resource["spawn_density"] = float(self._rng.uniform(lo, hi))
+                    # Clustered food maps: 40% of episodes spawn food in spatial clusters.
+                    # Agents learn that food is patchily distributed — encourages foraging
+                    # and returning to known sources rather than random wandering.
+                    cluster_prob = float(dr.get("food_cluster_prob", 0.0))
+                    if cluster_prob > 0 and self._rng.random() < cluster_prob:
+                        resource["spawn_clusters"] = True
+                        lo, hi = dr.get("food_cluster_count", [2, 4])
+                        resource["cluster_count"] = int(self._rng.integers(lo, hi + 1))
+                        resource["cluster_radius"] = int(dr.get("food_cluster_radius", 3))
+                        resource["cluster_fill_prob"] = float(dr.get("food_cluster_fill_prob", 0.70))
+                    else:
+                        resource["spawn_clusters"] = False
             lo, hi = dr.get("action_ticks", [3, 8])
             cfg["world"]["action_ticks"] = int(self._rng.integers(lo, hi + 1))
 
@@ -281,13 +294,12 @@ class MultiAgentEnv(gym.Env):
         health_prev = focal.health
         inv_food_prev = focal.inventory.food
         strength_prev = focal.strength
+        resistance_sum_prev = sum(focal.resistances.values())
         food_gathered = 0
         hazard_damage = 0.0
 
         # 1. Apply action to focal agent
         action_enum = Action(action)
-
-        # Snapshot hazard distances before the move for approach/flee tracking
         prev_pos = focal.position
         pre_hazard_dists = {h: self._nearest_hazard_dist(prev_pos, h) for h in self._ep_hazard_approaches}
 
@@ -386,6 +398,10 @@ class MultiAgentEnv(gym.Env):
             strength_delta = focal.strength - strength_prev
             if strength_delta > 0:
                 reward += REWARD_TRAIN_STRENGTH_SCALE * strength_delta
+            # Resistance growth reward: any resistance gained via hazard exposure
+            resistance_delta = sum(focal.resistances.values()) - resistance_sum_prev
+            if resistance_delta > 0:
+                reward += REWARD_RESISTANCE_GAIN_SCALE * resistance_delta
         ema = self._reward_ema[self._focal_idx]
         self._reward_ema[self._focal_idx] = (1.0 - REWARD_EMA_ALPHA) * ema + REWARD_EMA_ALPHA * reward
 
@@ -936,7 +952,7 @@ REWARD_SAME_SECT_ATTACK_PENALTY: float = -0.10 # penalty for attacking a same-se
 REWARD_GROUP_FORMATION: float = 0.05   # small bonus when bilateral COLLABORATE succeeds
 # Per-tick bonus for each live group member within proximity range.
 # Rewards staying in a live, nearby group rather than just being "in" a group.
-REWARD_GROUP_COHESION_PER_ALLY: float = 0.02
+REWARD_GROUP_COHESION_PER_ALLY: float = 0.0
 GROUP_COHESION_RANGE: int = 3  # Chebyshev distance within which an ally counts
 
 # Bonus when focal attacks while a group ally is flanking (adjacent to) the target.
@@ -1066,6 +1082,7 @@ class CombatEnv(MultiAgentEnv):
         health_prev = focal.health
         inv_food_prev = focal.inventory.food
         strength_prev = focal.strength
+        resistance_sum_prev = sum(focal.resistances.values())
         food_gathered = 0
         hazard_damage = 0.0
         damage_dealt = 0.0
@@ -1225,6 +1242,10 @@ class CombatEnv(MultiAgentEnv):
             strength_delta = focal.strength - strength_prev
             if strength_delta > 0:
                 reward += REWARD_TRAIN_STRENGTH_SCALE * strength_delta
+            # Resistance growth reward: any resistance gained via hazard exposure
+            resistance_delta = sum(focal.resistances.values()) - resistance_sum_prev
+            if resistance_delta > 0:
+                reward += REWARD_RESISTANCE_GAIN_SCALE * resistance_delta
         ema = self._reward_ema[self._focal_idx]
         self._reward_ema[self._focal_idx] = (1.0 - REWARD_EMA_ALPHA) * ema + REWARD_EMA_ALPHA * reward
 
@@ -1346,13 +1367,14 @@ class CombatEnv(MultiAgentEnv):
     ) -> float:
         """Compute combat damage.
 
-        Formula: attacker.effective_strength*0.3 − defender.effective_strength*0.1*is_defending
-        Using effective_strength means hungry fighters deal less damage and defend less.
+        Formula: attacker.effective_strength*0.3 − defender.defense_power*0.1*is_defending
+        Using effective_strength for attack (hunger weakens offense) and defense_power
+        for defence (resistances from cultivation count here).
         Clamped to [0, COMBAT_MAX_DAMAGE].
         """
         raw = (
             attacker.effective_strength * COMBAT_ATTACKER_SCALE
-            - defender.effective_strength * COMBAT_DEFENDER_SCALE * (1.0 if is_defending else 0.0)
+            - defender.defense_power * COMBAT_DEFENDER_SCALE * (1.0 if is_defending else 0.0)
         )
         return float(np.clip(raw, 0.0, COMBAT_MAX_DAMAGE))
 

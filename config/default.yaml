@@ -121,3 +121,7 @@ domain_randomization:
   food_regen_ticks: [50, 250]      # world ticks range per episode
   food_spawn_density: [0.03, 0.08] # fraction of tiles range per episode
   action_ticks: [3, 8]             # world ticks per agent action range
+  food_cluster_prob: 0.4           # fraction of episodes using clustered food distribution
+  food_cluster_count: [2, 4]       # number of food cluster centres per episode
+  food_cluster_radius: 3           # Chebyshev radius of each cluster in tiles
+  food_cluster_fill_prob: 0.70     # fill probability within cluster radius

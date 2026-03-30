@@ -685,3 +685,39 @@ def test_spawn_from_parents_inherits_hunger_resistance():
     rng = np.random.default_rng(7)
     child = Agent.spawn_from_parents("c0", (0, 0), p1, p2, rng)
     assert 0.0 <= child.hunger_resistance <= 1.0
+
+
+# ── defense_power tests ───────────────────────────────────────────────────────
+
+def _make_combat_agent(strength: float = 0.5, resistances: dict | None = None) -> Agent:
+    a = Agent(agent_id="c0", position=(0, 0), health=1.0, hunger=0.0, strength=strength)
+    if resistances is not None:
+        a.resistances = resistances
+    else:
+        a.resistances = {"poison": 0.0, "flame": 0.0, "qi_drain": 0.0}
+    return a
+
+
+def test_defense_power_zero_resistance():
+    """defense_power = effective_strength * 0.5 when all resistances are 0."""
+    a = _make_combat_agent(strength=0.8, resistances={"poison": 0.0, "flame": 0.0, "qi_drain": 0.0})
+    expected = a.effective_strength * 0.5
+    assert abs(a.defense_power - expected) < 1e-6
+
+
+def test_defense_power_full_resistance():
+    """defense_power is higher than effective_strength alone when resistances are high."""
+    a = _make_combat_agent(strength=0.4, resistances={"poison": 1.0, "flame": 1.0, "qi_drain": 1.0})
+    assert a.defense_power > a.effective_strength * 0.5
+
+
+def test_defense_power_in_range():
+    """defense_power is always in [0, 1]."""
+    a = _make_combat_agent(strength=1.0, resistances={"poison": 1.0, "flame": 1.0, "qi_drain": 1.0})
+    assert 0.0 <= a.defense_power <= 1.0
+
+
+def test_defense_power_empty_resistances():
+    """defense_power handles an empty resistances dict gracefully."""
+    a = _make_combat_agent(strength=0.6, resistances={})
+    assert abs(a.defense_power - a.effective_strength * 0.5) < 1e-6
