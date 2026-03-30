@@ -43,16 +43,29 @@ def _world_resources(env: CombatEnv) -> dict[str, list[list[int | float]]]:
     return snapshot
 
 
-def _agent_snapshots(
-    env: CombatEnv,
-    last_actions: list[str],
-    last_details: list[str],
-) -> list[dict]:
-    """Snapshot of all agents' current state for the viewer."""
-    return [
-        agent.to_replay_dict(action=last_actions[i], action_detail=last_details[i])
-        for i, agent in enumerate(env._agents)
-    ]
+def _agent_snapshots(env: CombatEnv) -> list[dict]:
+    """Snapshot of all agents' current state for the viewer.
+
+    Uses the env's own per-agent action/detail tracking so heuristic agents
+    also report their real last action (not a stale value from a prior focal turn).
+    Attaches group membership so the viewer can draw collaborator maps.
+    """
+    # Build group map: agent_id -> list of group-member agent_ids
+    group_map: dict[str, list[str]] = {}
+    for group in env._groups:
+        members = [env._agents[i].agent_id for i in group if env._agents[i].alive]
+        for agent_id in members:
+            group_map[agent_id] = [m for m in members if m != agent_id]
+
+    snapshots = []
+    for i, agent in enumerate(env._agents):
+        d = agent.to_replay_dict(
+            action=env._last_action_names[i],
+            action_detail=env._last_action_details[i],
+        )
+        d["collaborators"] = group_map.get(agent.agent_id, [])
+        snapshots.append(d)
+    return snapshots
 
 
 def main() -> None:
@@ -151,12 +164,7 @@ def main() -> None:
     print(f"Steps    : {args.ticks}")
     print(f"Output   : {out_path}\n")
 
-    # Track last action per agent for recording
-    last_actions: list[str] = ["rest"] * args.agents
-    last_details: list[str] = [""] * args.agents
-
     action_counts: dict[str, int] = {}
-    dead_agents: set[int] = set()
     step = 0
     generation = 0
     # LSTM hidden states — reset on each new generation
@@ -184,29 +192,19 @@ def main() -> None:
                 action_int = env.action_space.sample()
 
             action_name = Action(action_int).name.lower()
-            last_actions[focal_idx] = action_name
-            last_details[focal_idx] = ""
             action_counts[action_name] = action_counts.get(action_name, 0) + 1
 
-            alive_before = {i for i, a in enumerate(env._agents) if a.alive}
-
+            # Log tick BEFORE step so the snapshot matches what the agent decided this tick
             replay.log_tick(
                 tick=step,
                 generation=generation,
-                agents=_agent_snapshots(env, last_actions, last_details),
+                agents=_agent_snapshots(env),
                 resources=_world_resources(env),
                 events=[],
             )
 
             obs, _reward, terminated, _truncated, _info = env.step(action_int)
             step += 1
-
-            # Mark newly dead agents
-            alive_after = {i for i, a in enumerate(env._agents) if a.alive}
-            for i in alive_before - alive_after - dead_agents:
-                dead_agents.add(i)
-                last_actions[i] = "dead"
-                last_details[i] = "health reached 0"
 
             if terminated:
                 alive_agents = [i for i, a in enumerate(env._agents) if a.alive]
@@ -216,9 +214,6 @@ def main() -> None:
                     obs, _ = env.reset(seed=args.seed + generation)
                     if not args.no_combat:
                         env._global_step_count = env._curriculum_ramp_steps
-                    last_actions = ["rest"] * args.agents
-                    last_details = [""] * args.agents
-                    dead_agents = set()
                     lstm_states = None
                     ep_start = np.ones((1,), dtype=bool)
                 else:

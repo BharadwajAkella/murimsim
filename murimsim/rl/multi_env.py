@@ -1043,6 +1043,10 @@ class CombatEnv(MultiAgentEnv):
         self._curriculum_ramp_steps: int = curriculum_ramp_steps
         self._global_step_count: int = 0  # persists across episodes
         self._sect_config: SectConfig | None = sect_config
+        # Per-agent last action detail — target agent id, stash id, or "" — reset each step
+        self._last_action_details: list[str] = [""] * n_agents
+        # Per-agent last action name (tracks heuristic agents too, unlike record_combat.py)
+        self._last_action_names: list[str] = ["rest"] * n_agents
 
     # ── Sect home-region spawning ─────────────────────────────────────────────
 
@@ -1111,6 +1115,8 @@ class CombatEnv(MultiAgentEnv):
 
         # 1. Apply focal agent's action
         flanking_bonus_earned = False
+        self._last_action_details[self._focal_idx] = ""
+        self._last_action_names[self._focal_idx] = action_enum.name.lower()
         if action_enum == Action.ATTACK:
             # Check for flanking allies before the attack (target may die during it)
             pre_target = self._nearest_adjacent_agent(focal)
@@ -1121,6 +1127,9 @@ class CombatEnv(MultiAgentEnv):
                 if focal.sect_id != "none" and pre_target.sect_id != "none":
                     if focal.sect_id == pre_target.sect_id:
                         sect_attack_penalty = REWARD_SAME_SECT_ATTACK_PENALTY
+                self._last_action_details[self._focal_idx] = pre_target.agent_id
+            else:
+                self._last_action_details[self._focal_idx] = "no_target"
             damage_dealt, defeated = self._do_attack(focal)
             defeat_bonus = REWARD_DEFEAT_OPPONENT if defeated else 0.0
             # Extra defeat bonus when eliminating an enemy-sect agent
@@ -1131,11 +1140,23 @@ class CombatEnv(MultiAgentEnv):
         elif action_enum == Action.DEFEND:
             focal.rest()  # defending = hold ground + minor health recovery
         elif action_enum == Action.COLLABORATE:
+            neighbour = self._nearest_adjacent_agent(focal)
+            if neighbour is not None:
+                self._last_action_details[self._focal_idx] = neighbour.agent_id
             group_formed = self._try_collaborate(self._focal_idx)
         elif action_enum == Action.WALK_AWAY:
+            neighbour = self._nearest_adjacent_agent(focal)
+            if neighbour is not None:
+                self._last_action_details[self._focal_idx] = neighbour.agent_id
             self._walk_away(focal)
         else:
             food_gathered, hazard_damage, stash_bonus = self._apply_action(focal, action_enum, self._focal_idx)
+            # Tag deposit/withdraw with the stash id
+            if action_enum in (Action.DEPOSIT, Action.WITHDRAW):
+                stashes = self._stash_registry.get_stashes_for_owner(focal.agent_id)
+                if stashes:
+                    nearest = min(stashes, key=lambda s: max(abs(s.position[0] - focal.position[0]), abs(s.position[1] - focal.position[1])))
+                    self._last_action_details[self._focal_idx] = nearest.stash_id
 
         # Track action counts and hazard approach/flee for dashboard
         key = action_enum.name.lower()
@@ -1356,13 +1377,15 @@ class CombatEnv(MultiAgentEnv):
         ax, ay = agent.position
         fx, fy = focal.position
         adjacent = max(abs(ax - fx), abs(ay - fy)) <= 1
+        agent_idx = self._agents.index(agent)
 
         if adjacent:
             # Same group: never attack; just forage
-            agent_idx = self._agents.index(agent)
             focal_idx = self._focal_idx
             if self._get_group(agent_idx) is not None and self._get_group(agent_idx) == self._get_group(focal_idx):
                 self._heuristic_step(agent)
+                self._last_action_names[agent_idx] = "rest"
+                self._last_action_details[agent_idx] = ""
                 return 0.0
 
             # Attack focal if adjacent, focal appears weaker, and agent is not very social
@@ -1372,10 +1395,14 @@ class CombatEnv(MultiAgentEnv):
                 focal._check_death("combat")
                 if not focal.alive:
                     self._drop_inventory(focal)
+                self._last_action_names[agent_idx] = "attack"
+                self._last_action_details[agent_idx] = focal.agent_id
                 return damage
 
         # Otherwise forage
         self._heuristic_step(agent)
+        self._last_action_names[agent_idx] = "gather"
+        self._last_action_details[agent_idx] = ""
         return 0.0
 
     def _combat_damage(

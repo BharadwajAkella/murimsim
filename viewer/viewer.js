@@ -720,6 +720,33 @@ function updateAgentPanel(tick) {
       </td></tr>`;
     }).join("");
 
+  // Action target row — humanize the detail
+  const detail = agent.action_detail || "";
+  let targetRow = "";
+  if (detail && detail !== "no_target") {
+    const label = detail.startsWith("stash") ? "Stash" : "Target";
+    targetRow = `<tr><th>${label}</th><td style="color:#fbbf24">${detail}</td></tr>`;
+  } else if (detail === "no_target") {
+    targetRow = `<tr><th>Target</th><td style="color:#ef4444">none (wasted)</td></tr>`;
+  }
+
+  // Collaborator map — agents currently in the same group
+  const collabs = agent.collaborators || [];
+  let collabSection = "";
+  if (collabs.length > 0) {
+    const tags = collabs.map(id => `<span style="
+        display:inline-block;padding:1px 6px;margin:2px;border-radius:10px;
+        background:#1e3a5f;border:1px solid #3b82f6;font-size:10px;color:#93c5fd
+      ">${id}</span>`).join("");
+    collabSection = `
+      <div style="margin-top:8px">
+        <div style="font-size:10px;color:#64748b;margin-bottom:3px">▸ GROUP MEMBERS</div>
+        <div>${tags}</div>
+      </div>`;
+  } else {
+    collabSection = `<div style="margin-top:6px;font-size:10px;color:#475569">No group / solo</div>`;
+  }
+
   agentPanel.innerHTML = `
     <h3>${agent.id}</h3>
     <table class="stat-table">
@@ -736,8 +763,9 @@ function updateAgentPanel(tick) {
       </td></tr>
       ${resRows}
       <tr><th>Action</th><td>${agent.action}</td></tr>
-      <tr><th>Detail</th><td>${agent.action_detail || "—"}</td></tr>
+      ${targetRow}
     </table>
+    ${collabSection}
     ${_buildSparkline(agent.id, state.currentIndex)}
   `;
 }
