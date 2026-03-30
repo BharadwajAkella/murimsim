@@ -227,8 +227,15 @@
       gap: 5px;
     }
 
-    #fps-slider { width: 80px; accent-color: #4f46e5; }
-    #fps-display { font-family: monospace; font-size: 11px; color: #94a3b8; width: 24px; }
+    #fps-slider { width: 120px; accent-color: #4f46e5; }
+    #fps-display { font-family: monospace; font-size: 11px; color: #94a3b8; width: 32px; }
+    .speed-preset {
+      padding: 1px 5px; font-size: 11px; border-radius: 3px;
+      background: #1e293b; border: 1px solid #334155; color: #94a3b8;
+      cursor: pointer;
+    }
+    .speed-preset:hover { background: #334155; color: #e2e8f0; }
+    .speed-preset.active { background: #4f46e5; border-color: #4f46e5; color: #fff; }
 
     #population-bar {
       background: #0f172a;
@@ -303,6 +310,11 @@
       <input type="range" id="scrub" min="0" max="0" value="0" />
       <label class="ctrl-label">
         Speed:
+        <button class="speed-preset" data-fps="0.25">¼×</button>
+        <button class="speed-preset" data-fps="0.5">½×</button>
+        <button class="speed-preset" data-fps="1">1×</button>
+        <button class="speed-preset" data-fps="3">3×</button>
+        <button class="speed-preset" data-fps="10">10×</button>
         <input type="range" id="fps-slider" />
         <span id="fps-display">3</span> fps
       </label>

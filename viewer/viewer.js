@@ -47,7 +47,7 @@ const AGENT_COLOR         = "#a78bfa";
 const AGENT_COMBAT_COLOR  = "#ef4444";
 const AGENT_RADIUS_FRAC   = 0.28;
 const DEFAULT_FPS         = 3;
-const MIN_FPS             = 1;
+const MIN_FPS             = 0.25;
 const MAX_FPS             = 60;
 const TRAIL_TICKS         = 8;
 const SPARKLINE_TICKS     = 50;
@@ -139,6 +139,19 @@ document.addEventListener("DOMContentLoaded", () => {
   canvas.addEventListener("mousemove", onCanvasHover);
   canvas.addEventListener("mouseleave", () => { tooltipEl.style.display = "none"; });
 
+  document.querySelectorAll(".speed-preset").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const fps = parseFloat(btn.dataset.fps);
+      fpsSlider.value = fps;
+      onFpsChange();
+      document.querySelectorAll(".speed-preset").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+    });
+  });
+  // Mark default active preset
+  const defaultPreset = document.querySelector(`.speed-preset[data-fps="${DEFAULT_FPS}"]`);
+  if (defaultPreset) defaultPreset.classList.add("active");
+
   if (toggleQiEl) {
     toggleQiEl.addEventListener("change", () => {
       state.showQiOverlay = toggleQiEl.checked;
@@ -156,6 +169,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   fpsSlider.min   = MIN_FPS;
   fpsSlider.max   = MAX_FPS;
+  fpsSlider.step  = 0.25;
   fpsSlider.value = DEFAULT_FPS;
   fpsDisplay.textContent = DEFAULT_FPS;
 
@@ -315,8 +329,12 @@ function onScrub() {
 }
 
 function onFpsChange() {
-  state.fps = parseInt(fpsSlider.value, 10);
-  fpsDisplay.textContent = state.fps;
+  state.fps = parseFloat(fpsSlider.value);
+  fpsDisplay.textContent = state.fps < 1 ? state.fps.toFixed(2) : state.fps;
+  // Highlight matching preset button if any
+  document.querySelectorAll(".speed-preset").forEach(btn => {
+    btn.classList.toggle("active", parseFloat(btn.dataset.fps) === state.fps);
+  });
   if (state.playing) scheduleNext();
 }
 
