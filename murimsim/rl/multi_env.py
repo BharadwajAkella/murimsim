@@ -276,7 +276,7 @@ class MultiAgentEnv(gym.Env):
         self._ep_dist_from_stash_count: int = 0     # denominator for the above
         self._ep_groups_formed: int = 0         # how many times _form_group was called
         self._ep_group_member_ticks: int = 0    # sum of group sizes across all steps
-        self._ep_deaths_by_age: int = 0         # agents that died of natural old age
+        self._ep_deaths_by_cause: dict[str, int] = {}  # cause -> count
         self._ep_reproductions: int = 0         # offspring spawned from parent pairs
 
         # Foraging-outward tracking: max Chebyshev dist from own stash since last deposit
@@ -331,9 +331,11 @@ class MultiAgentEnv(gym.Env):
         for _ in range(self._action_ticks):
             self._world.step()
             for agent in self._agents:
-                died_of_age = agent.tick(self._max_age)
-                if died_of_age:
-                    self._ep_deaths_by_age += 1
+                was_alive = agent.alive
+                agent.tick(self._max_age)
+                if was_alive and not agent.alive:
+                    cause = agent.death_cause or "unknown"
+                    self._ep_deaths_by_cause[cause] = self._ep_deaths_by_cause.get(cause, 0) + 1
                     self._drop_inventory(agent)
                     self._try_reproduce(agent)
 
@@ -458,7 +460,8 @@ class MultiAgentEnv(gym.Env):
                 self._ep_group_member_ticks / self._ep_groups_formed
                 if self._ep_groups_formed > 0 else 0.0
             )
-            info["ep_deaths_by_age"] = self._ep_deaths_by_age
+            info["ep_deaths_by_age"] = self._ep_deaths_by_cause.get("age", 0)
+            info["ep_deaths_by_cause"] = dict(self._ep_deaths_by_cause)
             info["ep_reproductions"] = self._ep_reproductions
         return obs, reward, terminated, False, info
 
@@ -1153,9 +1156,11 @@ class CombatEnv(MultiAgentEnv):
         for _ in range(self._action_ticks):
             self._world.step()
             for agent in self._agents:
-                died_of_age = agent.tick(self._max_age)
-                if died_of_age:
-                    self._ep_deaths_by_age += 1
+                was_alive = agent.alive
+                agent.tick(self._max_age)
+                if was_alive and not agent.alive:
+                    cause = agent.death_cause or "unknown"
+                    self._ep_deaths_by_cause[cause] = self._ep_deaths_by_cause.get(cause, 0) + 1
                     self._drop_inventory(agent)
                     self._try_reproduce(agent)
 
@@ -1302,7 +1307,8 @@ class CombatEnv(MultiAgentEnv):
                 self._ep_group_member_ticks / self._ep_groups_formed
                 if self._ep_groups_formed > 0 else 0.0
             )
-            info["ep_deaths_by_age"] = self._ep_deaths_by_age
+            info["ep_deaths_by_age"] = self._ep_deaths_by_cause.get("age", 0)
+            info["ep_deaths_by_cause"] = dict(self._ep_deaths_by_cause)
             info["ep_reproductions"] = self._ep_reproductions
         return obs, reward, terminated, False, info
 
@@ -1324,7 +1330,7 @@ class CombatEnv(MultiAgentEnv):
             bonus = GROUP_ATTACK_BONUS_PER_ALLY * len(flanking_allies)
             damage = float(np.clip(damage * (1.0 + bonus), 0.0, COMBAT_MAX_DAMAGE))
         target.health = max(0.0, target.health - damage)
-        target._check_death()
+        target._check_death("combat")
         if not target.alive:
             self._drop_inventory(target)
             return damage, True
@@ -1353,7 +1359,7 @@ class CombatEnv(MultiAgentEnv):
             if agent.strength > focal.strength * 1.1 and focal.health > 0 and agent.sociability < HEURISTIC_COLLAB_THRESHOLD:
                 damage = self._combat_damage(agent, focal, is_defending=focal_defending)
                 focal.health = max(0.0, focal.health - damage)
-                focal._check_death()
+                focal._check_death("combat")
                 if not focal.alive:
                     self._drop_inventory(focal)
                 return damage

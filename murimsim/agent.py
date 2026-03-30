@@ -124,6 +124,7 @@ class Agent:
     resistances: dict[str, float] = dataclasses.field(default_factory=dict)
     inventory: AgentInventory = dataclasses.field(default_factory=AgentInventory)
     alive: bool = True
+    death_cause: str = ""           # "starvation" | "hazard" | "combat" | ""
     sect_id: str = "none"           # assigned by CombatEnv when sect_config is set
     age: int = 0                    # ticks lived; death occurs at max_age (from config)
     # Tracks cumulative recent exposure per resistance_stat; decays per tick
@@ -287,22 +288,18 @@ class Agent:
     # ------------------------------------------------------------------
 
     def tick(self, max_age: int = 0) -> bool:
-        """Advance one tick: hunger, starvation, intake decay, and aging.
+        """Advance one tick: hunger, starvation, and intake decay.
 
         Args:
-            max_age: If > 0, the agent dies of old age when ``self.age >= max_age``.
-                     Pass 0 (the default) to disable age-based death.
+            max_age: Reserved for future use; currently ignored (old age death
+                     is disabled — set max_age=0 in config).
 
         Returns:
-            True if the agent died of old age this tick (for death-cause tracking).
+            Always False (old age death removed; kept for API compatibility).
         """
         if not self.alive:
             return False
         self.age += 1
-        if max_age > 0 and self.age >= max_age:
-            self.health = 0.0
-            self.alive = False
-            return True
         self.hunger = min(1.0, self.hunger + HUNGER_PER_TICK)
         # Escalating health drain: once hunger exceeds STARVATION_THRESHOLD,
         # health drains at (hunger - threshold) * scale per tick.
@@ -313,7 +310,7 @@ class Agent:
             self.health = max(0.0, self.health - drain)
         for stat in list(self._intakes):
             self._intakes[stat] = max(0.0, self._intakes[stat] - INTAKE_DECAY_PER_TICK)
-        self._check_death()
+        self._check_death("starvation")
         return False
 
     # ------------------------------------------------------------------
@@ -383,7 +380,7 @@ class Agent:
             self.resistances[resistance_stat] = min(
                 1.0, resistance + RESISTANCE_GAIN * (1.0 - resistance)
             )
-        self._check_death()
+        self._check_death("hazard")
         return actual_damage
 
     def apply_traversal_effects(self, effects: list[dict]) -> float:
@@ -536,15 +533,18 @@ class Agent:
             "action": action,
             "action_detail": action_detail,
             "alive": self.alive,
+            "death_cause": self.death_cause,
         }
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _check_death(self) -> None:
+    def _check_death(self, cause: str = "unknown") -> None:
         if self.health <= 0.0:
             self.health = 0.0
+            if self.alive:  # only record cause on first death
+                self.death_cause = cause
             self.alive = False
 
 

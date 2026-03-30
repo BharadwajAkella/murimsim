@@ -302,10 +302,8 @@
         <div class="bar-chart" id="resistance-bars"></div>
       </div>
       <div class="card">
-        <div class="section-title">F-Metric History</div>
-        <div class="sparkline-container">
-          <canvas id="sparkline-f"></canvas>
-        </div>
+        <div class="section-title">Deaths by Cause (avg per episode)</div>
+        <div class="bar-chart" id="death-cause-bars"></div>
       </div>
     </div>
 
@@ -695,6 +693,7 @@
         renderBars("action-bars", d.avg_action_rates, ACTION_COLORS);
         renderHazardGrid(d);
         renderBars("resistance-bars", d.avg_resistance_gained, { poison: "#ef4444", flame: "#f97316", qi_drain: "#3b82f6" });
+        renderBars("death-cause-bars", d.avg_deaths_by_cause ?? {}, { starvation: "#f59e0b", hazard: "#ef4444", combat: "#8b5cf6", unknown: "#6b7280" });
         renderSparkline("sparkline-f", d.history, "f_metric");
         renderCreditBars(d);
         renderStageComparison(d);  // pass live data directly — no global dependency

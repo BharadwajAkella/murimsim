@@ -113,7 +113,7 @@ agent:
   sociability_max: 0.9
   hunger_resistance_min: 0.1
   hunger_resistance_max: 0.5
-  max_age: 3000  # world ticks before natural death; at action_ticks=5 this is ~600 env steps
+  max_age: 0  # 0 = disabled — agents do not die of old age
 
 # Domain randomisation — disabled here; enabled via training.yaml during RL training.
 domain_randomization:

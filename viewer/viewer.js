@@ -28,14 +28,9 @@ const RESOURCE_COLORS = {
   mountain:  "rgba(120, 80, 40, 0.85)",   // brown
 };
 
-// Per-sect agent colors — Phase 6a
-const SECT_COLORS = {
-  iron_fang:   "#e74c3c",   // red
-  jade_lotus:  "#2ecc71",   // green
-  shadow_root: "#9b59b6",   // purple
-};
+// Per-sect agent colors — removed (no sects)
 const DEAD_AGENT_COLOR = "#555";
-const AGENT_COLOR = "#a78bfa";         // fallback color when sect is "none"
+const AGENT_COLOR = "#a78bfa";         // agent color
 const AGENT_COMBAT_COLOR = "#ef4444";  // bright red during attack or defend
 const AGENT_RADIUS_FRAC = 0.28;        // fraction of cell size
 const DEFAULT_FPS = 3;
@@ -236,31 +231,7 @@ function render() {
   ctx.fillStyle = "#1a1a2e";
   ctx.fillRect(0, 0, W, H);
 
-  // Sect home-region overlays (subtle tinted bands — Phase 6a)
-  const SECT_HOME_REGIONS = [
-    { sect: "iron_fang",   y_lo: 0,  y_hi: 9 },
-    { sect: "jade_lotus",  y_lo: 10, y_hi: 19 },
-    { sect: "shadow_root", y_lo: 20, y_hi: 29 },
-  ];
-  for (const region of SECT_HOME_REGIONS) {
-    const color = SECT_COLORS[region.sect];
-    ctx.fillStyle = color.replace("#", "rgba(") + "19)"; // ~10% opacity
-    // Convert hex to rgba properly
-    const r = parseInt(color.slice(1, 3), 16);
-    const g = parseInt(color.slice(3, 5), 16);
-    const b = parseInt(color.slice(5, 7), 16);
-    ctx.fillStyle = `rgba(${r},${g},${b},0.07)`;
-    ctx.fillRect(0, region.y_lo * cellH, W, (region.y_hi - region.y_lo + 1) * cellH);
-    // Thin border on the bottom edge of each band (except last)
-    if (region.y_hi < state.gridSize - 1) {
-      ctx.strokeStyle = `rgba(${r},${g},${b},0.25)`;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(0, (region.y_hi + 1) * cellH);
-      ctx.lineTo(W, (region.y_hi + 1) * cellH);
-      ctx.stroke();
-    }
-  }
+  // (sect home-region overlays removed)
 
   // Grid lines (subtle)
   ctx.strokeStyle = "rgba(255,255,255,0.04)";
@@ -316,7 +287,7 @@ function render() {
       // Flash between two reds: bright on even render frames, darker on odd
       ctx.fillStyle = (state.currentIndex % 2 === 0) ? AGENT_COMBAT_COLOR : "#b91c1c";
     } else {
-      ctx.fillStyle = SECT_COLORS[agent.sect] || AGENT_COLOR;
+      ctx.fillStyle = AGENT_COLOR;
     }
     ctx.fill();
 
@@ -457,6 +428,7 @@ function updateAgentPanel(tick) {
     <table class="stat-table">
       <tr><th>Position</th><td>(${agent.pos[0]}, ${agent.pos[1]})</td></tr>
       <tr><th>Alive</th><td>${agent.alive ? "✅" : "💀"}</td></tr>
+      ${!agent.alive && agent.death_cause ? `<tr><th>Cause</th><td>${agent.death_cause}</td></tr>` : ""}
       <tr><th>Health</th><td>
         <div class="bar-wrap"><div class="bar health-bar" style="width:${barW(agent.health)}%"></div></div>
         ${fmt(agent.health)}

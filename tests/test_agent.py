@@ -387,16 +387,16 @@ def test_age_increments_per_tick():
 
 
 def test_agent_dies_of_old_age():
-    """Agent must die (alive=False) when age reaches max_age."""
+    """Old age death is disabled (max_age=0 in config). tick() always returns False."""
     from murimsim.agent import Agent
     a = Agent(agent_id="x", position=(0, 0), health=1.0, hunger=0.0, strength=0.5)
-    for i in range(9):
+    for _ in range(20):
         died = a.tick(max_age=10)
-        assert not died, f"Died too early at tick {i + 1}"
+        assert not died, "tick() should always return False — old age death is removed"
+        a.hunger = 0.0  # keep alive for the test
+        a.health = 1.0
     assert a.alive
-    died = a.tick(max_age=10)   # 10th tick: age == 10 >= max_age
-    assert died, "tick() should return True when agent dies of old age"
-    assert not a.alive
+    assert a.age == 20
 
 
 def test_aging_disabled_when_max_age_zero():
@@ -413,19 +413,17 @@ def test_aging_disabled_when_max_age_zero():
 
 
 def test_ep_deaths_by_age_tracked():
-    """MultiAgentEnv tracks deaths by age in _ep_deaths_by_age and ep_deaths_by_age info."""
+    """ep_deaths_by_age is present in terminal info (always 0 since old age is disabled)."""
     import yaml
     from pathlib import Path
     from murimsim.rl.multi_env import MultiAgentEnv
 
     cfg = yaml.safe_load(Path("config/default.yaml").read_text())
-    # Set max_age very low (2 ticks) so agents die fast
-    cfg["agent"]["max_age"] = 2
     env = MultiAgentEnv(config=cfg, n_agents=3, seed=5)
     env.reset(seed=5)
 
     terminal_info = None
-    for _ in range(200):
+    for _ in range(500):
         _, _, terminated, _, info = env.step(env.action_space.sample())
         if terminated:
             terminal_info = info
@@ -433,8 +431,7 @@ def test_ep_deaths_by_age_tracked():
 
     assert terminal_info is not None
     assert "ep_deaths_by_age" in terminal_info
-    # With max_age=2, most agents should die of age
-    assert terminal_info["ep_deaths_by_age"] >= 1, "Expected at least one aging death"
+    assert terminal_info["ep_deaths_by_age"] == 0, "No age deaths since old age is disabled"
 
 
 # ---------------------------------------------------------------------------
