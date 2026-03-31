@@ -417,16 +417,46 @@ function render() {
   // Qi field overlay
   if (state.showQiOverlay) {
     const qiTiles = (tick.resources || {}).qi || [];
+
+    // Build a lookup for fast per-cell access: "x,y" -> intensity
+    const qiMap = {};
+    for (const [x, y, intensity] of qiTiles) {
+      qiMap[`${x},${y}`] = intensity ?? 1;
+    }
+
+    // Draw background glow for every qi tile
     for (const [x, y, intensity] of qiTiles) {
       const cx   = x * cellW + cellW / 2;
       const cy   = y * cellH + cellH / 2;
       const r    = 2.5 * Math.min(cellW, cellH);
-      const alpha = (intensity ?? 1) * 0.18;
+      const alpha = intensity * 0.18;
       const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
       grad.addColorStop(0, `rgba(66,133,244,${alpha})`);
       grad.addColorStop(1, "rgba(66,133,244,0)");
       ctx.fillStyle = grad;
       ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+    }
+
+    // Per-cell qi value label — shown on every cell, "0" for no qi
+    const fontSize = Math.max(7, Math.floor(Math.min(cellW, cellH) * 0.28));
+    ctx.font      = `bold ${fontSize}px monospace`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (let gy = 0; gy < state.gridSize; gy++) {
+      for (let gx = 0; gx < state.gridSize; gx++) {
+        const val = qiMap[`${gx},${gy}`] ?? 0;
+        const label = val > 0 ? val.toFixed(2) : "0";
+        const cx = gx * cellW + cellW / 2;
+        const cy = gy * cellH + cellH / 2;
+        // Text colour: bright blue for high qi, dim grey for zero
+        if (val > 0) {
+          const brightness = Math.round(160 + val * 95);
+          ctx.fillStyle = `rgba(${brightness}, ${brightness}, 255, 0.90)`;
+        } else {
+          ctx.fillStyle = "rgba(255,255,255,0.18)";
+        }
+        ctx.fillText(label, cx, cy);
+      }
     }
   }
 
