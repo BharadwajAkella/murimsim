@@ -889,11 +889,17 @@ class MultiAgentEnv(gym.Env):
         """Simple eat→gather→navigate heuristic for non-focal agents.
 
         Priority:
-          1. Eat if hungry and carrying food.
-          2. Gather if standing on a resource.
-          3. Step one tile toward nearest food within HEURISTIC_SCAN_RADIUS.
-          4. Random cardinal move.
+          1. Eat if health is critically low and carrying food (survival override).
+          2. Eat if hungry and carrying food.
+          3. Gather if standing on a resource.
+          4. Step one tile toward nearest food within HEURISTIC_SCAN_RADIUS.
+          5. Random cardinal move.
         """
+        # Survival override: critical health trumps everything else
+        if agent.health < CRITICAL_HEALTH_EAT_THRESHOLD and agent.inventory.food > 0:
+            agent.eat(self._resource_configs)
+            return
+
         # Eat
         if agent.hunger > HEURISTIC_HUNGER_EAT and agent.inventory.food > 0:
             agent.eat(self._resource_configs)
@@ -1454,6 +1460,9 @@ class CombatEnv(MultiAgentEnv):
         Used by record_combat.py when _action_overrides is set — replaces the heuristic
         so all agents run the actual trained policy during replay.
         """
+        # Apply the same survival redirect + invalid-action guards that focal agents get.
+        action = self._redirect_invalid_action(agent, action)
+
         ax, ay = agent.position
         fx, fy = focal.position
         adjacent = max(abs(ax - fx), abs(ay - fy)) <= 1
