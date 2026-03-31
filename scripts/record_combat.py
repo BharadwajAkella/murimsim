@@ -33,13 +33,25 @@ DEFAULT_MODEL = Path(__file__).parent.parent / "checkpoints" / "limbic_lstm_v2" 
 
 
 def _world_resources(env: CombatEnv) -> dict[str, list[list[int | float]]]:
-    """Snapshot of all resource tiles: {resource_id: [[x, y, 1.0], ...]}."""
+    """Snapshot of all resource tiles: {resource_id: [[x, y, intensity], ...]}
+
+    For the qi resource, intensity comes from the computed qi influence field
+    (Chebyshev-distance falloff, values in [0,1]) rather than the raw placement
+    grid, so the viewer shows the true qi level at every cell.
+    """
     world = env._world
     snapshot: dict[str, list[list[int | float]]] = {}
     for rid in world.get_resource_ids():
         grid = world.get_grid_view(rid)
         ys, xs = np.where(grid > 0)
-        snapshot[rid] = [[int(x), int(y), 1.0] for x, y in zip(xs, ys)]
+        if rid == "qi":
+            # Use the full influence field — every qi-source cell reports its
+            # actual field value (not hardcoded 1.0)
+            qi_field = world.get_qi_field()
+            snapshot[rid] = [[int(x), int(y), round(float(qi_field[y, x]), 3)]
+                             for x, y in zip(xs, ys)]
+        else:
+            snapshot[rid] = [[int(x), int(y), 1.0] for x, y in zip(xs, ys)]
     return snapshot
 
 

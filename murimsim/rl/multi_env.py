@@ -1114,13 +1114,46 @@ class CombatEnv(MultiAgentEnv):
 
     # ── step override ─────────────────────────────────────────────────────────
 
+    def _smart_fallback(self, agent: Agent) -> Action:
+        """Return the best productive action given the agent's current state.
+
+        Priority:
+          1. EAT — if hungry and carrying food
+          2. GATHER — if standing on food tile
+          3. TRAIN — default cultivation (always positive expected reward)
+          4. MOVE toward nearest food — if starving and food is visible
+        """
+        if agent.hunger > HEURISTIC_HUNGER_EAT and agent.inventory.food > 0:
+            return Action.EAT
+        x, y = agent.position
+        food_grid = self._world.get_grid_view("food")
+        if food_grid[y, x] > 0:
+            return Action.GATHER
+        if agent.hunger > STARVATION_THRESHOLD:
+            target = self._nearest_food(agent.position)
+            if target is not None:
+                tx, ty = target
+                dx = int(np.sign(tx - x))
+                dy = int(np.sign(ty - y))
+                if dx > 0: return Action.MOVE_E
+                if dx < 0: return Action.MOVE_W
+                if dy > 0: return Action.MOVE_S
+                return Action.MOVE_N
+        return Action.TRAIN
+
     def _redirect_invalid_action(self, agent: Agent, action: Action) -> Action:
-        """Redirect context-invalid actions to REST (or EAT on survival emergency).
+        """Redirect context-invalid actions to a productive fallback.
 
         Two redirect types:
         1. Survival override: health critically low + food in inventory → force EAT.
-           This fires before any other check — survival beats cultivation.
-        2. Invalid-action redirect: action has no valid target/precondition → REST.
+           Fires before any other check — survival beats cultivation.
+        2. Invalid-action redirect: if the chosen action has no valid target or
+           precondition, redirect to the best productive action via _smart_fallback()
+           instead of wasting the turn on REST.
+
+        Note: the REAL fix is action masking (action_masks() method below) — that
+        prevents the model from picking infeasible actions in the first place.
+        These redirects are a safety net for inference and early training.
         """
         # 1. Survival override — hardwired instinct: eat when near death
         if (
@@ -1130,37 +1163,82 @@ class CombatEnv(MultiAgentEnv):
         ):
             return Action.EAT
 
-        # 2. Invalid-action redirects
-        if action == Action.ATTACK or action == Action.COLLABORATE or action == Action.WALK_AWAY:
+        # 2. Invalid-action redirects → smart fallback (not REST)
+        if action in (Action.ATTACK, Action.COLLABORATE, Action.WALK_AWAY):
             if self._nearest_adjacent_agent(agent) is None:
-                return Action.REST
+                return self._smart_fallback(agent)
         elif action == Action.EAT:
             if agent.inventory.food == 0:
-                return Action.REST
+                return self._smart_fallback(agent)
         elif action == Action.DEPOSIT:
             if agent.inventory.food == 0:
-                return Action.REST
+                return self._smart_fallback(agent)
         elif action == Action.WITHDRAW:
             own = self._stash_registry.get_stashes_for_owner(agent.agent_id)
             at_pos = [s for s in own if s.position == agent.position]
             group = self._get_group(self._focal_idx)
             if not at_pos and not group:
-                return Action.REST
+                return self._smart_fallback(agent)
         elif action == Action.STEAL:
             enemy = self._stash_registry.get_enemy_stashes_at(agent.agent_id, *agent.position)
             if not enemy:
-                return Action.REST
+                return self._smart_fallback(agent)
         return action
+
+    def action_masks(self) -> np.ndarray:
+        """Return a boolean mask of currently valid actions for the focal agent.
+
+        True = action is feasible right now.  Used by MaskableRecurrentPPO (v17+)
+        to zero out infeasible logits before sampling, so the model never needs to
+        learn 'don't pick ATTACK when nobody is adjacent' — it simply can't.
+
+        This is the correct long-term fix. _redirect_invalid_action() is a safety
+        net for RecurrentPPO which doesn't support masking natively.
+        """
+        agent = self._agents[self._focal_idx]
+        mask = np.ones(self.action_space.n, dtype=bool)
+
+        # Social actions require an adjacent agent
+        if self._nearest_adjacent_agent(agent) is None:
+            mask[Action.ATTACK] = False
+            mask[Action.COLLABORATE] = False
+            mask[Action.WALK_AWAY] = False
+
+        # EAT / DEPOSIT require food in hand
+        if agent.inventory.food == 0:
+            mask[Action.EAT] = False
+            mask[Action.DEPOSIT] = False
+
+        # WITHDRAW requires being at own stash or in a group
+        own = self._stash_registry.get_stashes_for_owner(agent.agent_id)
+        at_stash = any(s.position == agent.position for s in own)
+        in_group = self._get_group(self._focal_idx) is not None
+        if not at_stash and not in_group:
+            mask[Action.WITHDRAW] = False
+
+        # STEAL requires an enemy stash at current position
+        if not self._stash_registry.get_enemy_stashes_at(agent.agent_id, *agent.position):
+            mask[Action.STEAL] = False
+
+        # Curriculum: mask combat actions when not yet enabled
+        if self._rng.random() > self.combat_prob:
+            mask[Action.ATTACK] = False
+            mask[Action.DEFEND] = False
+
+        # Always allow at least TRAIN and moves — guarantee non-empty mask
+        mask[Action.TRAIN] = True
+        return mask
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
         assert self._world is not None
         self._global_step_count += 1
 
-        # Curriculum: mask ATTACK/DEFEND to REST when not yet fully enabled
+        # Curriculum: redirect combat actions to TRAIN when not yet fully enabled.
+        # TRAIN is always productive — better signal than REST.
         action_enum = Action(action)
         if action_enum in (Action.ATTACK, Action.DEFEND):
             if self._rng.random() > self.combat_prob:
-                action_enum = Action.REST
+                action_enum = Action.TRAIN
 
         focal = self._agents[self._focal_idx]
 
