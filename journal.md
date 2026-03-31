@@ -455,6 +455,11 @@ emergent behavior, without explicitly rewarding any of it.
 | REWARD_STASH_PROXIMITY = 0 | Individual stash anchoring is anti-cooperative |
 | Chebyshev over Manhattan distance | Consistent with 8-directional movement |
 | Damage split removed from combat | Punished group members for being nearby |
+| Invalid actions redirect to REST (not no-op) | Silent no-ops corrupt the reward signal |
+| DEFEND is multiplicative: `base × (1 − defense_power)` | Additive subtraction was near-useless; multiplicative scales to full nullification |
+| damage_taken_last_step in obs (slot 263) | Model needs an immediate "I was just hit" signal to react with DEFEND/flee |
+| Zero-pad LSTM input weights for obs extension | Preserves all prior knowledge; new obs dim starts contributing zero |
+| Focal agent is a pragmatic shortcut, not the end state | IPPO/MAPPO after sects are scaffolded |
 
 ---
 
@@ -475,3 +480,143 @@ emergent behavior, without explicitly rewarding any of it.
 | v11 | Qi field, reproduction, aging, sects | 85.6 | Oscillation; peak 151.2 at 94% |
 | v12 | Health overhaul, LR decay | 83.7 | Stable but eat-farming emerged (EAT 34%) |
 | v13 | Eat fix, mechanics overhaul, clusters | TBD | In progress |
+| v14 | Food randomization, death cause tracking | 158.9 | Best lifespan ever; stash loop not closed |
+| v15 | Warm-start from v14, food floor 0.01 | 105.8 | TRAIN 17.4% (best ever); 60% attacks wasted |
+| v16 | Combat audit: redirect invalid actions, multiplicative DEFEND, damage obs | TBD | Fresh train (obs 263→264); weight surgery from v15 |
+
+---
+
+## Entry 18 — Wasted No-Op Actions: The Silent Reward Bug (v15 analysis)
+
+**Problem discovered:** ~60% of all ATTACK actions in v15 replays were "wasted" —
+the model chose ATTACK with no adjacent enemy. The env silently did nothing but the
+agent still received its survival reward. Same pattern existed for EAT (empty
+inventory), DEPOSIT (empty inventory), WITHDRAW (no stash at position), STEAL (no
+enemy stash), COLLABORATE and WALK_AWAY (no adjacent agent).
+
+**Why it happened:** All context-dependent actions were no-ops when preconditions
+weren't met. The model learned that ATTACK was a "free" action — it costs nothing
+and changes nothing. So it spammed it.
+
+**The analogy:** Eating without food. Attacking air. The action space allowed nonsense
+and rewarded it equally with meaningful actions.
+
+**Fix:** `CombatEnv._redirect_invalid_action()` — a pre-step precondition check that
+redirects invalid actions to REST before execution. Same pattern as the curriculum
+mask. The model now gets REST reward (low but real) instead of a free pass.
+
+**Why not action masking?** Proper action masking (MaskableRecurrentPPO from
+sb3_contrib) would be cleaner long-term — it removes invalid actions from the
+probability distribution entirely so the model never wastes gradient on them.
+Deferred: requires migrating from RecurrentPPO to MaskableRecurrentPPO.
+
+**Result:** 0 wasted attacks in test replay post-fix (was ~60%).
+
+---
+
+## Entry 19 — Combat System Audit: Three Fundamental Flaws (v15→v16)
+
+**Flaw 1 — DEFEND was additive and near-useless.**
+Old formula: `damage = base - defense_power * 0.1`
+At default strength ~0.3: 0.03 mitigation vs 0.09 damage. The model had no
+incentive to DEFEND over REST — REST also restores health and DEFEND barely
+changed incoming damage.
+
+New formula: `damage = base * (1 - defense_power)` (multiplicative mitigation)
+- defense_power 0.0 → 0% block (untrained, starving)
+- defense_power 0.5 → 50% block (moderate cultivator)
+- defense_power 1.0 → 100% block (master — full nullification)
+
+This makes cultivation genuinely defensive. An agent that has trained and weathered
+hazards (high resistance) can now tank attacks from weaker opponents. The cultivation
+arc now has a clear payoff: TRAIN → higher strength → higher defense_power → survive
+being hit → train more.
+
+**Flaw 2 — Model had no "I am being attacked" signal.**
+The model could only infer being hit from health dropping. By the time health is
+noticeably low, the correct response (DEFEND/flee) is obvious — but early in a fight
+when the first hit lands, the model had no immediate signal.
+
+Fix: Added `damage_taken_last_step` as the 14th obs stat (normalized to COMBAT_MAX_DAMAGE).
+Populated each step for the focal agent (from heuristic attacks) and for non-focal
+targets (when focal's ATTACK lands). Now the model gets an immediate "I was just hit"
+signal and can choose DEFEND, WALK_AWAY, or EAT on the next step.
+
+**Flaw 3 — No elementary combat unit tests.**
+The existing tests covered flanking bonuses and cohesion rewards but never tested:
+- Does ATTACK actually reduce health?
+- Does DEFEND actually reduce damage?
+- Can a master cultivator nullify an attack?
+
+These are day-1 sanity checks that were missing. The wasted-action bug went undetected
+for 6+ training versions because no test verified that ATTACK with no target was a no-op
+that should be caught.
+
+**Design decision:** `defense_power = effective_strength×0.5 + avg_resistance×0.5`
+Both raw strength (TRAIN) and elemental resistance (hazard exposure) contribute equally.
+This means there are two paths to being a good defender: brute strength cultivation or
+systematic hazard exposure. Both are valid survival strategies.
+
+---
+
+## Entry 20 — Obs Space Change and the Weight Transfer Problem (v15→v16)
+
+**The tradeoff:** Adding `damage_taken_last_step` to obs is correct design — the model
+needs to know it's being hit. But obs_size 263→264 breaks warm-start from v15.
+The LSTM input weight matrices (`lstm_actor.weight_ih_l0`, `lstm_critic.weight_ih_l0`)
+are shaped [256, 263] and can't be loaded into a [256, 264] model.
+
+**The workaround: zero-padding the input weights.**
+Instead of training from scratch, we:
+1. Load the v15 [256, 263] LSTM input weights
+2. Append one zero column → [256, 264]
+3. Load all other weights unchanged
+4. Save as the v16 warm-start checkpoint
+
+The new obs dimension starts contributing zero to the LSTM hidden state (zero weight).
+The model behaves identically to v15 on step 1. Over training it learns to use the
+damage signal. All prior survival/combat/train behavior is preserved.
+
+**Why this is valid:** The new column is a new *input feature*, not a new architectural
+layer. The LSTM's capacity (64 hidden units) is unchanged. The model just has one more
+input it can choose to use. Initializing at zero is equivalent to saying "start from
+the belief that this new signal doesn't matter" — a conservative prior.
+
+**Script:** `scripts/transfer_weights.py` — handles the weight surgery and saves a
+ready-to-use v16 init checkpoint to `checkpoints/limbic_lstm_v16_init/`.
+
+---
+
+## Entry 21 — The Focal Agent Architecture: Limitation and Path Forward
+
+**What focal agent means:** RecurrentPPO (SB3) is a single-agent algorithm. It needs
+one obs → one action → one reward per step. So exactly one agent is the "student" at
+any given step. The other 9 run on simple heuristics (attack if stronger, eat if hungry,
+forage otherwise). The focal index rotates each episode reset so all agent slots get
+trained over time.
+
+**The fundamental limitation:** Only one agent is learning at any moment. Heuristic
+agents can't collaborate intelligently, can't learn to flee when losing, can't develop
+specialization. The v15 combat is really "1 RL agent vs 9 NPCs" not "10 agents in a
+society."
+
+**Path forward — IPPO (Independent PPO):**
+The migration is simpler than it sounds. IPPO = run the same RecurrentPPO weights
+for all N agents simultaneously, each getting their own obs/reward. It's the same
+architecture, same network, just called N times per tick. Requires wrapping in
+a PettingZoo parallel env.
+
+The migration sequence:
+1. Sects scaffolded (natural team structure — needed for credit assignment)
+2. PettingZoo wrapper around CombatEnv (all agents step the model each tick)
+3. IPPO: shared weights, independent value estimates per agent
+4. MAPPO (optional): centralized critic that sees all agents' obs
+
+**Key insight:** The LSTM weights from v16 can seed the IPPO policy directly —
+same architecture, same obs space. The transition does not require retraining from
+scratch. It's a wrapper change, not a model change.
+
+**Why not now?** Combat mechanics need to be correct first (this audit). Sects need
+to be scaffolded. Doing IPPO on a broken combat system would just train 10 agents
+to spam attacks at air faster.
+
