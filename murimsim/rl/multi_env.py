@@ -63,8 +63,8 @@ OBS_CHANNEL_ORDER: list[str] = ["food", "qi", "materials", "poison"]
 OBS_RESOURCE_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_RESOURCE_CH  # 100
 OBS_AGENT_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_AGENT_CH        # 100
 OBS_STASH_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_STASH_CH        # 50
-OBS_STATS_SIZE: int = 13  # health, hunger, inv_food, inv_poison, pr, pi, combat_exp, terrain_fam, reward_ema, sociability, in_group, strength, hunger_resistance
-OBS_TOTAL_SIZE: int = OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE + OBS_STASH_GRID_SIZE + OBS_STATS_SIZE  # 263
+OBS_STATS_SIZE: int = 14  # health, hunger, inv_food, inv_poison, pr, pi, combat_exp, terrain_fam, reward_ema, sociability, in_group, strength, hunger_resistance, damage_taken_last_step
+OBS_TOTAL_SIZE: int = OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE + OBS_STASH_GRID_SIZE + OBS_STATS_SIZE  # 264
 
 # ── History signal constants ──────────────────────────────────────────────────
 TERRAIN_FAM_SCALE: float = 200.0   # ticks_near_food / SCALE → [0, 1]
@@ -253,6 +253,7 @@ class MultiAgentEnv(gym.Env):
         self._ticks_near_food = [0.0] * self._n_agents
         self._reward_ema = [0.0] * self._n_agents
         self._combat_experience = [0.0] * self._n_agents
+        self._damage_taken_last_step: list[float] = [0.0] * self._n_agents
         self._groups = []
 
         # Reciprocity memory: _help_received[recipient][helper] = step_when_helped
@@ -741,6 +742,7 @@ class MultiAgentEnv(gym.Env):
             in_group,
             agent.strength,
             agent.hunger_resistance,
+            min(1.0, self._damage_taken_last_step[agent_idx] / COMBAT_MAX_DAMAGE),
         ], dtype=np.float32)
 
         return np.concatenate([flat_resources, flat_agents, flat_stashes, stats])
@@ -953,8 +955,10 @@ class MultiAgentEnv(gym.Env):
 
 
 # ── Combat constants ──────────────────────────────────────────────────────────
-COMBAT_ATTACKER_SCALE: float = 0.3
-COMBAT_DEFENDER_SCALE: float = 0.1
+COMBAT_ATTACKER_SCALE: float = 0.3   # base_damage = attacker.effective_strength * scale
+# DEFEND is multiplicative: damage *= (1 − defender.defense_power)
+# defense_power = effective_strength×0.5 + avg_resistance×0.5
+# A master cultivator (defense_power→1.0) fully nullifies any attack
 COMBAT_MAX_DAMAGE: float = 0.5
 
 REWARD_DEFEAT_OPPONENT: float = 0.3
@@ -1145,6 +1149,9 @@ class CombatEnv(MultiAgentEnv):
         prev_pos = focal.position
         pre_hazard_dists = {h: self._nearest_hazard_dist(prev_pos, h) for h in self._ep_hazard_approaches}
 
+        # Reset per-step damage tracking — populated by ATTACK and heuristic actions below
+        self._damage_taken_last_step = [0.0] * self._n_agents
+
         # 1. Apply focal agent's action
         flanking_bonus_earned = False
         self._last_action_details[self._focal_idx] = ""
@@ -1163,6 +1170,10 @@ class CombatEnv(MultiAgentEnv):
             else:
                 self._last_action_details[self._focal_idx] = "no_target"
             damage_dealt, defeated = self._do_attack(focal)
+            # Track damage the target just took so its next obs reflects being hit
+            if damage_dealt > 0 and pre_target is not None:
+                target_idx = self._agents.index(pre_target)
+                self._damage_taken_last_step[target_idx] = damage_dealt
             defeat_bonus = REWARD_DEFEAT_OPPONENT if defeated else 0.0
             # Extra defeat bonus when eliminating an enemy-sect agent
             if defeated and pre_target is not None:
@@ -1214,6 +1225,9 @@ class CombatEnv(MultiAgentEnv):
             if i != self._focal_idx and agent.alive:
                 dmg = self._heuristic_combat_step(agent, focal, focal_defending)
                 damage_taken += dmg
+
+        # Record damage focal took this step (from all heuristic agents combined)
+        self._damage_taken_last_step[self._focal_idx] = damage_taken
 
         # 3. Advance world + all agents
         for _ in range(self._action_ticks):
@@ -1440,18 +1454,26 @@ class CombatEnv(MultiAgentEnv):
     def _combat_damage(
         self, attacker: Agent, defender: Agent, is_defending: bool
     ) -> float:
-        """Compute combat damage.
+        """Compute combat damage dealt to the defender.
 
-        Formula: attacker.effective_strength*0.3 − defender.defense_power*0.1*is_defending
-        Using effective_strength for attack (hunger weakens offense) and defense_power
-        for defence (resistances from cultivation count here).
-        Clamped to [0, COMBAT_MAX_DAMAGE].
+        Base damage: attacker.effective_strength × COMBAT_ATTACKER_SCALE
+
+        When the defender chose DEFEND, damage is multiplied by
+        (1 − defender.defense_power).  defense_power ∈ [0, 1] is a blend of
+        effective_strength (0.5 weight) and avg cultivated resistance (0.5 weight),
+        so both raw strength and hazard cultivation reduce damage taken.
+
+        Scale:
+          defense_power = 0.0  → DEFEND blocks  0 % of damage (untrained, starving)
+          defense_power = 0.5  → DEFEND blocks 50 % of damage (moderate cultivator)
+          defense_power = 1.0  → DEFEND blocks 100% of damage (master — full nullification)
+
+        Damage is clamped to [0, COMBAT_MAX_DAMAGE].
         """
-        raw = (
-            attacker.effective_strength * COMBAT_ATTACKER_SCALE
-            - defender.defense_power * COMBAT_DEFENDER_SCALE * (1.0 if is_defending else 0.0)
-        )
-        return float(np.clip(raw, 0.0, COMBAT_MAX_DAMAGE))
+        base = attacker.effective_strength * COMBAT_ATTACKER_SCALE
+        if is_defending:
+            base *= max(0.0, 1.0 - defender.defense_power)
+        return float(np.clip(base, 0.0, COMBAT_MAX_DAMAGE))
 
     def _nearest_adjacent_agent(self, agent: Agent) -> Agent | None:
         """Return nearest live agent within Chebyshev distance 1 (8 directions), or None."""
