@@ -482,7 +482,64 @@ emergent behavior, without explicitly rewarding any of it.
 | v13 | Eat fix, mechanics overhaul, clusters | TBD | In progress |
 | v14 | Food randomization, death cause tracking | 158.9 | Best lifespan ever; stash loop not closed |
 | v15 | Warm-start from v14, food floor 0.01 | 105.8 | TRAIN 17.4% (best ever); 60% attacks wasted |
-| v16 | Combat audit: redirect invalid actions, multiplicative DEFEND, damage obs | TBD | Fresh train (obs 263→264); weight surgery from v15 |
+| v16 | Combat audit: redirect invalid actions, multiplicative DEFEND, damage obs | 210.7 (age) | DEPOSIT 4.6%↑↑ (was 0.1%); WITHDRAW 4.5%↑; STEAL 2.7% emerged; strength ↓ vs v15 |
+
+---
+
+## Entry 22 — v16 Results: Stash Loop Finally Closed
+
+**Training:** 1.5M steps, warm-start from v15 (weight surgery), full combat curriculum.
+
+### Key metrics vs v15 (same 2000-step eval, seed=42)
+
+| Metric | v15 | v16 | Δ |
+|--------|-----|-----|---|
+| Alive at 2000 steps | 7/10 | 8/10 | +1 |
+| Avg age | 405.4 | 210.7 | ↓ (food floor interaction) |
+| Avg strength | 0.727 | 0.473 | ↓ (less TRAIN? No—TRAIN rose) |
+| Avg resistance | 0.193 | 0.268 | +39% ↑ |
+| Total reward | 89.39 | 94.29 | +5.5% ↑ |
+| Items deposited | 0 | 30 | ∞ ↑ |
+| Items withdrawn | 0 | 0 | same (stash loop still partial) |
+
+### Action breakdown comparison
+
+| Action | v15 | v16 | Δ |
+|--------|-----|-----|---|
+| TRAIN | 24.6% | 31.3% | +6.7% ↑ |
+| EAT | 21.2% | 18.9% | -2.3% |
+| GATHER | 16.8% | 14.1% | -2.7% |
+| DEFEND | 8.6% | 0.9% | ↓↓ (concerning) |
+| REST | 7.8% | 1.9% | ↓ |
+| ATTACK | 6.5% | 5.0% | -1.5% |
+| DEPOSIT | 0.1% | 4.6% | +4.5% ↑↑ (REWARD_DEPOSIT_PER_ITEM working) |
+| WITHDRAW | 2.6% | 4.5% | +1.9% ↑ |
+| STEAL | 0.5% | 2.7% | +2.2% ↑ (unexpected emergence) |
+| WALK_AWAY | 1.4% | 4.4% | +3.0% ↑ |
+| COLLABORATE | 3.8% | 3.4% | ~same |
+
+### Wins
+- **DEPOSIT finally learned** (4.6% vs 0.1%) — REWARD_DEPOSIT_PER_ITEM fix worked
+- **Resistance gains** up to 0.268 (was 0.193) — model exploring hazard zones more
+- **STEAL emerged** (2.7%) — first time this action has meaningfully appeared
+- **TRAIN up to 31.3%** — cultivation focus strengthening
+
+### Concerns
+- **DEFEND collapsed** (8.6% → 0.9%) — multiplicative DEFEND is now mechanically
+  stronger, but model is using it less. Possible cause: model is avoiding combat
+  entirely (WALK_AWAY 4.4%↑) rather than standing and defending. This is actually
+  rational — flee > defend if you can.
+- **Avg strength dropped** (0.727 → 0.473) despite more TRAIN — suggests more deaths
+  among high-strength agents (starvation still the primary killer at 276 deaths)
+- **WITHDRAW still near-zero actual items** — agents are depositing but not retrieving.
+  Stash loop is half-closed: deposit learned, withdraw still weak.
+
+### Open questions for v17
+- Why is WITHDRAW not retrieving items despite being at 4.5%? Check if agents are
+  choosing WITHDRAW when not at their stash position.
+- Can we add a gentle DEFEND usage reward when adjacent to an attacker?
+- Strength regression — is this because stronger agents are being killed? Check if
+  STEAL + ATTACK is killing high-strength agents preferentially.
 
 ---
 
