@@ -127,7 +127,33 @@ domain_randomization:
   food_cluster_radius: 3
   food_cluster_fill_prob: 0.70
 
-# lstm_v15: lower food density floor to encourage stash use
+# lstm_v16: combat system audit fixes
+#   Key changes from v15:
+#   - Invalid actions redirect to REST (ATTACK/EAT/DEPOSIT/etc with no valid target)
+#   - DEFEND is multiplicative: damage *= (1 - defense_power) — full nullification possible
+#   - damage_taken_last_step added to obs (slot 263) — model can feel being hit
+#   - obs_size: 263 → 264 (breaking change — warm-start via weight surgery, not direct load)
+#   - REWARD_GROUP_WITHDRAW_BONUS defined but never applied — left as-is for v16
+#   - Warm-starts from v15 via scripts/transfer_weights.py (zero-padded LSTM input)
+#   - Fresh train required (obs size changed) despite weight surgery
+lstm_v16:
+  total_timesteps: 1_500_000
+  checkpoint_freq: 100_000
+  n_envs: 4
+  curriculum_ramp_steps: 1
+  lstm_hidden_size: 64
+  n_lstm_layers: 1
+  shared_lstm: false
+  n_steps: 512
+  batch_size: 64
+  learning_rate: 0.0001
+  learning_rate_final: 0.00001
+  clip_range: 0.15
+  clip_range_final: 0.05
+  ent_coef: 0.02
+  warm_start: checkpoints/limbic_lstm_v16_init/limbic_lstm_v16_init.zip
+
+
 #   - food_spawn_density floor: 0.03 → 0.01 (scarcer episodes make stash mandatory)
 #   - All other params unchanged from v14
 #   - Warm-starts from v14 final
