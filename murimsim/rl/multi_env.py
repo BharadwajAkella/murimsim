@@ -840,7 +840,9 @@ class MultiAgentEnv(gym.Env):
         elif action_enum == Action.DEPOSIT:
             stash = self._stash_registry.deposit(agent)
             if stash:
-                self._ep_items_deposited += stash.total()
+                items_deposited = stash.total()
+                self._ep_items_deposited += items_deposited
+                stash_bonus += REWARD_DEPOSIT_PER_ITEM * items_deposited
                 if agent_idx >= 0 and self._max_dist_since_deposit[agent_idx] >= FORAGE_OUTWARD_MIN_DIST:
                     stash_bonus += REWARD_FORAGE_OUTWARD
                 if agent_idx >= 0:
@@ -852,6 +854,8 @@ class MultiAgentEnv(gym.Env):
                 member_ids = [self._agents[i].agent_id for i in group]
                 food_got = self._stash_registry.withdraw_group(agent, member_ids)
                 self._ep_items_withdrawn += food_got
+                if food_got > 0:
+                    stash_bonus += REWARD_GROUP_WITHDRAW_BONUS
             else:
                 at_pos = self._stash_registry.get_own_stash_at(agent.agent_id, *agent.position)
                 self._ep_items_withdrawn += sum(s.total() for s in at_pos)
@@ -991,7 +995,8 @@ REWARD_FOOD_SHARE: float = 0.04       # reward focal receives when it shares or 
 # Foraging-outward: deposit after having been >=N tiles away from stash since last deposit
 FORAGE_OUTWARD_MIN_DIST: int = 5      # Chebyshev tiles away from stash to qualify
 REWARD_FORAGE_OUTWARD: float = 0.03   # bonus for depositing after a foraging excursion
-# Group withdrawal bonus: received by stash owner when a group member withdraws their food
+REWARD_DEPOSIT_PER_ITEM: float = 0.05 # explicit reward per item successfully deposited (closes stash loop)
+# Group withdrawal bonus: reward when agent withdraws from a group stash while hungry
 REWARD_GROUP_WITHDRAW_BONUS: float = 0.02
 # Stash proximity: disabled — per-tick pull toward individual stash was anti-cooperative,
 # causing agents to disperse from groups and spike WALK_AWAY rate.
