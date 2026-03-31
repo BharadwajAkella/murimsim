@@ -105,14 +105,18 @@ def main() -> None:
     model = None
     model_obs_size: int | None = None
     is_recurrent = False
+    is_masked = False
     if model_path.exists():
         try:
-            # Try RecurrentPPO first (LSTM checkpoints)
-            from sb3_contrib import RecurrentPPO
-            model = RecurrentPPO.load(str(model_path), device="cpu")
+            # Use MaskedRecurrentPPO — drop-in replacement for RecurrentPPO that
+            # applies action_masks() before sampling so the model never picks an
+            # infeasible action (e.g. ATTACK when nobody is adjacent).
+            from murimsim.rl.masked_recurrent_ppo import MaskedRecurrentPPO
+            model = MaskedRecurrentPPO.load(str(model_path), device="cpu")
             model_obs_size = model.observation_space.shape[0]
-            policy_name = f"RecurrentPPO ({model_path.name})"
+            policy_name = f"MaskedRecurrentPPO ({model_path.name})"
             is_recurrent = True
+            is_masked = True
         except Exception:
             try:
                 from stable_baselines3 import PPO
@@ -202,25 +206,35 @@ def main() -> None:
         agent_ep_starts[idx] = True
 
     def _get_all_actions() -> dict[int, int]:
-        """Run the model for every alive agent. Returns {agent_idx: action_int}."""
+        """Run the model for every alive agent with action masking. Returns {agent_idx: action_int}."""
+        # Temporarily rotate focal to each agent to compute their mask
+        original_focal = env._focal_idx
         actions: dict[int, int] = {}
         for i, agent in enumerate(env._agents):
             if not agent.alive:
                 continue
             obs_i = env._build_obs(i)
             ep_start_i = np.array([agent_ep_starts[i]], dtype=bool)
+            # Compute action mask from this agent's perspective
+            masks = None
+            if is_masked:
+                env._focal_idx = i
+                masks = env.action_masks()
             if is_recurrent:
+                kwargs = {"action_masks": masks} if is_masked else {}
                 act, new_state = model.predict(
                     _compat_obs(obs_i),
                     state=agent_lstm_states[i],
                     episode_start=ep_start_i,
                     deterministic=True,
+                    **kwargs,
                 )
                 agent_lstm_states[i] = new_state
                 agent_ep_starts[i] = False
             else:
                 act, _ = model.predict(_compat_obs(obs_i), deterministic=True)
             actions[i] = int(act)
+        env._focal_idx = original_focal
         return actions
 
     with ReplayLogger(seed=args.seed, output_dir=out_path.parent, filename=out_filename) as replay:
