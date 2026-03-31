@@ -149,7 +149,18 @@ def main() -> None:
     if not args.no_combat:
         env._global_step_count = env._curriculum_ramp_steps
 
-    out_path = args.output or (OUTPUT_DIR / f"combat_{args.seed}.jsonl")
+    # Default filename: combat_<model_stem>.jsonl (e.g. combat_v16.jsonl from limbic_lstm_v16_final.zip)
+    # Strip common prefix/suffix to get a clean version tag, fall back to seed if no model.
+    if args.output:
+        out_path = args.output
+    elif model_path.exists():
+        stem = model_path.stem  # e.g. "limbic_lstm_v16_final"
+        # Extract version tag: last segment that starts with 'v' and a digit, else full stem
+        parts = stem.split("_")
+        tag = next((p for p in reversed(parts) if p.startswith("v") and p[1:].isdigit()), stem)
+        out_path = OUTPUT_DIR / f"combat_{tag}.jsonl"
+    else:
+        out_path = OUTPUT_DIR / f"combat_{args.seed}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_filename = out_path.name
 
