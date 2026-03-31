@@ -95,6 +95,13 @@ STARVATION_THRESHOLD: float = 0.80                 # synced with Agent.STARVATIO
 # This prevents eat-farming when already healthy
 REWARD_HEALTH_RECOVERY_SCALE: float = 0.20
 HEALTH_RECOVERY_GATE: float = 0.70                 # no recovery reward above this health level
+# Low-health danger penalty: continuous signal that fires every step health is critically low.
+# Scale by distance below gate so the closer to death, the louder the signal.
+PENALTY_LOW_HEALTH_SCALE: float = 0.50             # per step, × (gate - health)
+LOW_HEALTH_PENALTY_GATE: float = 0.35              # penalty fires below this health level
+# Survival redirect: when health is critical AND food is in inventory, force EAT regardless
+# of what the model chose. Overrides even TRAIN. Acts like a hard survival instinct.
+CRITICAL_HEALTH_EAT_THRESHOLD: float = 0.25        # health below this → redirect to EAT if possible
 # δ-reward for TRAIN action: incentivises training (strength delta × scale)
 REWARD_TRAIN_STRENGTH_SCALE: float = 10.0
 REWARD_RESISTANCE_GAIN_SCALE: float = 5.0   # reward per unit of total resistance grown
@@ -784,6 +791,10 @@ class MultiAgentEnv(gym.Env):
         # Starvation proximity penalty
         if agent.hunger > STARVATION_THRESHOLD:
             reward += PENALTY_STARVATION_APPROACH * (agent.hunger - STARVATION_THRESHOLD)
+        # Low-health danger penalty: continuous signal every step health is critically low.
+        # Scales with distance below gate — the closer to death, the louder the signal.
+        if agent.health < LOW_HEALTH_PENALTY_GATE:
+            reward += PENALTY_LOW_HEALTH_SCALE * (agent.health - LOW_HEALTH_PENALTY_GATE)
         # Health recovery bonus: only reward recovering health when it's meaningfully low.
         # Gate prevents eat-farming: no bonus when already healthy (>= HEALTH_RECOVERY_GATE).
         health_delta = agent.health - health_prev
@@ -1098,13 +1109,22 @@ class CombatEnv(MultiAgentEnv):
     # ── step override ─────────────────────────────────────────────────────────
 
     def _redirect_invalid_action(self, agent: Agent, action: Action) -> Action:
-        """Redirect context-invalid actions to REST.
+        """Redirect context-invalid actions to REST (or EAT on survival emergency).
 
-        Prevents no-op wasted turns where the model picks an action that has no
-        valid target or precondition (e.g. ATTACK with nobody adjacent, EAT with
-        empty inventory). Redirecting to REST gives the model a clear, correct
-        reward signal instead of a silent no-op.
+        Two redirect types:
+        1. Survival override: health critically low + food in inventory → force EAT.
+           This fires before any other check — survival beats cultivation.
+        2. Invalid-action redirect: action has no valid target/precondition → REST.
         """
+        # 1. Survival override — hardwired instinct: eat when near death
+        if (
+            agent.health < CRITICAL_HEALTH_EAT_THRESHOLD
+            and agent.inventory.food > 0
+            and action != Action.EAT
+        ):
+            return Action.EAT
+
+        # 2. Invalid-action redirects
         if action == Action.ATTACK or action == Action.COLLABORATE or action == Action.WALK_AWAY:
             if self._nearest_adjacent_agent(agent) is None:
                 return Action.REST
