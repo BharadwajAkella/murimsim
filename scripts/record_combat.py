@@ -167,29 +167,52 @@ def main() -> None:
     action_counts: dict[str, int] = {}
     step = 0
     generation = 0
-    # LSTM hidden states — reset on each new generation
-    lstm_states = None
-    ep_start = np.ones((1,), dtype=bool)
+    n = args.agents
+
+    # Per-agent LSTM states and episode-start flags for full-team inference.
+    # Each agent runs the model independently with its own hidden state.
+    agent_lstm_states: list = [None] * n
+    agent_ep_starts: list[bool] = [True] * n
+
+    def _reset_agent_lstm(idx: int) -> None:
+        agent_lstm_states[idx] = None
+        agent_ep_starts[idx] = True
+
+    def _get_all_actions() -> dict[int, int]:
+        """Run the model for every alive agent. Returns {agent_idx: action_int}."""
+        actions: dict[int, int] = {}
+        for i, agent in enumerate(env._agents):
+            if not agent.alive:
+                continue
+            obs_i = env._build_obs(i)
+            ep_start_i = np.array([agent_ep_starts[i]], dtype=bool)
+            if is_recurrent:
+                act, new_state = model.predict(
+                    _compat_obs(obs_i),
+                    state=agent_lstm_states[i],
+                    episode_start=ep_start_i,
+                    deterministic=True,
+                )
+                agent_lstm_states[i] = new_state
+                agent_ep_starts[i] = False
+            else:
+                act, _ = model.predict(_compat_obs(obs_i), deterministic=True)
+            actions[i] = int(act)
+        return actions
 
     with ReplayLogger(seed=args.seed, output_dir=out_path.parent, filename=out_filename) as replay:
         while step < args.ticks:
             focal_idx = env._focal_idx
 
             if model is not None:
-                obs = env._build_obs(focal_idx)
-                if is_recurrent:
-                    action_int, lstm_states = model.predict(
-                        _compat_obs(obs),
-                        state=lstm_states,
-                        episode_start=ep_start,
-                        deterministic=True,
-                    )
-                    ep_start = np.zeros((1,), dtype=bool)
-                else:
-                    action_int, _ = model.predict(_compat_obs(obs), deterministic=True)
-                action_int = int(action_int)
+                # Full-team inference: every alive agent runs the policy this tick.
+                all_actions = _get_all_actions()
+                action_int = all_actions.get(focal_idx, 0)
+                # Inject non-focal actions so _execute_override_action replaces heuristics.
+                env._action_overrides = {i: a for i, a in all_actions.items() if i != focal_idx}
             else:
                 action_int = env.action_space.sample()
+                env._action_overrides = None
 
             action_name = Action(action_int).name.lower()
             action_counts[action_name] = action_counts.get(action_name, 0) + 1
@@ -214,13 +237,13 @@ def main() -> None:
                     obs, _ = env.reset(seed=args.seed + generation)
                     if not args.no_combat:
                         env._global_step_count = env._curriculum_ramp_steps
-                    lstm_states = None
-                    ep_start = np.ones((1,), dtype=bool)
+                    agent_lstm_states = [None] * n
+                    agent_ep_starts = [True] * n
                 else:
-                    # Only focal died — continue in same world with next alive agent
-                    env._focal_idx = env._next_live(env._focal_idx)
-                    obs = env._build_obs(env._focal_idx)
-                    ep_start = np.ones((1,), dtype=bool)
+                    # Focal died — rotate to next alive agent; reset only focal's LSTM state.
+                    _reset_agent_lstm(focal_idx)
+                    env._focal_idx = env._next_live(focal_idx)
+                    agent_ep_starts[env._focal_idx] = True
 
     print(f"{'─'*55}")
     print(f"  Steps recorded : {step}")

@@ -1056,6 +1056,10 @@ class CombatEnv(MultiAgentEnv):
         self._last_action_details: list[str] = [""] * n_agents
         # Per-agent last action name (tracks heuristic agents too, unlike record_combat.py)
         self._last_action_names: list[str] = ["rest"] * n_agents
+        # Optional per-agent action overrides for full-team inference (replay only).
+        # Keys are agent indices (non-focal); values are Action int values.
+        # When set, _heuristic_combat_step is bypassed in favour of the policy action.
+        self._action_overrides: dict[int, int] | None = None
 
     # ── Sect home-region spawning ─────────────────────────────────────────────
 
@@ -1224,11 +1228,14 @@ class CombatEnv(MultiAgentEnv):
                     elif post_dist > pre_dist:
                         self._ep_hazard_flees[h] += 1
 
-        # 2. Heuristic for non-focal agents (combat-aware in Phase 3c)
+        # 2. Heuristic (or policy override) for non-focal agents
         damage_taken = 0.0
         for i, agent in enumerate(self._agents):
             if i != self._focal_idx and agent.alive:
-                dmg = self._heuristic_combat_step(agent, focal, focal_defending)
+                if self._action_overrides is not None and i in self._action_overrides:
+                    dmg = self._execute_override_action(agent, i, Action(self._action_overrides[i]), focal, focal_defending)
+                else:
+                    dmg = self._heuristic_combat_step(agent, focal, focal_defending)
                 damage_taken += dmg
 
         # Record damage focal took this step (from all heuristic agents combined)
@@ -1417,6 +1424,86 @@ class CombatEnv(MultiAgentEnv):
             self._drop_inventory(target)
             return damage, True
         return damage, False
+
+    def _execute_override_action(
+        self, agent: Agent, agent_idx: int, action: Action, focal: Agent, focal_defending: bool
+    ) -> float:
+        """Execute a policy-chosen action for a non-focal agent during full-team inference.
+
+        Returns damage dealt to the focal agent (0 unless agent attacks focal).
+        Used by record_combat.py when _action_overrides is set — replaces the heuristic
+        so all agents run the actual trained policy during replay.
+        """
+        ax, ay = agent.position
+        fx, fy = focal.position
+        adjacent = max(abs(ax - fx), abs(ay - fy)) <= 1
+        gs = self._world.grid_size
+        damage_to_focal = 0.0
+
+        if action == Action.ATTACK:
+            target = self._nearest_adjacent_agent(agent)
+            if target is not None and target.alive:
+                is_focal_target = (target is focal)
+                defending = focal_defending if is_focal_target else False
+                damage = self._combat_damage(agent, target, is_defending=defending)
+                target.health = max(0.0, target.health - damage)
+                target._check_death("combat")
+                if not target.alive:
+                    self._drop_inventory(target)
+                if is_focal_target:
+                    damage_to_focal = damage
+                self._last_action_names[agent_idx] = "attack"
+                self._last_action_details[agent_idx] = target.agent_id
+            else:
+                self._heuristic_step(agent)
+                self._last_action_names[agent_idx] = "gather"
+                self._last_action_details[agent_idx] = ""
+
+        elif action == Action.DEFEND:
+            # DEFEND for non-focal: mark them as defending so if they get attacked this tick
+            # (by focal or another agent) damage is reduced. Nothing else to do here.
+            self._last_action_names[agent_idx] = "defend"
+            self._last_action_details[agent_idx] = ""
+
+        elif action == Action.EAT:
+            if agent.inventory.food > 0:
+                agent.eat(self._resource_configs)
+                self._last_action_names[agent_idx] = "eat"
+            else:
+                self._last_action_names[agent_idx] = "rest"
+            self._last_action_details[agent_idx] = ""
+
+        elif action == Action.GATHER:
+            x, y = agent.position
+            food_grid = self._world.get_grid_view("food")
+            if food_grid[y, x] > 0:
+                self._world.deplete("food", x, y)
+                agent.gather("food")
+            self._last_action_names[agent_idx] = "gather"
+            self._last_action_details[agent_idx] = ""
+
+        elif action == Action.TRAIN:
+            x, y = agent.position
+            qi_val = self._world.get_qi_field_value(x, y) if "qi" in self._world.resources else 0.0
+            agent.train(qi_field_value=qi_val)
+            self._last_action_names[agent_idx] = "train"
+            self._last_action_details[agent_idx] = ""
+
+        elif action == Action.REST:
+            self._last_action_names[agent_idx] = "rest"
+            self._last_action_details[agent_idx] = ""
+
+        elif action in MOVE_DELTAS:
+            dx, dy = MOVE_DELTAS[action]
+            agent.move(dx, dy, gs)
+            self._last_action_names[agent_idx] = action.name.lower()
+            self._last_action_details[agent_idx] = ""
+
+        else:
+            # Unsupported override action — fall back to heuristic
+            damage_to_focal = self._heuristic_combat_step(agent, focal, focal_defending)
+
+        return damage_to_focal
 
     def _heuristic_combat_step(
         self, agent: Agent, focal: Agent, focal_defending: bool
