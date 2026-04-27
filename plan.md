@@ -1,5 +1,50 @@
 # MurimSim — Emergent Behavior Master Plan (Canonical 0–1 Trait Scale)
 
+## ⚓ MVP Anchor — Read Before Every Session
+
+> This project has a hard demo deadline of **June 30, 2026** for outreach to Dr. Katja Hofmann (MSR) and Joel Leibo (DeepMind).
+> Strategic context lives in `docs/positioning.md`. MVP scope cuts live in `docs/MVP_SCOPE.md`. Read both before making design decisions.
+
+### The three claims this demo must demonstrate
+
+1. **Generational cultural drift in a multi-agent population via LLM transmission medium** — combination not present in Park et al., Voyager, or Cook et al.
+2. **Reproducible strategic emergence under survival pressure** — same seed → same inter-sect dynamics
+3. **Identity-aware agents with sect-level cultural state** — sect identity in observations, sect-level inherited culture
+
+### Architecture commitments (do not revisit without explicit unlock)
+
+- **LLM is called only at generation boundaries**, not within generations. Deliberate cost + reproducibility delta vs Park et al. (LLM-every-step) and a capability delta vs Cook et al. (no LLM).
+- **Sect identity in agent observations.** Cook et al. agents are interchangeable; ours are not.
+- **Sect-level outcomes feed individual rewards.** Without this, sects are cosmetic.
+- **Cultural transmission Mechanism 1 first** (programmed parent→offspring + sect-elder transmission). Mechanism 2 is **stretch**, decision deferred to mid-June.
+- **Relationships in v1 are pairwise parameter maps** (trust, interaction frequency).
+
+### MVP path — the only Fast Lane that matters until June 30
+
+1. ✅ `settlement-metrics` — pure instrumentation, no game changes
+2. ✅ `shared-stash` — group withdraw, foraging-outward, stash capacity cap
+3. ✅ `sect-scaffold` — three sects, home regions, inter-sect combat rewards
+4. ✅ `aging` + `reproduction` — age-death, trait inheritance, `spawn_from_parents`
+5. 🔲 `viewer-territory` — per-sect colors for demo legibility
+6. 🔲 Phase 8 LLM culture (Mechanism 1) — selection bias + mutation modifier at generation boundaries
+7. 🔲 Reproducibility sweeps — multi-seed runs, same-seed → same emergence
+8. 🔲 Demo recording + repo polish + outreach email (June 30)
+
+### What's cut for MVP
+
+- Phase 5.6 entirely (power growth, qi training, hazard unify) — post-Katja
+- Phase 7 (movable resources, haul action) — post-Katja
+- `settlement-training-v9` full retraining run — map and metrics exist; skip retraining
+- Replay viewer polish — screen recording with overlay text is sufficient
+- Mechanism 2 — stretch only; default to deferral
+
+### The "greed at end of project" rule
+
+New ideas during paternity leave → `docs/positioning.md` "Deferred extensions / future work". Not into code.
+
+---
+
+
 > A multi-agent simulation where agents compete over resources in a procedural world.
 > Named abstractions (groups, alliances, culture) are built **only after** the behavior they
 > represent is observed emerging from the simulation.
@@ -791,15 +836,15 @@ Keep as-is; no unit changes needed.
 | Phase 3: RL Combat            | ✅ Done        | Fight/flight w/o forgetting forage                   | Probes pass + `limbic_lstm_v2_final.zip`               |
 | Phase 4: Reward Tuning        | ✅ Done        | Strength priority, gather/eat decoupled              | LSTM v4: 74 steps, 7.3% defend, `limbic_lstm_v4_final.zip` |
 | Phase 5: Group Dynamics       | ✅ Done        | Groups, flanking, cohesion, food sharing + reciprocity | LSTM v8: lifespan 105.7, attack 0.3%, eat 31.9% |
-| Phase 5.5: Settlement         | 🔲 Next        | Detect stable home regions, settlement metrics, dense-patch map, shared stash improvements | Settlement metrics logged; agents revisit same region; stash fill rate > 0 |
-| Phase 5.6: Power Growth       | ⬜ Not started | Qi training action, hazard unification, power score  | Agents train near qi; resistance grows from exposure curriculum |
-| Phase 6a: Sect Scaffold       | ⬜ Not started | 3 sect populations, biome home regions, sect metrics | Each sect favors a distinct biome; sect-level stats logged |
-| Phase 6b: Generations         | ⬜ Not started | Aging, death by age, reproduction, trait inheritance | Trait drift measurable across generations in logs |
-| Phase 7: Movable Resources    | ⬜ Not started | Haul action (only if settlement confirmed); resource denial | Trap-setting or stash-to-stash transport observed in replay |
-| Phase 8: LLM Culture          | ⬜ Not started | LLM applies selection pressure on survivor traits    | Cultural drift measurable across generations           |
+| Phase 5.5: Settlement         | ✅ Done        | Settlement metrics, dense-patch map, shared stash, capacity cap | 5 settlement metrics logged + 5 metric tests passing |
+| Phase 5.6: Power Growth       | 🚫 Cut (MVP)  | **Cut for June 30 demo.** Post-Katja.                | —                                                      |
+| Phase 6a: Sect Scaffold       | ✅ Done        | 3 sects, home regions, inter-sect combat rewards, sect obs | SectConfig + SectRegistry + DEFAULT_SECTS in `sect.py` |
+| Phase 6b: Generations         | ✅ Done        | Aging, age-death, reproduction, trait inheritance    | `Agent.spawn_from_parents()`, `_try_reproduce()` wired |
+| Phase 7: Movable Resources    | 🚫 Cut (MVP)  | **Cut for June 30 demo.** Post-Katja.                | —                                                      |
+| Phase 8: LLM Culture          | 🔲 Next        | LLM selection bias + mutation modifier at generation boundaries | Cultural drift measurable across generations |
 
-**Current test suite:** 88 passed, 3 skipped (as of 2026-03-29)
-**Latest checkpoint:** `checkpoints/limbic_lstm_v8/limbic_lstm_v8_final.zip`
+**Current test suite:** 165 passed, 3 skipped (as of 2026-04-27)
+**Latest checkpoint:** `checkpoints/limbic_lstm_v8/limbic_lstm_v8_final.zip` (must be copied into env before eval)
 
 > **Design principle:** No named groups, no top-down abstractions until the behavior they represent
 > is observed emerging from the simulation. Code follows behavior, not the other way around.
@@ -898,16 +943,16 @@ Curriculum: expose agents at low concentration first, increase over training.
 > **Obs space rule:** Any ticket that changes the 261-float obs vector must note the new size and
 > plan for partial warm-start from v8 (new dims init to zero, policy retrained for 500K+ steps).
 
-### Phase 5.5 — Settlement Benchmark
+### Phase 5.5 — Settlement Benchmark ✅ COMPLETE
 
 | ID | Task | Status | Depends On |
 | -- | ---- | ------ | ---------- |
-| `settlement-metrics` | Add per-episode logging: stash_fill_rate, stash_withdraw_rate, avg_dist_from_stash, revisit_entropy, group_persistence. No game changes. | 🔲 Pending | — |
-| `dense-patch-map` | Create `config/envs/dense_patch.yaml` with 2× food density in 2 corners. Run frozen LSTM v8 eval, measure settlement metrics baseline. | 🔲 Pending | `settlement-metrics` |
-| `shared-stash` | Group members withdraw from any group member's stash. Foraging-outward reward (+0.02 when returning to stash after ≥5 tile excursion). Group-eat bonus (+0.01). | 🔲 Pending | `dense-patch-map` |
-| `settlement-training-v9` | Train LSTM v9 warm-start from v8 on dense-patch map. Watch stash_fill_rate and revisit_entropy. | 🔲 Pending | `shared-stash` |
+| `settlement-metrics` | Per-episode logging: stash_fill_rate, stash_withdraw_rate, avg_dist_from_stash, revisit_entropy, group_persistence. | ✅ Done | — |
+| `dense-patch-map` | `config/envs/dense_patch.yaml` with 2× food density in 2 corners. Baseline eval run (random policy). | ✅ Done | `settlement-metrics` |
+| `shared-stash` | Group withdraw, foraging-outward reward, stash capacity cap (`STASH_MAX_ITEMS=20`), action masking for full stash. | ✅ Done | `dense-patch-map` |
+| `settlement-training-v9` | **Cut for MVP.** Map + metrics exist; retraining skipped. Bring in v8 checkpoint for eval. | 🚫 Cut (MVP) | `shared-stash` |
 
-### Phase 5.6 — Power Growth (after 5.5c stable)
+### Phase 5.6 — Power Growth ⛔ CUT FOR MVP
 
 | ID | Task | Status | Depends On |
 | -- | ---- | ------ | ---------- |
@@ -916,22 +961,22 @@ Curriculum: expose agents at low concentration first, increase over training.
 | `power-score` | Add `power` metric to logging: `0.4*strength + 0.3*qi + 0.2*poison_res + 0.1*flame_res`. Log separately from lifespan. | 🔲 Pending | `qi-train-action` |
 | `power-training-v10` | Train LSTM v10 warm-start (partial transfer, new action dim). Watch power growth vs lifespan tradeoff. | 🔲 Pending | `power-score` |
 
-### Phase 6a — Sect Scaffold (after settlement confirmed)
+### Phase 6a — Sect Scaffold ✅ COMPLETE
 
 | ID | Task | Status | Depends On |
 | -- | ---- | ------ | ---------- |
-| `sect-scaffold` | SectConfig dataclass + SectRegistry + 3 CombatEnv instances (one per sect). Biome home regions. Sect-level metrics. | 🔲 Pending | `power-training-v10` |
-| `viewer-territory` | Restore per-sect agent colors. Show sect home regions + stash influence zones on grid. | 🔲 Pending | `sect-scaffold` |
-| `inter-sect-combat` | Sect-aware attack bonus vs enemy sect, penalty vs own sect. | 🔲 Pending | `sect-scaffold` |
+| `sect-scaffold` | `SectConfig` + `SectRegistry` + `DEFAULT_SECTS` (Iron Fang/Jade Lotus/Shadow Root) in `sect.py`. Home regions (horizontal stripes of 30×30). Sect obs + sect-level metrics in `CombatEnv`. | ✅ Done | `settlement-metrics` |
+| `inter-sect-combat` | Sect-aware attack bonus vs enemy sect (`REWARD_INTER_SECT_DEFEAT_BONUS`), penalty vs own sect (`REWARD_SAME_SECT_ATTACK_PENALTY`). | ✅ Done | `sect-scaffold` |
+| `viewer-territory` | Per-sect agent colors in `viewer/viewer.js`. Show sect home regions on grid. | 🔲 Pending | `sect-scaffold` |
 
-### Phase 6b — Generations (after sects stable)
+### Phase 6b — Generations ✅ COMPLETE
 
 | ID | Task | Status | Depends On |
 | -- | ---- | ------ | ---------- |
-| `aging` | Age counter per agent. Death by age threshold. End-of-life survivor selection. | 🔲 Pending | `inter-sect-combat` |
-| `reproduction` | Trait inheritance: `inherit_value(mom, dad, rng, sigma)` midpoint + Gaussian noise. Lamarckian poison resistance. | 🔲 Pending | `aging` |
+| `aging` | Age counter per agent. Death by age threshold. Age-death in `tick()`. | ✅ Done | `inter-sect-combat` |
+| `reproduction` | `Agent.spawn_from_parents()`, `_try_reproduce()` in `CombatEnv`. `inherit_value()` midpoint + Gaussian noise. Lamarckian poison resistance. | ✅ Done | `aging` |
 
-### Phase 7 — Movable Resources (conditional on settlement logs)
+### Phase 7 — Movable Resources ⛔ CUT FOR MVP
 
 | ID | Task | Status | Depends On |
 | -- | ---- | ------ | ---------- |
