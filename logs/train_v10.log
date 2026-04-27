@@ -1,0 +1,11 @@
+nohup: ignoring input
+Warm-starting from checkpoints/limbic_lstm_v9/limbic_lstm_v9_final.zip
+  Transferred 20/20 layers.
+
+Training RecurrentPPO  run=lstm_v10  2,000,000 steps  4 envs  10 agents/env  lstm_hidden=64  seed=42
+  Curriculum: combat prob 0.2 → 1.0 over first 300,000 steps
+  Checkpoint dir: checkpoints/limbic_lstm_v10
+  Dashboard: logs/dashboard_data.js
+
+  [  6.7%]   133,336 / 2,000,000 steps
+  [ 13.3%]   266,668 / 2,000,000 steps

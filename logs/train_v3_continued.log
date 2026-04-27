@@ -1,0 +1,11 @@
+nohup: ignoring input
+Resuming from checkpoints/limbic_v3/limbic_v3_final.zip
+Training PPO  —  700,000 steps  seed=42
+  [ 43.0%]   301,057 / 700,000 steps
+  [ 43.0%]   301,058 / 700,000 steps
+  [ 60.0%]   420,000 / 700,000 steps
+  [ 80.0%]   560,000 / 700,000 steps
+  [100.0%]   700,000 / 700,000 steps
+  [120.0%]   840,000 / 700,000 steps
+  [140.0%]   980,000 / 700,000 steps
+Done. Saved → checkpoints/limbic_v3/limbic_v3_final.zip

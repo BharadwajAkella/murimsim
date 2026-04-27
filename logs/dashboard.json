@@ -1,0 +1,51 @@
+{
+  "run_name": "limbic_lstm_v2_final (1.5M steps)",
+  "generated_at": "2026-03-27T16:43:13Z",
+  "elapsed_seconds": 3,
+  "timestep": 1500000,
+  "total_timesteps": 1500000,
+  "progress_pct": 100.0,
+  "n_episodes_sampled": 50,
+  "rolling_window": 50,
+  "avg_lifespan": 52.7,
+  "lifespan_std": 17.2,
+  "lifespan_min": 30,
+  "lifespan_max": 106,
+  "avg_f_metric": 0.0632,
+  "avg_action_rates": {
+    "eat": 0.2636,
+    "rest": 0.2096,
+    "gather": 0.1265,
+    "move_w": 0.1158,
+    "move_n": 0.0949,
+    "move_e": 0.0695,
+    "move_s": 0.068,
+    "attack": 0.027,
+    "defend": 0.0251
+  },
+  "avg_hazard_approaches": {
+    "poison": 7.36,
+    "flame": 8.34
+  },
+  "avg_hazard_flees": {
+    "poison": 8.22,
+    "flame": 8.1
+  },
+  "hazard_approach_ratio": {
+    "poison": 0.472,
+    "flame": 0.507
+  },
+  "avg_resistance_gained": {
+    "poison": 0.0,
+    "flame": 0.0,
+    "qi_drain": 0.0
+  },
+  "north_bias_pct": 27.3,
+  "history": [
+    {
+      "timestep": 1500000,
+      "f_metric": 0.0632,
+      "avg_lifespan": 52.7
+    }
+  ]
+}

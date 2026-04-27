@@ -1,0 +1,19 @@
+nohup: ignoring input
+Warm-starting shared trunk from checkpoints/limbic_v3/limbic_v3_final.zip
+  Transferred 8/20 layers (LSTM gates are new — initialised randomly).
+Training RecurrentPPO (LSTM)  —  1,500,000 steps  4 envs  10 agents/env  lstm_hidden=64  seed=42
+  Combat curriculum: prob 0.2→1.0 over first 300,000 steps
+  Checkpoint dir: checkpoints/limbic_lstm_v2
+
+  [ 10.0%]   150,000 / 1,500,000 steps
+  [ 20.0%]   300,000 / 1,500,000 steps
+  [ 30.0%]   450,000 / 1,500,000 steps
+  [ 40.0%]   600,000 / 1,500,000 steps
+  [ 50.0%]   750,000 / 1,500,000 steps
+  [ 60.0%]   900,000 / 1,500,000 steps
+  [ 70.0%]  1,050,000 / 1,500,000 steps
+  [ 80.0%]  1,200,000 / 1,500,000 steps
+  [ 90.0%]  1,350,000 / 1,500,000 steps
+  [100.0%]  1,500,000 / 1,500,000 steps
+
+Done. Saved → checkpoints/limbic_lstm_v2/limbic_lstm_v2_final.zip

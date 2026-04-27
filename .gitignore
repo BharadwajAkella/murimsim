@@ -17,8 +17,7 @@ build/
 .eggs/
 
 # Generated output (reproducible — not committed)
-logs/
-checkpoints/
+
 
 # Jupyter
 .ipynb_checkpoints/

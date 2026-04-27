@@ -1,0 +1,548 @@
+// Auto-generated stage comparison data for MurimSim dashboard.
+window.STAGE_HISTORY = [
+  {
+    "id": "mlp_v1",
+    "label": "MLP v1",
+    "phase": "Phase 2",
+    "steps_trained": 300000,
+    "metric_unit": "ticks",
+    "avg_lifespan": 412.0,
+    "avg_strength": null,
+    "action_rates": {
+      "eat": 0.152,
+      "gather": 0.024,
+      "rest": 0.28,
+      "move": 0.544
+    },
+    "north_bias_pct": 44.7,
+    "gather_rate_pct": 2.4,
+    "eat_rate_pct": 15.2,
+    "defend_rate_pct": 0.0,
+    "f_metric": null,
+    "description": "First MLP policy (PPO). Basic survival: eat from ground, move randomly. Severe north-movement bias (44.7%) \u2014 agent learned to hug the north wall. Gather rate near zero because collecting to inventory was never rewarded.",
+    "changes": [
+      "Discrete(7) action space: move N/S/E/W, gather, eat, rest",
+      "5\u00d75 local grid obs (food, qi, materials, poison) + own stats",
+      "Simple alive bonus + hunger relief reward",
+      "No inventory shaping \u2014 gather was effectively unrewarded"
+    ]
+  },
+  {
+    "id": "mlp_v2",
+    "label": "MLP v2",
+    "phase": "Phase 2",
+    "steps_trained": 600000,
+    "metric_unit": "ticks",
+    "avg_lifespan": 489.0,
+    "avg_strength": null,
+    "action_rates": {
+      "eat": 0.18,
+      "gather": 0.03,
+      "rest": 0.26,
+      "move": 0.53
+    },
+    "north_bias_pct": 38.0,
+    "gather_rate_pct": 3.0,
+    "eat_rate_pct": 18.0,
+    "defend_rate_pct": 0.0,
+    "f_metric": null,
+    "description": "Extended MLP training. Longer training reduced north bias slightly and improved lifespan. Still no inventory reward so gather rate remained low.",
+    "changes": [
+      "Extended to 600k steps",
+      "Added exploration bonus (per new tile visited)",
+      "Slight improvement in lifespan and tile coverage"
+    ]
+  },
+  {
+    "id": "mlp_v3",
+    "label": "MLP v3",
+    "phase": "Phase 2/3",
+    "steps_trained": 1000000,
+    "metric_unit": "ticks",
+    "avg_lifespan": 534.6,
+    "avg_strength": null,
+    "action_rates": {
+      "eat": 0.152,
+      "gather": 0.024,
+      "rest": 0.28,
+      "move": 0.544
+    },
+    "north_bias_pct": 44.7,
+    "gather_rate_pct": 2.4,
+    "eat_rate_pct": 15.2,
+    "defend_rate_pct": 0.0,
+    "f_metric": null,
+    "description": "Best MLP baseline (1M steps). Highest lifespan of all MLP runs. North bias persisted \u2014 the MLP has no memory so it can't break directional habits once learned. Used as warm-start trunk for LSTM v1.",
+    "changes": [
+      "Multi-env training: 3 parallel world variants (poison-heavy, scarce, dense)",
+      "Domain randomization: food regen [50\u2013250 ticks], agent ticks [3\u20138]",
+      "Best MLP lifespan: 534.6 avg ticks",
+      "North bias problem identified (44.7%) \u2014 root cause: no memory"
+    ]
+  },
+  {
+    "id": "lstm_v1",
+    "label": "LSTM v1",
+    "phase": "Phase 4",
+    "steps_trained": 600000,
+    "metric_unit": "ticks",
+    "avg_lifespan": 441.4,
+    "avg_strength": null,
+    "action_rates": {
+      "eat": 0.354,
+      "gather": 0.201,
+      "rest": 0.18,
+      "move": 0.17,
+      "attack": 0.054,
+      "defend": 0.037
+    },
+    "north_bias_pct": 12.8,
+    "gather_rate_pct": 20.1,
+    "eat_rate_pct": 35.4,
+    "defend_rate_pct": 3.7,
+    "f_metric": null,
+    "description": "First recurrent policy (RecurrentPPO + MlpLstmPolicy, hidden=64). Warm-started from MLP v3 trunk. The LSTM memory gates transformed behavior: gather rate jumped 8\u00d7 and north bias nearly vanished. Lifespan dropped 17% \u2014 LSTM gates started random so memory destabilised the trunk initially. More training needed.",
+    "changes": [
+      "RecurrentPPO (sb3-contrib) replaces PPO",
+      "MlpLstmPolicy: LSTM hidden size 64, 1 layer",
+      "Warm-started from MLP v3 (8/20 layers transferred, LSTM gates random)",
+      "Action space extended to Discrete(9): +ATTACK, +DEFEND",
+      "North bias cured: 44.7% \u2192 12.8% \u2705",
+      "Gather rate: 2.4% \u2192 20.1% (+8\u00d7) \u2705"
+    ]
+  },
+  {
+    "id": "lstm_v2",
+    "label": "LSTM v2",
+    "phase": "Phase 5",
+    "steps_trained": 1500000,
+    "metric_unit": "ticks",
+    "avg_lifespan": 449.6,
+    "avg_strength": null,
+    "action_rates": {
+      "eat": 0.434,
+      "gather": 0.121,
+      "rest": 0.12,
+      "move": 0.25,
+      "attack": 0.054,
+      "defend": 0.087
+    },
+    "north_bias_pct": 1.9,
+    "gather_rate_pct": 12.1,
+    "eat_rate_pct": 43.4,
+    "defend_rate_pct": 8.7,
+    "f_metric": null,
+    "combat_eval": {
+      "avg_lifespan_steps": 52.7,
+      "gather_rate_pct": 12.6,
+      "eat_rate_pct": 26.4
+    },
+    "description": "Reward shaping added (1.5M steps). North bias nearly eliminated (1.9%). Combat behavior improved (defend 8.7%). But the starvation proximity penalty backfired: agents ate directly from ground to resolve hunger fast rather than gather to inventory. Gather rate dropped from 20% \u2192 12%.",
+    "changes": [
+      "Gather reward doubled: 0.05 \u2192 0.10",
+      "Potential-based inventory security: reward \u0394(inv_food / 5) \u00d7 0.12",
+      "Starvation proximity penalty: \u22120.08 \u00d7 (hunger \u2212 0.70) when starving",
+      "Survival-gated exploration: explore_bonus \u00d7 (1 \u2212 hunger)",
+      "Resistance gain reward: +0.50 \u00d7 \u0394(sum of resistances) [potential-based]",
+      "North bias: 44.7% \u2192 1.9% \u2705 | Defend: 3.7% \u2192 8.7% \u2705",
+      "BUG: starvation penalty + inv shaping fought each other \u26a0\ufe0f"
+    ]
+  },
+  {
+    "id": "lstm_v3",
+    "label": "LSTM v3",
+    "phase": "Phase 5 (fixed)",
+    "steps_trained": 1500000,
+    "metric_unit": "steps",
+    "avg_lifespan": 55.2,
+    "avg_strength": null,
+    "action_rates": {
+      "eat": 0.238,
+      "gather": 0.148,
+      "rest": 0.262,
+      "move_n": 0.145,
+      "move_w": 0.091,
+      "move_e": 0.045,
+      "move_s": 0.033,
+      "defend": 0.027,
+      "attack": 0.011
+    },
+    "north_bias_pct": null,
+    "gather_rate_pct": 14.8,
+    "eat_rate_pct": 23.8,
+    "defend_rate_pct": 2.7,
+    "f_metric": null,
+    "description": "Reward interaction bug fixed. Replaced starvation-proximity penalty with PENALTY_EMPTY_INV_FOOD_NEARBY: only fires when inv_food==0 AND food is nearby. Decouples hunger urgency from inventory-building. Result: gather rate recovered (+2.7pp vs v2), eat rate dropped from 43% \u2192 24%, rest increased showing less panic. Warm-started from LSTM v2 (all 20 layers).",
+    "changes": [
+      "REMOVED: PENALTY_STARVATION_APPROACH (caused eat-from-ground urgency)",
+      "ADDED: PENALTY_EMPTY_INV_FOOD_NEARBY = \u22120.06 when inv_food==0 and food nearby",
+      "Warm-started from LSTM v2 (20/20 layers transferred)",
+      "Per-agent credit assignment tracking added to info dict",
+      "Gather rate: 12.1% \u2192 14.8% \u2705 (recovering)",
+      "Eat rate: 43.4% \u2192 23.8% \u2705 (less panic eating)"
+    ]
+  },
+  {
+    "id": "lstm_v4",
+    "label": "LSTM v4",
+    "phase": "Phase 5 (strength priority)",
+    "steps_trained": 2000000,
+    "metric_unit": "steps",
+    "avg_lifespan": 73.9,
+    "avg_strength": null,
+    "action_rates": {
+      "eat": 0.339,
+      "gather": 0.165,
+      "move_w": 0.115,
+      "rest": 0.1,
+      "move_n": 0.093,
+      "defend": 0.073,
+      "attack": 0.065,
+      "move_e": 0.046,
+      "move_s": 0.033
+    },
+    "north_bias_pct": null,
+    "gather_rate_pct": 16.5,
+    "eat_rate_pct": 33.9,
+    "defend_rate_pct": 7.3,
+    "f_metric": null,
+    "description": "Strength becomes second priority after survival. Continuous per-step reward for sum(resistances) incentivises staying in high-resistance states, not just reaching them. Defend rate more than doubled vs v3 (2.7% \u2192 7.3%) \u2014 agents now stand and fight rather than flee. Lifespan improved significantly (55 \u2192 74 steps). Gather still below 20% target \u2014 remaining gap expected to close with environmental pressure in biome-specific training.",
+    "changes": [
+      "ADDED: REWARD_STRENGTH_SCALE = 0.008 \u00d7 sum(resistances) per step (continuous strength bonus)",
+      "RAISED: REWARD_FOOD_GATHERED_SCALE 0.10 \u2192 0.18 (gather = hunger-relief value)",
+      "TIGHTENED: PENALTY_EMPTY_INV_FOOD_NEARBY \u22120.06 \u2192 \u22120.08",
+      "F-metric: F_WEIGHT_STAT_GAIN 0.1 \u2192 0.3, F_WEIGHT_FOOD 0.3 \u2192 0.1",
+      "Defend 2.7% \u2192 7.3% \u2705 (strength incentive working)",
+      "Lifespan 55 \u2192 74 steps \u2705 (best survival yet)"
+    ]
+  },
+  {
+    "id": "lstm_v5",
+    "label": "LSTM v5",
+    "phase": "Phase 5 (group dynamics)",
+    "steps_trained": 2000000,
+    "metric_unit": "steps",
+    "avg_lifespan": 94.1,
+    "avg_strength": null,
+    "action_rates": null,
+    "north_bias_pct": null,
+    "gather_rate_pct": null,
+    "eat_rate_pct": null,
+    "defend_rate_pct": 5.1,
+    "f_metric": null,
+    "description": "Phase 5: sociability personality trait added [0,1]. New actions COLLABORATE (12) and WALK_AWAY (13). Social agents form groups bilaterally \u2014 group members never attack each other. Obs size expanded 234 \u2192 261 (agent sociability channel + own sociability + in_group flag). Training from scratch due to obs architecture change. Lifespan jumped 94.1 (best ever \u2014 27% over v4 73.9). Attack rate dropped 6.8% \u2192 2.4% (agents prefer collaboration over combat).",
+    "changes": [
+      "ADDED: Agent.sociability trait [0,1] \u2014 sampled at spawn, visible in obs",
+      "ADDED: Action.COLLABORATE (12) \u2014 forms group with adjacent social agent",
+      "ADDED: Action.WALK_AWAY (13) \u2014 moves one step away from nearest agent",
+      "ADDED: Group tracking \u2014 list[frozenset[int]], pruned on death",
+      "CHANGED: Obs size 234 \u2192 261 (agent ch 3=sociability, stats+sociability+in_group)",
+      "CHANGED: Heuristic combat respects sociability \u2014 social agents don't attack",
+      "Lifespan 73.9 \u2192 94.1 steps \u2705 (best ever)",
+      "Attack rate: 6.8% \u2192 2.4% \u2705 (agents prefer avoiding conflict)",
+      "collaborate: 3.2%, walk_away: 4.7% (new actions being used)"
+    ]
+  },
+  {
+    "id": "lstm_v6",
+    "label": "LSTM v6",
+    "phase": "Phase 5 (group combat mechanics)",
+    "steps_trained": 2000000,
+    "metric_unit": "steps",
+    "avg_lifespan": 93.7,
+    "avg_strength": null,
+    "action_rates": null,
+    "north_bias_pct": null,
+    "gather_rate_pct": 20.8,
+    "eat_rate_pct": 22.3,
+    "defend_rate_pct": 1.5,
+    "f_metric": null,
+    "description": "Phase 5b: proximity-based group combat. Flanking attack bonus (+20% per adjacent group ally). Damage split across shielding group members. Per-tick group cohesion reward (+0.02 per nearby group member within 3 tiles). Warm-started from v5. Collaborate rate rose 3.2% \u2192 4.6%; attack fell further to 1.7%. Walk_away dropped 4.7% \u2192 1.5% \u2014 agents now prefer staying close to allies rather than fleeing. Gather rate jumped to 20.8% (best since LSTM v1).",
+    "changes": [
+      "ADDED: Flanking attack bonus \u2014 +20% damage per group ally adjacent to target",
+      "ADDED: Damage split \u2014 incoming damage divided equally across focal + adjacent group allies",
+      "ADDED: Group cohesion reward \u2014 +0.02/tick per live group member within 3 tiles",
+      "WARM-START: from lstm_v5_final (all 20 layers transferred, same obs size)",
+      "Collaborate: 3.2% \u2192 4.6% \u2705 (group formation increasing)",
+      "Attack: 2.4% \u2192 1.7% \u2705 (less combat overall)",
+      "Walk_away: 4.7% \u2192 1.5% \u2014 agents stay near allies instead of fleeing",
+      "Gather: 20.8% \u2705 (best since LSTM v1 at 20.1%)"
+    ]
+  },
+  {
+    "id": "lstm_v7",
+    "label": "LSTM v7",
+    "phase": "Phase 5 (group combat v2)",
+    "steps_trained": 600000,
+    "metric_unit": "steps",
+    "avg_lifespan": 85.5,
+    "avg_strength": 0.557,
+    "action_rates": null,
+    "north_bias_pct": null,
+    "gather_rate_pct": 16.3,
+    "eat_rate_pct": 21.5,
+    "defend_rate_pct": 1.7,
+    "f_metric": null,
+    "description": "Phase 5c: 8-directional combat (Chebyshev range), coordinated attack reward (+0.05 when flanking ally present), Chebyshev cohesion range. Damage split removed. Only ran 600K steps (config bug \u2014 training.yaml was 600K not 2M). Lifespan peaked at 105.1 at step 180K then regressed under full combat. Collaborate jumped to 7.1% (best ever) but walk_away spiked to 6.3%. Cut off mid-recovery.",
+    "changes": [
+      "Combat range: Manhattan \u2192 Chebyshev \u22641 (diagonals now valid for attack and flanking)",
+      "Damage split removed \u2014 flanking attack bonus (+20%) is sole group advantage",
+      "ADDED: Coordinated attack reward \u2014 +0.05 when focal attacks with flanking group ally",
+      "Cohesion range: Manhattan \u2192 Chebyshev for consistency",
+      "WARM-START: from lstm_v6_final (same obs size 261)",
+      "Collaborate: 4.6% \u2192 7.1% \u2705 (best ever)",
+      "Walk_away: 1.5% \u2192 6.3% \u26a0\ufe0f (agents fleeing under full combat pressure)",
+      "Gather: 20.8% \u2192 16.3% \u26a0\ufe0f (regression \u2014 hunger pressure)"
+    ]
+  },
+  {
+    "id": "lstm_v8",
+    "label": "LSTM v8",
+    "phase": "Phase 5 (food sharing + reciprocity)",
+    "steps_trained": 2000000,
+    "metric_unit": "steps",
+    "avg_lifespan": 105.7,
+    "avg_strength": 0.568,
+    "action_rates": null,
+    "north_bias_pct": null,
+    "gather_rate_pct": 15.2,
+    "eat_rate_pct": 31.9,
+    "defend_rate_pct": 0.2,
+    "f_metric": null,
+    "description": "Phase 5d: food sharing with reciprocity. Group allies share food when a member is critically hungry (hunger>0.85). Base probability 50%; boosted to 85% if recipient helped sharer in last 100 steps. Coordinated attack reward boosted 0.05\u21920.10. Lifespan peaked at 115.0 (step 1.74M) \u2014 new all-time record. Final 105.7 is best sustained performance. Eat rate surged to 31.9% confirming food sharing is active.",
+    "changes": [
+      "ADDED: Food sharing \u2014 group ally shares 1 food unit when member hunger > 0.85",
+      "ADDED: Reciprocity memory \u2014 base 50%, boosted to 85% if helped recently (window=100 steps)",
+      "ADDED: REWARD_FOOD_SHARE = 0.04 for focal when sharing/receiving",
+      "FIX: training.yaml total_timesteps 600K \u2192 2M",
+      "BOOST: REWARD_COORDINATED_ATTACK 0.05 \u2192 0.10",
+      "WARM-START: from lstm_v7_final (same obs size 261)",
+      "Lifespan: 85.5 \u2192 105.7 \u2705 (+20.2, best ever sustained)",
+      "Peak lifespan: 115.0 at step 1.74M \u2014 new all-time record",
+      "Eat rate: 21.5% \u2192 31.9% \u2705 (food sharing active)",
+      "Attack: 1.7% \u2192 0.3% \u2705 (agents prefer cooperation)"
+    ]
+  },
+  {
+    "id": "lstm_v9",
+    "label": "LSTM v9",
+    "phase": "Phase 5 (stash system)",
+    "steps_trained": 2000000,
+    "metric_unit": "steps",
+    "avg_lifespan": 54.6,
+    "avg_strength": null,
+    "action_rates": {
+      "deposit": 0.005,
+      "walk_away": 0.112
+    },
+    "gather_rate_pct": null,
+    "eat_rate_pct": null,
+    "train_rate_pct": null,
+    "deposit_rate_pct": 0.5,
+    "f_metric": null,
+    "description": "Added shared stash system + proximity reward. Deposit rate: 0.5% (vs v8 3.1%). walk_away 11.2% emerged \u2014 possible stash avoidance artifact.",
+    "changes": [
+      "ADDED: shared stash system + stash proximity reward",
+      "Lifespan: 105.7 \u2192 54.6 (regression \u2014 anti-cooperative stash reward bug)"
+    ]
+  },
+  {
+    "id": "lstm_v10",
+    "label": "LSTM v10",
+    "phase": "Phase 5 (stash fix)",
+    "steps_trained": 2000000,
+    "metric_unit": "steps",
+    "avg_lifespan": null,
+    "avg_strength": null,
+    "action_rates": null,
+    "gather_rate_pct": null,
+    "eat_rate_pct": null,
+    "train_rate_pct": null,
+    "deposit_rate_pct": null,
+    "f_metric": null,
+    "description": "Anti-cooperative stash proximity reward fixed. Warm-start from v9.",
+    "changes": [
+      "FIX: anti-cooperative stash proximity reward regression",
+      "WARM-START: from v9 final"
+    ]
+  },
+  {
+    "id": "lstm_v11",
+    "label": "LSTM v11",
+    "phase": "Phase 5 (hazard unify + TRAIN action)",
+    "steps_trained": 2000000,
+    "metric_unit": "steps",
+    "avg_lifespan": 85.6,
+    "avg_strength": null,
+    "avg_power": 0.3,
+    "action_rates": null,
+    "gather_rate_pct": null,
+    "eat_rate_pct": null,
+    "train_rate_pct": null,
+    "deposit_rate_pct": null,
+    "f_metric": null,
+    "description": "Added TRAIN action + qi cultivation system. Hazard code paths unified. Spike to lifespan=151 at step 1.87M. Final: 85.6.",
+    "changes": [
+      "ADDED: TRAIN action \u2014 qi cultivation on qi tiles",
+      "ADDED: qi field overlay (10 tiles)",
+      "ADDED: REWARD_TRAIN_STRENGTH_SCALE = 2.0",
+      "REFACTOR: unified hazard apply_hazard()",
+      "Peak lifespan 151 at step 1.87M (best spike ever)",
+      "Final lifespan: 85.6"
+    ]
+  },
+  {
+    "id": "lstm_v12",
+    "label": "LSTM v12",
+    "phase": "Phase 5 (reproduction + health overhaul)",
+    "steps_trained": 1000000,
+    "metric_unit": "steps",
+    "avg_lifespan": 83.7,
+    "avg_strength": null,
+    "avg_power": 0.264,
+    "action_rates": {
+      "eat": 0.341
+    },
+    "gather_rate_pct": null,
+    "eat_rate_pct": 34.1,
+    "train_rate_pct": 7.1,
+    "deposit_rate_pct": null,
+    "f_metric": null,
+    "description": "Health overhaul (qi regen), reproduction traits, journal. TRAIN 7.1%. EAT 34.1% \u2014 eat-farming pattern: 2.2x overconsumption leading to starvation.",
+    "changes": [
+      "ADDED: qi-based health regen",
+      "ADDED: reproduction traits",
+      "ADDED: journal / coaching.md milestone",
+      "TRAIN rate: 7.1% (first meaningful cultivation)",
+      "EAT rate: 34.1% \u2014 eat-farming artifact",
+      "Lifespan: 83.7"
+    ]
+  },
+  {
+    "id": "lstm_v13",
+    "label": "LSTM v13",
+    "phase": "Phase 6 (cultivation focus)",
+    "steps_trained": 1500000,
+    "metric_unit": "steps",
+    "avg_lifespan": 170.6,
+    "avg_strength": null,
+    "action_rates": null,
+    "gather_rate_pct": null,
+    "eat_rate_pct": null,
+    "train_rate_pct": 3.4,
+    "deposit_rate_pct": null,
+    "f_metric": null,
+    "description": "TRAIN_HUNGER_MULTIPLIER=1.5 added to create stash-near-training pressure. Backfired \u2014 TRAIN 7.1\u21923.4%. Lifespan record 170.6. Food randomization added.",
+    "changes": [
+      "ADDED: TRAIN_HUNGER_MULTIPLIER = 1.5 (backfired, suppressed TRAIN)",
+      "ADDED: food_spawn_density domain randomization",
+      "ADDED: death cause tracking (starvation/combat/hazard)",
+      "TRAIN rate: 3.4% (regression vs v12 7.1%)",
+      "Lifespan: 170.6 \u2705 (best ever)"
+    ]
+  },
+  {
+    "id": "lstm_v14",
+    "label": "LSTM v14",
+    "phase": "Phase 6 (cultivation fix)",
+    "steps_trained": 1500000,
+    "metric_unit": "steps",
+    "avg_lifespan": 158.9,
+    "avg_strength": null,
+    "action_rates": {
+      "gather": 0.258,
+      "train": 0.147,
+      "deposit": 0.007
+    },
+    "gather_rate_pct": 25.8,
+    "eat_rate_pct": null,
+    "train_rate_pct": 14.7,
+    "deposit_rate_pct": 0.7,
+    "f_metric": null,
+    "description": "Fixed TRAIN suppression: removed TRAIN_HUNGER_MULTIPLIER, raised REWARD_TRAIN_STRENGTH_SCALE 2\u219210. TRAIN: 3.4\u219214.7% \u2705 (best ever). Lifespan slight dip acceptable.",
+    "changes": [
+      "FIX: removed TRAIN_HUNGER_MULTIPLIER (was suppressing TRAIN)",
+      "BOOST: REWARD_TRAIN_STRENGTH_SCALE 2 \u2192 10",
+      "BOOST: REWARD_RESISTANCE_GAIN_SCALE 1 \u2192 5",
+      "TRAIN rate: 14.7% \u2705 (best ever, was 3.4%)",
+      "DEPOSIT rate: 0.7% (unchanged)",
+      "Lifespan: 158.9 (slight dip from 170.6, acceptable)",
+      "WARM-START: from v13 final"
+    ]
+  },
+  {
+    "id": "lstm_v15",
+    "label": "LSTM v15",
+    "phase": "Phase 6 (stash emergence)",
+    "steps_trained": 1500000,
+    "metric_unit": "steps",
+    "avg_lifespan": 105.8,
+    "avg_strength": 0.4679,
+    "avg_power": 0.2672,
+    "action_rates": {
+      "gather": 0.165,
+      "train": 0.174,
+      "deposit": 0.019,
+      "eat": 0.232,
+      "attack": 0.06,
+      "collaborate": 0.042
+    },
+    "gather_rate_pct": 16.5,
+    "eat_rate_pct": 23.2,
+    "train_rate_pct": 17.4,
+    "deposit_rate_pct": 1.9,
+    "avg_deaths_by_cause": {
+      "starvation": 12.935
+    },
+    "f_metric": null,
+    "description": "Lowered food_spawn_density floor 0.03\u21920.01 to force stash use. TRAIN 17.4% \u2705 (best ever). DEPOSIT 1.9% (2.7\u00d7 v14). All deaths are starvation \u2014 zero combat deaths. Lifespan dip expected from food scarcity.",
+    "changes": [
+      "CHANGE: food_spawn_density floor 0.03 \u2192 0.01",
+      "TRAIN rate: 17.4% \u2705 (best ever)",
+      "DEPOSIT rate: 1.9% (2.7\u00d7 v14's 0.7%)",
+      "Deaths: 12.9/ep \u2014 all starvation, zero combat",
+      "Lifespan: 105.8 (dip expected from food scarcity)",
+      "First run with death cause tracking active",
+      "WARM-START: from v14 final"
+    ]
+  },
+  {
+    "id": "lstm_v16_seed42",
+    "label": "v16 \u2014 combat audit + deposit fix",
+    "phase": "auto",
+    "steps_trained": 1501184,
+    "metric_unit": "steps",
+    "avg_lifespan": 219.8,
+    "avg_strength": 0.5775,
+    "avg_resistance": 0.213,
+    "avg_power": 0.5775,
+    "action_rates": {
+      "train": 0.3158,
+      "eat": 0.1592,
+      "gather": 0.1467,
+      "attack": 0.0517,
+      "withdraw": 0.0513,
+      "deposit": 0.0507,
+      "walk_away": 0.0493,
+      "move_s": 0.0315,
+      "collaborate": 0.0307,
+      "move_e": 0.0248,
+      "move_w": 0.0247,
+      "steal": 0.0195,
+      "rest": 0.0185,
+      "move_n": 0.014,
+      "defend": 0.0117
+    },
+    "gather_rate_pct": 14.7,
+    "eat_rate_pct": 15.9,
+    "train_rate_pct": 31.6,
+    "deposit_rate_pct": 5.1,
+    "avg_deposits": 28.3,
+    "avg_deaths_by_cause": {
+      "starvation": 92.0
+    },
+    "f_metric": null,
+    "highlight": "latest",
+    "eval_note": "post-training eval, 3 seeds x 2000 steps, full-team inference"
+  }
+];
