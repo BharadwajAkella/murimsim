@@ -441,3 +441,324 @@ def test_basic_strike_never_consumes_qi() -> None:
     assert attacker.inventory.qi == 5
     assert env._ep_qi_strikes_used == 0
     assert env._ep_qi_spent_in_combat == 0
+
+
+# ---------------------------------------------------------------------------
+# v18: action space + masking
+# ---------------------------------------------------------------------------
+
+def test_action_space_size_is_17() -> None:
+    """v18 expanded discrete action space from 15 (Phase 6) to 17 (Phase 6 + qi)."""
+    from murimsim.actions import N_ACTIONS_PHASE6_QI
+    env = _make_combat_env()
+    env.reset(seed=0)
+    assert env.action_space.n == 17 == N_ACTIONS_PHASE6_QI
+
+
+def test_mask_gates_attack_qi_when_no_qi() -> None:
+    """ATTACK_QI must be masked when attacker has 0 qi, even with adjacent target."""
+    env = _make_combat_env(n_agents=2)
+    env._global_step_count = 1_000_000  # past curriculum ramp
+    env.reset(seed=0)
+    focal = env._agents[env._focal_idx]
+    other = env._agents[1 - env._focal_idx]
+    focal.position = (5, 5)
+    other.position = (5, 6)  # adjacent
+    focal.inventory.qi = 0
+    focal.inventory.food = 0  # avoid eat-mask interference
+
+    mask = env.action_masks()
+    assert not mask[Action.ATTACK_QI],    "ATTACK_QI should be masked when qi=0"
+    assert not mask[Action.ATTACK_BURST], "ATTACK_BURST should be masked when qi<3"
+    assert mask[Action.ATTACK],           "Basic ATTACK should still be available"
+
+
+def test_mask_gates_attack_burst_when_qi_insufficient() -> None:
+    """ATTACK_BURST requires 3 qi; ATTACK_QI requires 1. With 2 qi: only QI available."""
+    env = _make_combat_env(n_agents=2)
+    env._global_step_count = 1_000_000
+    env.reset(seed=0)
+    focal = env._agents[env._focal_idx]
+    other = env._agents[1 - env._focal_idx]
+    focal.position = (5, 5)
+    other.position = (5, 6)
+    focal.inventory.qi = 2
+    focal.inventory.food = 0
+
+    mask = env.action_masks()
+    assert mask[Action.ATTACK]
+    assert mask[Action.ATTACK_QI],        "ATTACK_QI should be available with qi=2"
+    assert not mask[Action.ATTACK_BURST], "ATTACK_BURST should be masked with qi=2 (<3)"
+
+
+def test_mask_gates_all_attacks_when_no_target() -> None:
+    """All ATTACK_* tiers masked when no adjacent agent or monster, regardless of qi."""
+    env = _make_combat_env(n_agents=2)
+    env._global_step_count = 1_000_000
+    env.reset(seed=0)
+    focal = env._agents[env._focal_idx]
+    other = env._agents[1 - env._focal_idx]
+    focal.position = (0, 0)
+    other.position = (10, 10)  # far away
+    # Move boss away too
+    if env._monsters._monsters:
+        env._monsters._monsters[0].position = (15, 15)
+    focal.inventory.qi = 10  # plenty of qi
+
+    mask = env.action_masks()
+    assert not mask[Action.ATTACK]
+    assert not mask[Action.ATTACK_QI]
+    assert not mask[Action.ATTACK_BURST]
+
+
+def test_curriculum_gates_all_attack_tiers() -> None:
+    """When combat_prob ramp is incomplete, ALL three attack tiers must be gated together."""
+    # Use a long ramp and an early step count → combat_prob < 1.0 → some rolls fall through
+    env = _make_combat_env(n_agents=2, ramp_steps=1_000_000)
+    env._global_step_count = 0  # very early → combat_prob = CURRICULUM_START_PROB (~0.05)
+    env.reset(seed=0)
+    focal = env._agents[env._focal_idx]
+    focal.inventory.qi = 10
+    focal.inventory.food = 0
+
+    # Sample many masks — at least one should have all attacks masked together
+    saw_all_three_masked = False
+    for _ in range(200):
+        mask = env.action_masks()
+        if not mask[Action.ATTACK] and not mask[Action.ATTACK_QI] and not mask[Action.ATTACK_BURST]:
+            saw_all_three_masked = True
+            break
+    assert saw_all_three_masked, "Curriculum should occasionally gate all three attack tiers in lockstep"
+
+
+# ---------------------------------------------------------------------------
+# v18: end-to-end behavioral tests via env.step
+# ---------------------------------------------------------------------------
+
+def _setup_focal_vs_boss(qi: int, focal_strength: float = 0.5) -> tuple[CombatEnv, Agent]:
+    """Place focal adjacent to the boss with controlled qi + strength. Returns (env, focal)."""
+    env = _make_combat_env(n_agents=10)
+    env._global_step_count = 1_000_000  # past curriculum ramp
+    env.reset(seed=42)
+    # Need an env with the boss enabled. _make_combat_env doesn't pass enable_boss.
+    # Force-spawn a boss for this test.
+    if not env._monsters._monsters:
+        env._monsters.spawn_boss((0, 0))
+    focal = env._agents[env._focal_idx]
+    focal.position = (5, 5)
+    focal.strength = focal_strength
+    focal.inventory.qi = qi
+    focal.inventory.food = 5  # avoid critical-eat redirect
+    focal.health = 1.0
+    env._monsters._monsters[0].position = (5, 6)  # adjacent to focal
+    return env, focal
+
+
+def test_env_step_attack_qi_consumes_one_qi_and_damages_boss() -> None:
+    """End-to-end: env.step(ATTACK_QI) deducts 1 qi, damages boss, increments telemetry."""
+    env, focal = _setup_focal_vs_boss(qi=5, focal_strength=0.5)
+    boss = env._monsters._monsters[0]
+    boss_hp_before = boss.health
+    qi_before = focal.inventory.qi
+
+    env.step(Action.ATTACK_QI.value)
+
+    assert focal.inventory.qi == qi_before - 1, f"Expected qi {qi_before-1}, got {focal.inventory.qi}"
+    assert boss.health < boss_hp_before, f"Boss HP did not drop: before={boss_hp_before}, after={boss.health}"
+    assert env._ep_qi_strikes_used == 1
+    assert env._ep_qi_spent_in_combat == 1
+    assert env._ep_burst_strikes_used == 0
+
+
+def test_env_step_attack_burst_consumes_three_qi() -> None:
+    """End-to-end: env.step(ATTACK_BURST) deducts 3 qi when affordable."""
+    env, focal = _setup_focal_vs_boss(qi=5, focal_strength=0.5)
+    qi_before = focal.inventory.qi
+
+    env.step(Action.ATTACK_BURST.value)
+
+    assert focal.inventory.qi == qi_before - 3
+    assert env._ep_burst_strikes_used == 1
+    assert env._ep_qi_spent_in_combat == 3
+
+
+def test_env_step_attack_burst_downgrades_to_qi_when_insufficient() -> None:
+    """env.step(ATTACK_BURST) with 2 qi: downgrades to QI (spends 1, NOT 0)."""
+    env, focal = _setup_focal_vs_boss(qi=2, focal_strength=0.5)
+
+    env.step(Action.ATTACK_BURST.value)
+
+    assert focal.inventory.qi == 1, f"Should downgrade BURST→QI, leaving 1 qi; got {focal.inventory.qi}"
+    assert env._ep_qi_strikes_used == 1
+    assert env._ep_burst_strikes_used == 0
+
+
+def test_qi_not_consumed_on_whiff() -> None:
+    """If ATTACK_QI hits no target (no adjacent monster/agent), qi must NOT be consumed.
+
+    Critical: a misfired strike silently draining the resource pool would teach
+    the policy to avoid ATTACK_QI even when it's the right move.
+    """
+    env = _make_combat_env(n_agents=2)
+    env._global_step_count = 1_000_000
+    env.reset(seed=0)
+    focal = env._agents[env._focal_idx]
+    other = env._agents[1 - env._focal_idx]
+    focal.position = (0, 0)
+    other.position = (10, 10)  # far
+    if env._monsters._monsters:
+        env._monsters._monsters[0].position = (15, 15)  # far
+    focal.inventory.qi = 5
+    focal.inventory.food = 5
+
+    env.step(Action.ATTACK_QI.value)
+
+    assert focal.inventory.qi == 5, f"Whiffed ATTACK_QI should not consume qi; got {focal.inventory.qi}"
+    assert env._ep_qi_strikes_used == 0
+    assert env._ep_qi_spent_in_combat == 0
+
+
+def test_telemetry_surfaces_in_info_at_episode_end() -> None:
+    """Per-episode qi-strike counters must appear in info dict on terminal step."""
+    env, focal = _setup_focal_vs_boss(qi=4, focal_strength=0.5)
+    env.step(Action.ATTACK_QI.value)
+    env.step(Action.ATTACK_BURST.value)
+
+    expected_qi    = env._ep_qi_strikes_used
+    expected_burst = env._ep_burst_strikes_used
+    expected_spent = env._ep_qi_spent_in_combat
+
+    # focal_idx rotates after each step; kill the *current* focal so step's
+    # `terminated = not focal.alive` check fires.
+    current_focal = env._agents[env._focal_idx]
+    current_focal.health = 0.0
+    current_focal._check_death("test")
+    obs, r, term, trunc, info = env.step(Action.REST.value)
+
+    assert term, "Episode should have terminated after focal death"
+    assert "ep_qi_strikes_used" in info, f"Missing ep_qi_strikes_used in info: keys={list(info.keys())}"
+    assert "ep_burst_strikes_used" in info
+    assert "ep_qi_spent_in_combat" in info
+    assert info["ep_qi_strikes_used"]    == expected_qi
+    assert info["ep_burst_strikes_used"] == expected_burst
+    assert info["ep_qi_spent_in_combat"] == expected_spent
+
+
+# ---------------------------------------------------------------------------
+# v18: damage clamping + DEFEND interaction with high-tier strikes
+# ---------------------------------------------------------------------------
+
+def test_burst_damage_respects_max_damage_clamp() -> None:
+    """Even at strength=1.0, BURST damage is clamped to COMBAT_MAX_DAMAGE."""
+    env = _make_combat_env()
+    env.reset(seed=0)
+    attacker = _make_agent(strength=1.0)
+    defender = _make_agent(strength=0.5)
+
+    dmg_burst = env._combat_damage(attacker, defender, is_defending=False, tier=STRIKE_BURST)
+    expected_uncapped = (1.0 + STRIKE_BURST.bonus) * COMBAT_ATTACKER_SCALE  # (1 + 0.7) * 0.5 = 0.85
+    assert dmg_burst <= COMBAT_MAX_DAMAGE, f"Burst {dmg_burst} exceeds clamp {COMBAT_MAX_DAMAGE}"
+    assert abs(dmg_burst - min(expected_uncapped, COMBAT_MAX_DAMAGE)) < 1e-6
+
+
+def test_defend_reduces_burst_damage_multiplicatively() -> None:
+    """DEFEND's multiplicative reduction must apply AFTER tier bonus, not before."""
+    env = _make_combat_env()
+    env.reset(seed=0)
+    attacker = _make_agent(strength=0.8)
+    defender = _make_agent(strength=0.5)
+
+    burst_open    = env._combat_damage(attacker, defender, is_defending=False, tier=STRIKE_BURST)
+    burst_blocked = env._combat_damage(attacker, defender, is_defending=True,  tier=STRIKE_BURST)
+    assert burst_blocked < burst_open, f"DEFEND must reduce burst dmg: open={burst_open}, blocked={burst_blocked}"
+    expected = burst_open * max(0.0, 1.0 - defender.defense_power)
+    assert abs(burst_blocked - expected) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# v18: combat-focus fallback prefers highest affordable tier
+# ---------------------------------------------------------------------------
+
+def test_combat_focus_fallback_prefers_burst_when_qi_rich() -> None:
+    """When in-combat fallback fires AND attacker has 3+ qi, return ATTACK_BURST."""
+    env = _make_combat_env(n_agents=2)
+    env.reset(seed=0)
+    agent = env._agents[env._focal_idx]
+    other = env._agents[1 - env._focal_idx]
+    agent.position = (5, 5)
+    other.position = (5, 6)  # adjacent target
+    agent.inventory.food = 5  # avoid critical-eat path
+    agent.inventory.qi = 5
+    agent.health = 1.0
+
+    fallback = env._combat_focus_fallback(agent)
+    assert fallback == Action.ATTACK_BURST, f"Expected ATTACK_BURST with qi=5, got {fallback.name}"
+
+
+def test_combat_focus_fallback_uses_qi_when_2_qi() -> None:
+    """qi=2 → can't afford BURST(3), should pick ATTACK_QI(1)."""
+    env = _make_combat_env(n_agents=2)
+    env.reset(seed=0)
+    agent = env._agents[env._focal_idx]
+    other = env._agents[1 - env._focal_idx]
+    agent.position = (5, 5)
+    other.position = (5, 6)
+    agent.inventory.food = 5
+    agent.inventory.qi = 2
+    agent.health = 1.0
+
+    fallback = env._combat_focus_fallback(agent)
+    assert fallback == Action.ATTACK_QI, f"Expected ATTACK_QI with qi=2, got {fallback.name}"
+
+
+def test_combat_focus_fallback_falls_back_to_basic_when_no_qi() -> None:
+    """qi=0 → must return basic ATTACK."""
+    env = _make_combat_env(n_agents=2)
+    env.reset(seed=0)
+    agent = env._agents[env._focal_idx]
+    other = env._agents[1 - env._focal_idx]
+    agent.position = (5, 5)
+    other.position = (5, 6)
+    agent.inventory.food = 5
+    agent.inventory.qi = 0
+    agent.health = 1.0
+
+    fallback = env._combat_focus_fallback(agent)
+    assert fallback == Action.ATTACK, f"Expected basic ATTACK with qi=0, got {fallback.name}"
+
+
+# ---------------------------------------------------------------------------
+# v18: heuristic (non-focal) agents auto-spend qi against boss
+# ---------------------------------------------------------------------------
+
+def test_heuristic_agent_spends_qi_attacking_boss() -> None:
+    """Non-focal agent adjacent to boss with qi should auto-spend 1 qi via STRIKE_QI."""
+    env = _make_combat_env(n_agents=10)
+    env._global_step_count = 1_000_000
+    env.reset(seed=42)
+    if not env._monsters._monsters:
+        env._monsters.spawn_boss((0, 0))
+    boss = env._monsters._monsters[0]
+    boss.position = (5, 5)
+
+    # Pick a non-focal agent and put them adjacent to boss with qi
+    non_focal_idx = (env._focal_idx + 1) % env._n_agents
+    helper = env._agents[non_focal_idx]
+    helper.position = (5, 6)  # adjacent
+    helper.inventory.qi = 3
+    helper.inventory.food = 5
+    helper.alive = True
+    helper.health = 1.0
+    helper.strength = 0.5
+
+    qi_before = helper.inventory.qi
+    boss_hp_before = boss.health
+    # Trigger any focal action — the per-step heuristic loop processes non-focal agents
+    env.step(Action.REST.value)
+
+    # Helper should have spent 1 qi on STRIKE_QI against the boss
+    assert helper.inventory.qi <= qi_before - 1, (
+        f"Heuristic helper should auto-spend ≥1 qi attacking boss; before={qi_before}, after={helper.inventory.qi}"
+    )
+    assert boss.health < boss_hp_before, "Boss should have taken damage from heuristic helper"
+    assert env._ep_qi_strikes_used >= 1
