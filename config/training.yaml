@@ -1,4 +1,9 @@
 # RL training configuration — Phase 2
+#
+# Devbox capacity note (2026-04-28): this is a 16-core / 31GB box with no GPU.
+# Default n_envs=4 underutilises it (~half capacity). For future runs, prefer
+# n_envs=8 (≈2× throughput, leaves headroom for OS + occasional eval).
+# Bumping batch_size proportionally (e.g. 64→128) keeps gradient stability.
 training:
   total_timesteps: 500_000
   checkpoint_dir: checkpoints/limbic_v1
