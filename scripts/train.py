@@ -105,6 +105,8 @@ def main() -> None:
     while len(variant_cfgs) < n_envs:
         variant_cfgs.append(base_cfg)
 
+    enable_boss = bool(lstm_cfg.get("enable_boss", False))
+
     def make_env(cfg: dict, seed_offset: int, n_agents: int, ramp_steps: int):
         def _init() -> CombatEnv:
             return CombatEnv(
@@ -112,6 +114,7 @@ def main() -> None:
                 n_agents=n_agents,
                 seed=args.seed + seed_offset,
                 curriculum_ramp_steps=ramp_steps,
+                enable_boss=enable_boss,
             )
         return _init
 

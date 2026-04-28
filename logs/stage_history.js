@@ -542,7 +542,47 @@ window.STAGE_HISTORY = [
       "starvation": 92.0
     },
     "f_metric": null,
-    "highlight": "latest",
     "eval_note": "post-training eval, 3 seeds x 2000 steps, full-team inference"
+  },
+  {
+    "id": "lstm_v17_smoke_seed42",
+    "label": "lstm_v17_smoke seed=42",
+    "phase": "auto",
+    "steps_trained": 2048,
+    "metric_unit": "steps",
+    "avg_lifespan": 19.18095238095238,
+    "avg_strength": 0.44224247418334345,
+    "avg_power": 0.2569582254460866,
+    "action_rates": {
+      "move_n": 0.1337,
+      "gather": 0.1445,
+      "collaborate": 0.0442,
+      "move_s": 0.1354,
+      "move_e": 0.1166,
+      "move_w": 0.1299,
+      "walk_away": 0.0274,
+      "eat": 0.0815,
+      "attack": 0.161,
+      "train": 0.4303,
+      "withdraw": 0.0104,
+      "deposit": 0.0747,
+      "steal": 0.0135,
+      "rest": 0.1287,
+      "defend": 0.1642
+    },
+    "gather_rate_pct": 14.5,
+    "eat_rate_pct": 8.2,
+    "train_rate_pct": 43.0,
+    "deposit_rate_pct": 7.5,
+    "avg_deaths_by_cause": {
+      "starvation": 3.0833333333333335
+    },
+    "avg_stash_fill_rate": 0.3607823129251701,
+    "avg_stash_withdraw_rate": 0.0011904761904761906,
+    "avg_dist_from_stash": 0.7042017521934587,
+    "avg_revisit_entropy": 1.4435361940922893,
+    "avg_group_persistence": 2.876190476190476,
+    "f_metric": null,
+    "highlight": "latest"
   }
 ];
