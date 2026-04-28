@@ -34,3 +34,5 @@ htmlcov/
 .DS_Store
 Zone.Identifier
 *:Zone.Identifier
+nohup.out
+logs/
