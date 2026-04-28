@@ -163,11 +163,13 @@ def main() -> None:
         verbose=0,
     )
 
-    # Warm-start: explicit path > auto-detect latest > scratch
+    # Warm-start: explicit CLI path > training-config 'warm_start' > auto-detect latest > scratch
     warmstart_path: Path | None = None
     if not args.no_warmstart:
         if args.warmstart:
             warmstart_path = args.warmstart
+        elif lstm_cfg.get("warm_start"):
+            warmstart_path = Path(lstm_cfg["warm_start"])
         else:
             detected = _latest_checkpoint()
             # Don't warm-start from ourselves (if re-running same run name)
