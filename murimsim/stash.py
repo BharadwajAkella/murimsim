@@ -43,10 +43,18 @@ class Stash:
     qi: int = 0
     materials: int = 0
     poison: int = 0
+    # Extra agent_ids allowed to withdraw from this stash alongside the owner.
+    # Used for shared loot drops (e.g. boss-kill rewards split across attackers).
+    # Empty list (default) means owner-only access.
+    participants: list[str] = dataclasses.field(default_factory=list)
 
     def total(self) -> int:
         """Return the total number of items in this stash."""
         return self.food + self.qi + self.materials + self.poison
+
+    def is_accessible_to(self, agent_id: str) -> bool:
+        """True if ``agent_id`` is the owner or a registered participant."""
+        return agent_id == self.owner_id or agent_id in self.participants
 
     def as_dict(self) -> dict[str, int]:
         """Return resource counts as a plain dict."""
@@ -67,6 +75,7 @@ class Stash:
             "qi": self.qi,
             "materials": self.materials,
             "poison": self.poison,
+            "participants": list(self.participants),
         }
 
 
@@ -239,22 +248,38 @@ class StashRegistry:
         return [s for s in self._stashes.values() if s.position == (x, y)]
 
     def get_own_stash_at(self, agent_id: str, x: int, y: int) -> list[Stash]:
-        """Return stashes owned by ``agent_id`` at ``(x, y)``."""
+        """Return stashes at ``(x, y)`` accessible to ``agent_id`` (owner or participant)."""
         return [
             s for s in self._stashes.values()
-            if s.owner_id == agent_id and s.position == (x, y)
+            if s.is_accessible_to(agent_id) and s.position == (x, y)
         ]
 
     def get_enemy_stashes_at(self, agent_id: str, x: int, y: int) -> list[Stash]:
-        """Return stashes at ``(x, y)`` NOT owned by ``agent_id``."""
+        """Return stashes at ``(x, y)`` NOT accessible to ``agent_id``."""
         return [
             s for s in self._stashes.values()
-            if s.owner_id != agent_id and s.position == (x, y)
+            if not s.is_accessible_to(agent_id) and s.position == (x, y)
         ]
 
     def get_stashes_for_owner(self, agent_id: str) -> list[Stash]:
         """Return all stashes owned by ``agent_id`` regardless of position."""
         return [s for s in self._stashes.values() if s.owner_id == agent_id]
+
+    def register(self, stash: Stash) -> Stash:
+        """Insert a pre-built stash (e.g. monster loot drop) into the registry.
+
+        Bumps the per-owner index counter so subsequent owner deposits don't
+        collide. Returns the registered stash for chaining.
+        """
+        self._stashes[stash.stash_id] = stash
+        owner = stash.owner_id
+        # Best-effort index advance (parses suffix if present)
+        try:
+            suffix = int(stash.stash_id.rsplit("_", 1)[-1])
+            self._next_idx[owner] = max(self._next_idx.get(owner, 0), suffix + 1)
+        except ValueError:
+            self._next_idx[owner] = self._next_idx.get(owner, 0) + 1
+        return stash
 
     def all_stashes(self) -> list[Stash]:
         """Return all registered stashes."""

@@ -979,6 +979,42 @@ Curriculum: expose agents at low concentration first, increase over training.
 | `aging` | Age counter per agent. Death by age threshold. Age-death in `tick()`. | ✅ Done | `inter-sect-combat` |
 | `reproduction` | `Agent.spawn_from_parents()`, `_try_reproduce()` in `CombatEnv`. `inherit_value()` midpoint + Gaussian noise. Lamarckian poison resistance. | ✅ Done | `aging` |
 
+### Phase 6c — v17: Emergence Pressure Test 🔲 NEXT
+
+> **Hypothesis:** Resistance reward and high deposit reward have been training wheels.
+> Removing them while introducing a common-enemy boss should make agents *discover*
+> strength acquisition, defensive cultivation, and group cohesion as survival strategies
+> rather than as reward-shaped habits. v17 = combined experiment. Fallback: revert to v16.
+
+| ID | Task | Status | Depends On |
+| -- | ---- | ------ | ---------- |
+| `v17-instr-friendly-steal` | Tag each `steal()` as `pure_steal` vs `friendly_steal` (owner ∈ thief's group). Per-episode counters in env info. | ✅ Done | — |
+| `v17-instr-collab-vs-life` | Per-episode log: `(collaborate_count, ticks_alive)` for focal agent. Dashboard scatter + correlation. | ✅ Done | — |
+| `v17-instr-flee-cause` | On WALK_AWAY, log `own_strength`, `nearest_enemy_strength`, `own_health`. Answers: strength differential or reflex? | ✅ Done | — |
+| `v17-instr-bank-vs-granary` | Split WITHDRAW telemetry into `bank_withdrawals` (own) vs `granary_withdrawals` (group). Track `items_per_withdraw`. | ✅ Done | — |
+| `v17-fix-withdraw` | Diagnose v16's WITHDRAW=4.5% / 0-items-retrieved bug. Mask + redirect now require an actual stash at the agent's position (own or group-mate's). | ✅ Done | `v17-instr-bank-vs-granary` |
+| `v17-reward-resist-zero` | `REWARD_RESISTANCE_GAIN_SCALE: 5.0 → 0.0`. Test if cultivation arc holds without training wheels. | ✅ Done | — |
+| `v17-reward-deposit-down` | `REWARD_DEPOSIT_PER_ITEM: 0.05 → 0.02`. Less aggressive shaping, still discoverable. | ✅ Done | — |
+| `v17-boss-monster` | Separate `Monster` / `BossMonster` / `MonsterRegistry` (not Agent flag — clean polymorphism for future monster kinds). 5× HP, ~2× strength, aggressive heuristic that hunts nearest agent. Permadeath, no natural death. On death: drops shared loot stash via new `Stash.participants` field — every agent who landed ≥1 attack can WITHDRAW. CombatEnv has `enable_boss=False` default; pass `True` for v17 train. | ✅ Done | — |
+| `v17-train` | Warm-start from v15 init checkpoint (obs already 264). 1.5M steps. Same hyperparams as v16. Pass `enable_boss=True` to env. | 🔲 Pending | All above |
+| `v17-eval` | 2000-step eval seed=42; compare full action breakdown + new metrics vs v16. Decision gate: keep v17 or revert to v16. | 🔲 Pending | `v17-train` |
+
+### Deferred Ideas Backlog (revisit before each major training run)
+
+User-flagged ideas to revisit *before locking in v18+ training*. Do not let
+these die quietly.
+
+| Idea | Source | Why deferred | Trigger to revisit |
+| ---- | ------ | ------------ | ------------------ |
+| **Predictive sneak-attack / steal** — agents that anticipate near-term death switch strategy to opportunistic theft or unprovoked attack | v17 design discussion ("if you think you'll die soon, then go for sneak attacks") | Requires predictive value head or explicit horizon-aware heuristic. Touches reward + obs schema. | After v17 results — if survival is brittle, this becomes survival lever |
+| **Personality / "elation of conquest"** — deterministic per-agent modulation of attack appetite based on personality traits and recent kill streak | v17 design discussion ("agents need more personality before they choose combat") | Belongs in limbic-system / mood layer; needs design pass. | Phase 7+ when limbic system gets revisited |
+| **IPPO migration** — multi-agent PPO so all 10 agents learn simultaneously instead of one focal | journal Entry 21, v16 retrospective | Architectural lift; explicitly post-Katja. | After June 30 demo |
+| **Perception step** — each agent observes its neighborhood and notes other agents' actions; future obs channel | v17 design discussion ("perception will let friendly_steal become meaningful") | Needs new obs channel + per-agent observation buffer. | Concurrent with mid-June LLM gating decision |
+| **LLM transmission (Mechanism 2)** — agent-to-agent linguistic signal | journal + Anthropic doc review | Heavyweight; gated on Mechanism 1 success. | Mid-June check-in once v17/v18 results land |
+| **Sect-vs-sect dedicated training** — 3 sect envs trained in lockstep with shared policy, then evaluated head-to-head | refactor_plan + sect tickets | Multi-env infra not yet integrated with focal-agent loop. | After v17 gives a stable single-env policy |
+| **Predictive value head / health prediction** — auxiliary target for "will I be alive in N ticks?" | v17 discussion offshoot | Needs SB3 policy override; non-trivial. | Same trigger as predictive sneak-attack |
+| **Bank vs granary A/B test** — run v17 with bank-only stash semantics vs granary-only, see which produces richer collab | v17 discussion (user: "is there a way to have both kinds and see what gives interesting results") | Currently both coexist (`withdraw` vs `withdraw_group`); A/B requires config flag + 2 training runs. | After v17 shows whether shared stash is even being used |
+
 ### Phase 7 — Movable Resources ⛔ CUT FOR MVP
 
 | ID | Task | Status | Depends On |

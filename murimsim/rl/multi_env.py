@@ -48,8 +48,15 @@ from gymnasium import spaces
 
 from murimsim.actions import Action, MOVE_DELTAS, N_ACTIONS_PHASE2, N_ACTIONS_PHASE3, N_ACTIONS_PHASE5, N_ACTIONS_PHASE6
 from murimsim.agent import Agent, inherit_value  # noqa: F401 (inherit_value re-exported for tests)
+from murimsim.monster import (
+    BOSS_LOOT_FOOD,
+    BOSS_LOOT_MATERIALS,
+    BOSS_LOOT_QI,
+    Monster,
+    MonsterRegistry,
+)
 from murimsim.sect import SectConfig
-from murimsim.stash import StashRegistry
+from murimsim.stash import Stash, StashRegistry
 from murimsim.world import World
 
 # ── Observation layout constants ─────────────────────────────────────────────
@@ -1091,6 +1098,7 @@ class CombatEnv(MultiAgentEnv):
         render_mode: str | None = None,
         curriculum_ramp_steps: int = CURRICULUM_RAMP_STEPS,
         sect_config: SectConfig | None = None,
+        enable_boss: bool = False,
     ) -> None:
         super().__init__(
             config=config,
@@ -1110,6 +1118,10 @@ class CombatEnv(MultiAgentEnv):
         # Keys are agent indices (non-focal); values are Action int values.
         # When set, _heuristic_combat_step is bypassed in favour of the policy action.
         self._action_overrides: dict[int, int] | None = None
+        # v17: boss monster — common-enemy emergence pressure. Disabled by default
+        # so existing tests/training runs don't change behaviour silently.
+        self._enable_boss: bool = enable_boss
+        self._monsters: MonsterRegistry = MonsterRegistry()
 
     # ── Sect home-region spawning ─────────────────────────────────────────────
 
@@ -1132,7 +1144,6 @@ class CombatEnv(MultiAgentEnv):
         return CURRICULUM_START_PROB + (CURRICULUM_END_PROB - CURRICULUM_START_PROB) * frac
 
     # ── reset override ────────────────────────────────────────────────────────
-
     def reset(
         self,
         seed: int | None = None,
@@ -1147,7 +1158,60 @@ class CombatEnv(MultiAgentEnv):
         self._ep_walk_away_count: int = 0
         self._ep_flee_strength_diff_sum: float = 0.0
         self._ep_flee_health_sum: float = 0.0
+        # v17 boss monster — common-enemy survival pressure
+        self._monsters.reset()
+        self._ep_boss_killed: int = 0
+        self._ep_boss_damage_dealt: float = 0.0
+        self._ep_boss_attacks_landed: int = 0
+        self._ep_damage_from_boss: float = 0.0
+        self._ep_agents_killed_by_boss: int = 0
+        if self._enable_boss:
+            corner = self._random_corner()
+            self._monsters.spawn_boss(corner)
+        # Rebuild obs so first frame reflects the boss spawn
+        obs = self._build_obs(self._focal_idx)
         return obs, info
+
+    def _build_obs(self, agent_idx: int) -> np.ndarray:
+        """Build observation; overlay live monsters into the agent channel.
+
+        Monsters are encoded into the same 5×5 agent window using channels:
+        0=present, 1=health (normalised), 2=strength, 3=sociability.
+        Monsters get sociability=0 and strength as raw value (typically ~1.6
+        for the boss vs ~0.5–1.0 for agents — discriminable signal).
+        """
+        obs = super()._build_obs(agent_idx)
+        if not self._monsters.all_alive():
+            return obs
+        agent = self._agents[agent_idx]
+        ax, ay = agent.position
+        half = OBS_VIEW_SIZE // 2
+        # Agent grid sits at flat index 100..200, shape (5, 5, 4)
+        agent_window = obs[OBS_RESOURCE_GRID_SIZE:
+                           OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE].reshape(
+            OBS_VIEW_SIZE, OBS_VIEW_SIZE, OBS_N_AGENT_CH
+        )
+        for monster in self._monsters.all_alive():
+            mx, my = monster.position
+            wx = (mx - ax) + half
+            wy = (my - ay) + half
+            if 0 <= wx < OBS_VIEW_SIZE and 0 <= wy < OBS_VIEW_SIZE:
+                health_norm = monster.health / max(1e-6, monster.max_health)
+                agent_window[wy, wx, 0] = max(agent_window[wy, wx, 0], 1.0)
+                agent_window[wy, wx, 1] = max(agent_window[wy, wx, 1], health_norm)
+                agent_window[wy, wx, 2] = max(agent_window[wy, wx, 2], monster.strength)
+                # sociability stays 0 — monsters can't collaborate
+        # Writing back is unnecessary because reshape is a view, but be explicit
+        obs[OBS_RESOURCE_GRID_SIZE:
+            OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE] = agent_window.reshape(-1)
+        return obs
+
+    def _random_corner(self) -> tuple[int, int]:
+        """Pick one of the four grid corners deterministically from the env RNG."""
+        gs = self._world.grid_size  # type: ignore[union-attr]
+        corners = [(0, 0), (gs - 1, 0), (0, gs - 1), (gs - 1, gs - 1)]
+        idx = int(self._rng.integers(0, len(corners)))
+        return corners[idx]
 
     # ── step override ─────────────────────────────────────────────────────────
 
@@ -1229,7 +1293,14 @@ class CombatEnv(MultiAgentEnv):
 
         # 2. Invalid-action redirects → smart fallback (not REST)
         if action in (Action.ATTACK, Action.COLLABORATE, Action.WALK_AWAY):
-            if self._nearest_adjacent_agent(agent) is None:
+            no_adjacent_agent = self._nearest_adjacent_agent(agent) is None
+            # ATTACK is also valid against an adjacent monster (boss).
+            # COLLABORATE/WALK_AWAY remain agent-only.
+            if action == Action.ATTACK:
+                ax, ay = agent.position
+                if no_adjacent_agent and not self._monsters.get_adjacent_to(ax, ay):
+                    return self._smart_fallback(agent)
+            elif no_adjacent_agent:
                 return self._smart_fallback(agent)
         elif action == Action.EAT:
             if agent.inventory.food == 0:
@@ -1263,9 +1334,14 @@ class CombatEnv(MultiAgentEnv):
         agent = self._agents[self._focal_idx]
         mask = np.ones(self.action_space.n, dtype=bool)
 
-        # Social actions require an adjacent agent
-        if self._nearest_adjacent_agent(agent) is None:
+        # Social actions require an adjacent agent — except ATTACK, which is
+        # also valid against an adjacent boss-monster (v17).
+        no_adjacent_agent = self._nearest_adjacent_agent(agent) is None
+        ax, ay = agent.position
+        no_adjacent_monster = not self._monsters.get_adjacent_to(ax, ay)
+        if no_adjacent_agent and no_adjacent_monster:
             mask[Action.ATTACK] = False
+        if no_adjacent_agent:
             mask[Action.COLLABORATE] = False
             mask[Action.WALK_AWAY] = False
 
@@ -1415,6 +1491,21 @@ class CombatEnv(MultiAgentEnv):
                 else:
                     dmg = self._heuristic_combat_step(agent, focal, focal_defending)
                 damage_taken += dmg
+
+        # 2b. v17: monster tick (after agent actions). Boss may attack any
+        # adjacent live agent; we bookkeep damage to focal so its obs reflects
+        # the hit, and per-episode totals for telemetry.
+        monster_events = self._monsters.tick_all(self._world, self._agents, self._rng)
+        for _mid, victim_id, dmg in monster_events:
+            self._ep_damage_from_boss += dmg
+            for vi, va in enumerate(self._agents):
+                if va.agent_id == victim_id:
+                    self._damage_taken_last_step[vi] += dmg
+                    if vi == self._focal_idx:
+                        damage_taken += dmg
+                    if not va.alive:
+                        self._ep_agents_killed_by_boss += 1
+                    break
 
         # Record damage focal took this step (from all heuristic agents combined)
         self._damage_taken_last_step[self._focal_idx] = damage_taken
@@ -1592,16 +1683,47 @@ class CombatEnv(MultiAgentEnv):
                 if self._ep_walk_away_count > 0 else 0.0
             )
             info["ep_focal_collaborate_count"] = self._ep_action_counts.get("collaborate", 0)
+            # v17 boss monster metrics
+            info["ep_boss_killed"] = self._ep_boss_killed
+            info["ep_boss_attacks_landed"] = self._ep_boss_attacks_landed
+            info["ep_boss_damage_dealt"] = self._ep_boss_damage_dealt
+            info["ep_damage_from_boss"] = self._ep_damage_from_boss
+            info["ep_agents_killed_by_boss"] = self._ep_agents_killed_by_boss
+            info["ep_boss_unique_attackers"] = sum(
+                len(m.attackers) for m in self._monsters.all() if m.kind == "boss"
+            )
         return obs, reward, terminated, False, info
 
     # ── Combat helpers ────────────────────────────────────────────────────────
 
     def _do_attack(self, attacker: Agent) -> tuple[float, bool]:
-        """Attack the nearest agent within Chebyshev distance 1 (8 directions). Returns (damage_dealt, killed).
+        """Attack the nearest target within Chebyshev distance 1 (8 directions). Returns (damage_dealt, killed).
+
+        Targeting priority: live boss-monster (if adjacent) > nearest agent.
+        Boss attacks credit the attacker via Monster.take_damage; on kill the
+        env drops a shared loot stash for all attackers.
 
         If the attacker has group members flanking (adjacent to the target from any direction),
-        each ally grants a GROUP_ATTACK_BONUS_PER_ALLY multiplicative damage bonus.
+        each ally grants a GROUP_ATTACK_BONUS_PER_ALLY multiplicative damage bonus
+        (agent targets only — no flanking bonus for boss yet).
         """
+        # Boss takes priority when adjacent
+        bx, by = attacker.position
+        adjacent_monsters = self._monsters.get_adjacent_to(bx, by)
+        if adjacent_monsters:
+            monster = adjacent_monsters[0]
+            damage = self._combat_damage(attacker, attacker, is_defending=False)
+            # NB: `_combat_damage` ignores the defender unless is_defending=True,
+            # so passing attacker as a stand-in is safe and keeps damage scaling
+            # tied to the attacker's strength only.
+            killed = monster.take_damage(damage, attacker.agent_id)
+            self._ep_boss_attacks_landed += 1
+            self._ep_boss_damage_dealt += damage
+            if killed:
+                self._ep_boss_killed += 1
+                self._drop_boss_loot(monster)
+            return damage, killed
+
         target = self._nearest_adjacent_agent(attacker)
         if target is None:
             return 0.0, False
@@ -1617,6 +1739,27 @@ class CombatEnv(MultiAgentEnv):
             self._drop_inventory(target)
             return damage, True
         return damage, False
+
+    def _drop_boss_loot(self, monster: Monster) -> None:
+        """On boss death, register a shared loot stash for every attacker.
+
+        The stash's owner_id is the monster_id (sentinel), with all attacker
+        agent_ids as participants — so every contributor can WITHDRAW from it
+        via the standard stash interface.
+        """
+        if not monster.attackers:
+            return
+        loot = Stash(
+            stash_id=f"{monster.monster_id}_loot",
+            owner_id=monster.monster_id,
+            position=monster.position,
+            food=BOSS_LOOT_FOOD,
+            qi=BOSS_LOOT_QI,
+            materials=BOSS_LOOT_MATERIALS,
+            poison=0,
+            participants=sorted(monster.attackers),
+        )
+        self._stash_registry.register(loot)
 
     def _execute_override_action(
         self, agent: Agent, agent_idx: int, action: Action, focal: Agent, focal_defending: bool
@@ -1707,11 +1850,32 @@ class CombatEnv(MultiAgentEnv):
         """Heuristic for one non-focal agent. Returns damage dealt to focal agent.
 
         Requires Chebyshev distance ≤ 1 (8 directions) for combat to engage.
+
+        v17: any non-focal agent adjacent to a live monster will attack it
+        (regardless of strength differential). This lets all participants —
+        not just the focal — earn boss-loot share, which is the whole point
+        of the common-enemy emergence test.
         """
         ax, ay = agent.position
+        agent_idx = self._agents.index(agent)
+
+        # Boss takes priority over agent target (matches focal _do_attack policy)
+        adjacent_monsters = self._monsters.get_adjacent_to(ax, ay)
+        if adjacent_monsters:
+            monster = adjacent_monsters[0]
+            damage = self._combat_damage(agent, agent, is_defending=False)
+            killed = monster.take_damage(damage, agent.agent_id)
+            self._ep_boss_attacks_landed += 1
+            self._ep_boss_damage_dealt += damage
+            if killed:
+                self._ep_boss_killed += 1
+                self._drop_boss_loot(monster)
+            self._last_action_names[agent_idx] = "attack"
+            self._last_action_details[agent_idx] = monster.monster_id
+            return 0.0
+
         fx, fy = focal.position
         adjacent = max(abs(ax - fx), abs(ay - fy)) <= 1
-        agent_idx = self._agents.index(agent)
 
         if adjacent:
             # Same group: never attack; just forage
