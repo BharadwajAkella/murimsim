@@ -104,7 +104,7 @@ LOW_HEALTH_PENALTY_GATE: float = 0.35              # penalty fires below this he
 CRITICAL_HEALTH_EAT_THRESHOLD: float = 0.25        # health below this → redirect to EAT if possible
 # δ-reward for TRAIN action: incentivises training (strength delta × scale)
 REWARD_TRAIN_STRENGTH_SCALE: float = 10.0
-REWARD_RESISTANCE_GAIN_SCALE: float = 5.0   # reward per unit of total resistance grown
+REWARD_RESISTANCE_GAIN_SCALE: float = 0.0   # v17: dropped from 5.0 — let immunity emerge from survival benefit alone
 
 # Power score weights (used for ep_avg_power metric, logged per episode)
 POWER_WEIGHT_STRENGTH: float = 0.4
@@ -296,6 +296,11 @@ class MultiAgentEnv(gym.Env):
         self._ep_group_member_ticks: int = 0    # sum of group sizes across all steps
         self._ep_deaths_by_cause: dict[str, int] = {}  # cause -> count
         self._ep_reproductions: int = 0         # offspring spawned from parent pairs
+        # v17 instrumentation — perception of friendly vs enemy stash actions
+        self._ep_pure_steals: int = 0           # steals from non-group-mate stash
+        self._ep_friendly_steals: int = 0       # steals from group-mate stash
+        self._ep_bank_withdrawals: int = 0      # WITHDRAW that retrieved from own stash
+        self._ep_granary_withdrawals: int = 0   # WITHDRAW that retrieved from group-mate stash
 
         # Foraging-outward tracking: max Chebyshev dist from own stash since last deposit
         self._max_dist_since_deposit: list[float] = [0.0] * self._n_agents
@@ -481,6 +486,11 @@ class MultiAgentEnv(gym.Env):
             info["ep_deaths_by_age"] = self._ep_deaths_by_cause.get("age", 0)
             info["ep_deaths_by_cause"] = dict(self._ep_deaths_by_cause)
             info["ep_reproductions"] = self._ep_reproductions
+            # v17 perception/sociality metrics
+            info["ep_pure_steals"] = self._ep_pure_steals
+            info["ep_friendly_steals"] = self._ep_friendly_steals
+            info["ep_bank_withdrawals"] = self._ep_bank_withdrawals
+            info["ep_granary_withdrawals"] = self._ep_granary_withdrawals
         return obs, reward, terminated, False, info
 
     def render(self) -> None:
@@ -863,17 +873,40 @@ class MultiAgentEnv(gym.Env):
             group = self._get_group(agent_idx) if agent_idx >= 0 else None
             if group:
                 member_ids = [self._agents[i].agent_id for i in group]
+                # Detect retrieval source: own (bank) or group-mate (granary)
+                own_here = self._stash_registry.get_own_stash_at(agent.agent_id, *agent.position)
+                own_food_here = sum(s.food for s in own_here)
                 food_got = self._stash_registry.withdraw_group(agent, member_ids)
                 self._ep_items_withdrawn += food_got
                 if food_got > 0:
                     stash_bonus += REWARD_GROUP_WITHDRAW_BONUS
+                    if food_got > own_food_here:
+                        # At least some came from a group-mate's stash
+                        self._ep_granary_withdrawals += 1
+                    else:
+                        self._ep_bank_withdrawals += 1
             else:
                 at_pos = self._stash_registry.get_own_stash_at(agent.agent_id, *agent.position)
-                self._ep_items_withdrawn += sum(s.total() for s in at_pos)
-                self._stash_registry.withdraw(agent)
+                items_here = sum(s.total() for s in at_pos)
+                self._ep_items_withdrawn += items_here
+                transferred = self._stash_registry.withdraw(agent)
+                if transferred:
+                    self._ep_bank_withdrawals += 1
 
         elif action_enum == Action.STEAL:
-            self._stash_registry.steal(agent)
+            stolen = self._stash_registry.steal(agent)
+            if stolen is not None:
+                is_friendly = False
+                if agent_idx >= 0:
+                    group = self._get_group(agent_idx)
+                    if group:
+                        is_friendly = any(
+                            self._agents[i].agent_id == stolen.owner_id for i in group
+                        )
+                if is_friendly:
+                    self._ep_friendly_steals += 1
+                else:
+                    self._ep_pure_steals += 1
 
         elif action_enum == Action.TRAIN:
             x, y = agent.position
@@ -1012,7 +1045,7 @@ REWARD_FOOD_SHARE: float = 0.04       # reward focal receives when it shares or 
 # Foraging-outward: deposit after having been >=N tiles away from stash since last deposit
 FORAGE_OUTWARD_MIN_DIST: int = 5      # Chebyshev tiles away from stash to qualify
 REWARD_FORAGE_OUTWARD: float = 0.03   # bonus for depositing after a foraging excursion
-REWARD_DEPOSIT_PER_ITEM: float = 0.05 # explicit reward per item successfully deposited (closes stash loop)
+REWARD_DEPOSIT_PER_ITEM: float = 0.02 # v17: lowered from 0.05 — DEPOSIT discoverable but no longer dominant signal
 # Group withdrawal bonus: reward when agent withdraws from a group stash while hungry
 REWARD_GROUP_WITHDRAW_BONUS: float = 0.02
 # Stash proximity: disabled — per-tick pull toward individual stash was anti-cooperative,
@@ -1110,9 +1143,40 @@ class CombatEnv(MultiAgentEnv):
         if self._sect_config is not None:
             for agent in self._agents:
                 agent.sect_id = self._sect_config.sect_id
+        # v17 instrumentation — flee context (CombatEnv-only since WALK_AWAY is a combat action)
+        self._ep_walk_away_count: int = 0
+        self._ep_flee_strength_diff_sum: float = 0.0
+        self._ep_flee_health_sum: float = 0.0
         return obs, info
 
     # ── step override ─────────────────────────────────────────────────────────
+
+    def _withdraw_target_available(self, agent: Agent) -> bool:
+        """Return True if WITHDRAW would actually retrieve at least one item.
+
+        Checks for a non-empty stash at ``agent.position`` owned by the agent
+        itself or, if the agent is in a group, by any group-mate. Just being
+        in a group is not enough — the group might hold no stash at this tile.
+        """
+        own = self._stash_registry.get_own_stash_at(agent.agent_id, *agent.position)
+        if any(s.total() > 0 for s in own):
+            return True
+        # Agent index lookup safe for focal agent path; falls back to no group.
+        try:
+            agent_idx = self._agents.index(agent)
+        except ValueError:
+            return False
+        group = self._get_group(agent_idx)
+        if not group:
+            return False
+        for member_idx in group:
+            mid = self._agents[member_idx].agent_id
+            if mid == agent.agent_id:
+                continue
+            mate_stashes = self._stash_registry.get_own_stash_at(mid, *agent.position)
+            if any(s.total() > 0 for s in mate_stashes):
+                return True
+        return False
 
     def _smart_fallback(self, agent: Agent) -> Action:
         """Return the best productive action given the agent's current state.
@@ -1178,10 +1242,7 @@ class CombatEnv(MultiAgentEnv):
             ):
                 return self._smart_fallback(agent)
         elif action == Action.WITHDRAW:
-            own = self._stash_registry.get_stashes_for_owner(agent.agent_id)
-            at_pos = [s for s in own if s.position == agent.position]
-            group = self._get_group(self._focal_idx)
-            if not at_pos and not group:
+            if not self._withdraw_target_available(agent):
                 return self._smart_fallback(agent)
         elif action == Action.STEAL:
             enemy = self._stash_registry.get_enemy_stashes_at(agent.agent_id, *agent.position)
@@ -1219,11 +1280,10 @@ class CombatEnv(MultiAgentEnv):
         ):
             mask[Action.DEPOSIT] = False
 
-        # WITHDRAW requires being at own stash or in a group
-        own = self._stash_registry.get_stashes_for_owner(agent.agent_id)
-        at_stash = any(s.position == agent.position for s in own)
-        in_group = self._get_group(self._focal_idx) is not None
-        if not at_stash and not in_group:
+        # WITHDRAW requires an actual stash with food/items at this position —
+        # either own stash here, or any group-mate's stash here. Just being in
+        # a group is not enough: the group might have no stashes here.
+        if not self._withdraw_target_available(agent):
             mask[Action.WITHDRAW] = False
 
         # STEAL requires an enemy stash at current position
@@ -1314,6 +1374,10 @@ class CombatEnv(MultiAgentEnv):
             neighbour = self._nearest_adjacent_agent(focal)
             if neighbour is not None:
                 self._last_action_details[self._focal_idx] = neighbour.agent_id
+                # v17: log flee context — strength differential and health
+                self._ep_walk_away_count += 1
+                self._ep_flee_strength_diff_sum += float(focal.strength - neighbour.strength)
+                self._ep_flee_health_sum += float(focal.health)
             self._walk_away(focal)
         else:
             food_gathered, hazard_damage, stash_bonus = self._apply_action(focal, action_enum, self._focal_idx)
@@ -1513,6 +1577,21 @@ class CombatEnv(MultiAgentEnv):
             info["ep_deaths_by_age"] = self._ep_deaths_by_cause.get("age", 0)
             info["ep_deaths_by_cause"] = dict(self._ep_deaths_by_cause)
             info["ep_reproductions"] = self._ep_reproductions
+            # v17 perception/sociality metrics
+            info["ep_pure_steals"] = self._ep_pure_steals
+            info["ep_friendly_steals"] = self._ep_friendly_steals
+            info["ep_bank_withdrawals"] = self._ep_bank_withdrawals
+            info["ep_granary_withdrawals"] = self._ep_granary_withdrawals
+            info["ep_walk_away_count"] = self._ep_walk_away_count
+            info["ep_avg_flee_strength_diff"] = (
+                self._ep_flee_strength_diff_sum / self._ep_walk_away_count
+                if self._ep_walk_away_count > 0 else 0.0
+            )
+            info["ep_avg_flee_health"] = (
+                self._ep_flee_health_sum / self._ep_walk_away_count
+                if self._ep_walk_away_count > 0 else 0.0
+            )
+            info["ep_focal_collaborate_count"] = self._ep_action_counts.get("collaborate", 0)
         return obs, reward, terminated, False, info
 
     # ── Combat helpers ────────────────────────────────────────────────────────
