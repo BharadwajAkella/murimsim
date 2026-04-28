@@ -78,6 +78,12 @@ class MetricsDashboardCallback(BaseCallback):
         self._deaths_by_cause: deque[dict[str, int]] = deque(maxlen=_ROLLING_WINDOW)
         # reproduction tracking
         self._reproductions: deque[float] = deque(maxlen=_ROLLING_WINDOW)
+        # settlement metrics
+        self._stash_fill_rates: deque[float] = deque(maxlen=_ROLLING_WINDOW)
+        self._stash_withdraw_rates: deque[float] = deque(maxlen=_ROLLING_WINDOW)
+        self._avg_dist_from_stash: deque[float] = deque(maxlen=_ROLLING_WINDOW)
+        self._revisit_entropies: deque[float] = deque(maxlen=_ROLLING_WINDOW)
+        self._group_persistences: deque[float] = deque(maxlen=_ROLLING_WINDOW)
         # timestep history for sparkline
         self._history: list[dict[str, Any]] = []
 
@@ -143,6 +149,11 @@ class MetricsDashboardCallback(BaseCallback):
             "train_rate_pct": round(avg_action_rates.get("train", 0) * 100, 1),
             "deposit_rate_pct": round(avg_action_rates.get("deposit", 0) * 100, 1),
             "avg_deaths_by_cause": self._mean_dict(self._deaths_by_cause),
+            "avg_stash_fill_rate": self._rolling_mean(self._stash_fill_rates),
+            "avg_stash_withdraw_rate": self._rolling_mean(self._stash_withdraw_rates),
+            "avg_dist_from_stash": self._rolling_mean(self._avg_dist_from_stash),
+            "avg_revisit_entropy": self._rolling_mean(self._revisit_entropies),
+            "avg_group_persistence": self._rolling_mean(self._group_persistences),
             "f_metric": self._rolling_mean(self._f_metrics),
             "highlight": "latest",
         }
@@ -197,6 +208,16 @@ class MetricsDashboardCallback(BaseCallback):
             self._deaths_by_cause.append(dict(info["ep_deaths_by_cause"]))
         if "ep_reproductions" in info:
             self._reproductions.append(float(info["ep_reproductions"]))
+        if "ep_stash_fill_rate" in info:
+            self._stash_fill_rates.append(float(info["ep_stash_fill_rate"]))
+        if "ep_stash_withdraw_rate" in info:
+            self._stash_withdraw_rates.append(float(info["ep_stash_withdraw_rate"]))
+        if "ep_avg_dist_from_stash" in info:
+            self._avg_dist_from_stash.append(float(info["ep_avg_dist_from_stash"]))
+        if "ep_revisit_entropy" in info:
+            self._revisit_entropies.append(float(info["ep_revisit_entropy"]))
+        if "ep_group_persistence" in info:
+            self._group_persistences.append(float(info["ep_group_persistence"]))
 
     def _rolling_mean(self, buf: deque) -> float | None:
         if not buf:
@@ -270,6 +291,11 @@ class MetricsDashboardCallback(BaseCallback):
             "avg_deaths_by_age": self._rolling_mean(self._deaths_by_age),
             "avg_deaths_by_cause": self._mean_dict(self._deaths_by_cause),
             "avg_reproductions": self._rolling_mean(self._reproductions),
+            "avg_stash_fill_rate": self._rolling_mean(self._stash_fill_rates),
+            "avg_stash_withdraw_rate": self._rolling_mean(self._stash_withdraw_rates),
+            "avg_dist_from_stash": self._rolling_mean(self._avg_dist_from_stash),
+            "avg_revisit_entropy": self._rolling_mean(self._revisit_entropies),
+            "avg_group_persistence": self._rolling_mean(self._group_persistences),
             "history": self._history[-500:],  # cap sparkline history
         }
 

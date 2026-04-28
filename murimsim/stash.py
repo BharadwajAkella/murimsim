@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 # Qi cost (in inventory units) to place a stash
 STASH_QI_COST: int = 0   # free to deposit — qi cost removed to unblock stash usage
 
+# Hard cap on total items stored per (owner, position) stash location.
+# Deposit is blocked — returns None — when existing + incoming items would exceed this.
+STASH_MAX_ITEMS: int = 20
+
 
 @dataclasses.dataclass
 class Stash:
@@ -77,6 +81,14 @@ class StashRegistry:
         self._stashes: dict[str, Stash] = {}
         self._next_idx: dict[str, int] = {}
 
+    def get_stash_total_at(self, agent_id: str, x: int, y: int) -> int:
+        """Return total items across all own stashes at ``(x, y)``."""
+        return sum(s.total() for s in self.get_own_stash_at(agent_id, x, y))
+
+    def is_stash_full(self, agent_id: str, x: int, y: int, incoming: int = 0) -> bool:
+        """Return True if depositing ``incoming`` items at ``(x, y)`` would exceed the cap."""
+        return self.get_stash_total_at(agent_id, x, y) + incoming > STASH_MAX_ITEMS
+
     # ------------------------------------------------------------------
     # Mutation
     # ------------------------------------------------------------------
@@ -102,6 +114,14 @@ class StashRegistry:
             return None
 
         owner_id = agent.agent_id
+        x, y = agent.position
+        if self.is_stash_full(owner_id, x, y, incoming=agent.inventory.total()):
+            logger.debug(
+                "Agent %s deposit blocked: stash at %s would exceed cap (%d)",
+                owner_id, agent.position, STASH_MAX_ITEMS,
+            )
+            return None
+
         idx = self._next_idx.get(owner_id, 0)
         stash_id = f"{owner_id}_stash_{idx}"
         self._next_idx[owner_id] = idx + 1

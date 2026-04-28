@@ -1173,6 +1173,10 @@ class CombatEnv(MultiAgentEnv):
         elif action == Action.DEPOSIT:
             if agent.inventory.food == 0:
                 return self._smart_fallback(agent)
+            if self._stash_registry.is_stash_full(
+                agent.agent_id, *agent.position, incoming=agent.inventory.total()
+            ):
+                return self._smart_fallback(agent)
         elif action == Action.WITHDRAW:
             own = self._stash_registry.get_stashes_for_owner(agent.agent_id)
             at_pos = [s for s in own if s.position == agent.position]
@@ -1207,6 +1211,12 @@ class CombatEnv(MultiAgentEnv):
         # EAT / DEPOSIT require food in hand
         if agent.inventory.food == 0:
             mask[Action.EAT] = False
+            mask[Action.DEPOSIT] = False
+
+        # DEPOSIT also blocked when own stash at current position is full
+        if agent.inventory.food > 0 and self._stash_registry.is_stash_full(
+            agent.agent_id, *agent.position, incoming=agent.inventory.total()
+        ):
             mask[Action.DEPOSIT] = False
 
         # WITHDRAW requires being at own stash or in a group

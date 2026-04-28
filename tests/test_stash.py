@@ -301,3 +301,124 @@ def test_stash_proximity_reward() -> None:
 
     # Always zero when disabled
     assert env._stash_proximity_reward(0) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Test 9: stash capacity — deposit blocked when full
+# ---------------------------------------------------------------------------
+
+def test_deposit_blocked_when_stash_full() -> None:
+    """deposit() returns None and leaves inventory unchanged when adding items
+    would exceed STASH_MAX_ITEMS at that position."""
+    from murimsim.stash import STASH_MAX_ITEMS
+
+    registry = StashRegistry()
+    agent = _make_agent()
+    # Fill the stash to cap with a first deposit (food=15, qi=5 = 20 total)
+    agent.inventory = AgentInventory(food=15, qi=5, materials=0, poison=0)
+    first = registry.deposit(agent)
+    assert first is not None
+    assert first.total() == STASH_MAX_ITEMS
+
+    # Now give the agent more items and try to deposit again at the same position
+    agent.inventory = AgentInventory(food=3, qi=0, materials=0, poison=0)
+    second = registry.deposit(agent)
+
+    assert second is None, "deposit() must return None when stash is at capacity"
+    # Inventory unchanged
+    assert agent.inventory.food == 3
+    # Registry still contains exactly the original stash
+    assert len(registry.all_stashes()) == 1
+
+
+def test_deposit_allowed_just_below_cap() -> None:
+    """deposit() succeeds when existing + incoming <= STASH_MAX_ITEMS."""
+    from murimsim.stash import STASH_MAX_ITEMS
+
+    registry = StashRegistry()
+    agent = _make_agent()
+    # First deposit: 10 items
+    agent.inventory = AgentInventory(food=10, qi=0, materials=0, poison=0)
+    first = registry.deposit(agent)
+    assert first is not None and first.total() == 10
+
+    # Second deposit: 10 more items — total = 20 == cap, so it should succeed
+    agent.inventory = AgentInventory(food=10, qi=0, materials=0, poison=0)
+    second = registry.deposit(agent)
+    assert second is not None, "deposit() should succeed when existing + incoming == cap"
+    assert registry.get_stash_total_at(agent.agent_id, *agent.position) == STASH_MAX_ITEMS
+
+
+def test_deposit_blocked_when_incoming_alone_exceeds_cap() -> None:
+    """deposit() blocks if the incoming inventory alone would exceed the cap."""
+    from murimsim.stash import STASH_MAX_ITEMS
+
+    registry = StashRegistry()
+    agent = _make_agent()
+    # Existing: 15 items
+    agent.inventory = AgentInventory(food=15, qi=0, materials=0, poison=0)
+    registry.deposit(agent)
+
+    # Incoming: 10 items (15 + 10 = 25 > cap)
+    agent.inventory = AgentInventory(food=8, qi=2, materials=0, poison=0)
+    result = registry.deposit(agent)
+    assert result is None
+    # Inventory untouched
+    assert agent.inventory.food == 8
+    assert agent.inventory.qi == 2
+
+
+def test_is_stash_full_helper() -> None:
+    """StashRegistry.is_stash_full() returns correct values."""
+    from murimsim.stash import STASH_MAX_ITEMS
+
+    registry = StashRegistry()
+    agent = _make_agent()
+    x, y = agent.position
+
+    assert not registry.is_stash_full(agent.agent_id, x, y, incoming=STASH_MAX_ITEMS), \
+        "Empty stash with exactly cap items incoming should NOT be full"
+    assert registry.is_stash_full(agent.agent_id, x, y, incoming=STASH_MAX_ITEMS + 1), \
+        "Empty stash with cap+1 items incoming should be full"
+
+    # Deposit 10 items, then check with incoming 11 (10+11=21 > cap)
+    agent.inventory = AgentInventory(food=10, qi=0, materials=0, poison=0)
+    registry.deposit(agent)
+    assert registry.is_stash_full(agent.agent_id, x, y, incoming=11)
+    assert not registry.is_stash_full(agent.agent_id, x, y, incoming=10)
+
+
+def test_action_mask_blocks_deposit_when_stash_full() -> None:
+    """action_masks() should set DEPOSIT=False when own stash at position is at cap."""
+    from murimsim.rl.multi_env import CombatEnv
+    from murimsim.stash import STASH_MAX_ITEMS
+    from murimsim.actions import Action
+
+    cfg = _load_cfg()
+    cfg["n_agents"] = 2
+    env = CombatEnv(config=cfg, seed=0)
+    env.reset(seed=0)
+
+    agent = env._agents[env._focal_idx]
+    # Give agent food so the basic food-check doesn't fire first
+    agent.inventory = AgentInventory(food=3, qi=0, materials=0, poison=0)
+
+    # Without a full stash: DEPOSIT should be allowed
+    mask_before = env.action_masks()
+    assert mask_before[Action.DEPOSIT], "DEPOSIT should be allowed when stash is empty"
+
+    # Fill the stash to cap at agent's current position
+    from murimsim.stash import Stash
+    pos = agent.position
+    full_stash = Stash(
+        stash_id=f"{agent.agent_id}_stash_cap",
+        owner_id=agent.agent_id,
+        position=pos,
+        food=STASH_MAX_ITEMS,
+    )
+    env._stash_registry._stashes[full_stash.stash_id] = full_stash
+
+    # Now DEPOSIT should be masked out
+    mask_after = env.action_masks()
+    assert not mask_after[Action.DEPOSIT], \
+        "DEPOSIT must be masked when own stash at position is at capacity"
