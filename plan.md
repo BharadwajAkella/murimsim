@@ -996,7 +996,7 @@ Curriculum: expose agents at low concentration first, increase over training.
 | `v17-reward-resist-zero` | `REWARD_RESISTANCE_GAIN_SCALE: 5.0 → 0.0`. Test if cultivation arc holds without training wheels. | ✅ Done | — |
 | `v17-reward-deposit-down` | `REWARD_DEPOSIT_PER_ITEM: 0.05 → 0.02`. Less aggressive shaping, still discoverable. | ✅ Done | — |
 | `v17-boss-monster` | Separate `Monster` / `BossMonster` / `MonsterRegistry` (not Agent flag — clean polymorphism for future monster kinds). 5× HP, ~2× strength, aggressive heuristic that hunts nearest agent. Permadeath, no natural death. On death: drops shared loot stash via new `Stash.participants` field — every agent who landed ≥1 attack can WITHDRAW. CombatEnv has `enable_boss=False` default; pass `True` for v17 train. | ✅ Done | — |
-| `v17-train` | Warm-start from v15 init checkpoint (obs already 264). 1.5M steps. Same hyperparams as v16. Pass `enable_boss=True` to env. | 🔲 Pending | All above |
+| `v17-train` | Warm-start from `checkpoints/limbic_lstm_v16/limbic_lstm_v16_final.zip` (same obs 264, action 15, arch). **v16's learned TRAIN habit (31.3%) is load-bearing — without inherited cultivation competence, the boss instantly wipes a village of squishy newborns and the emergence experiment can't run.** 1.5M steps, same hyperparams as v16, pass `enable_boss=True`. Only fall back to v16_init / from-scratch if v16's baked-in deposit-hoarding refuses to unlearn. | 🔲 Pending | All above |
 | `v17-eval` | 2000-step eval seed=42; compare full action breakdown + new metrics vs v16. Decision gate: keep v17 or revert to v16. | 🔲 Pending | `v17-train` |
 
 ### Deferred Ideas Backlog (revisit before each major training run)

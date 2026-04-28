@@ -363,3 +363,103 @@ def test_unique_attacker_count_no_double_count() -> None:
     boss.take_damage(0.1, "agent_a")
     unique = sum(len(m.attackers) for m in env._monsters.all() if m.kind == "boss")
     assert unique == 2
+
+
+# ─── v17 combat-focus lock ──────────────────────────────────────────────────
+
+
+def test_combat_focus_masks_train_when_boss_adjacent():
+    """In_combat (boss adjacent) → action_masks() blocks TRAIN/REST/GATHER/DEPOSIT/COLLABORATE."""
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=False)
+    env.reset(seed=0)
+    focal = env._agents[env._focal_idx]
+    fx, fy = focal.position
+    boss = env._monsters.spawn_boss((fx + 1, fy))
+
+    mask = env.action_masks()
+    assert mask[Action.TRAIN] is np.False_ or not mask[Action.TRAIN]
+    assert not mask[Action.REST]
+    assert not mask[Action.GATHER]
+    assert not mask[Action.DEPOSIT]
+    assert not mask[Action.COLLABORATE]
+    # Combat actions must remain valid
+    assert mask[Action.ATTACK]
+    assert mask[Action.DEFEND]
+    # MOVE always available
+    assert mask[Action.MOVE_N]
+
+
+def test_combat_focus_does_not_mask_when_no_hostile():
+    """No boss adjacent and no recent damage → TRAIN remains valid."""
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=False)
+    env.reset(seed=0)
+    # Ensure no damage cooldown
+    env._in_combat_cooldown = [0] * env._n_agents
+    mask = env.action_masks()
+    assert mask[Action.TRAIN]
+
+
+def test_combat_focus_cooldown_arms_after_damage():
+    """Taking damage in step T arms cooldown=1 → in_combat True at step T+1 even if no adjacent hostile."""
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=False)
+    env.reset(seed=0)
+    focal_idx = env._focal_idx
+    # Manually mark damage as if focal was hit this step
+    env._damage_taken_last_step[focal_idx] = 0.3
+    # Run cooldown bookkeeping (mimic end-of-step)
+    for i in range(env._n_agents):
+        if env._in_combat_cooldown[i] > 0:
+            env._in_combat_cooldown[i] -= 1
+        if env._damage_taken_last_step[i] > 0:
+            env._in_combat_cooldown[i] = 1
+    # Now check that focal is in_combat next tick
+    assert env._in_combat(focal_idx)
+    # And TRAIN is masked even with no adjacent hostile
+    mask = env.action_masks()
+    assert not mask[Action.TRAIN]
+
+
+def test_combat_focus_redirects_train_to_combat_action():
+    """Policy picks TRAIN while boss is adjacent → redirected to ATTACK/DEFEND/EAT, not TRAIN."""
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=False)
+    env.reset(seed=0)
+    focal = env._agents[env._focal_idx]
+    fx, fy = focal.position
+    boss = env._monsters.spawn_boss((fx + 1, fy))
+
+    redirected = env._redirect_invalid_action(focal, Action.TRAIN)
+    assert redirected != Action.TRAIN
+    assert redirected in (Action.ATTACK, Action.DEFEND, Action.EAT)
+
+
+def test_combat_focus_disabled_flag_makes_in_combat_false():
+    """enable_combat_focus=False → _in_combat returns False even with boss adjacent."""
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=False)
+    env.reset(seed=0)
+    env._enable_combat_focus = False
+    focal = env._agents[env._focal_idx]
+    fx, fy = focal.position
+    boss = env._monsters.spawn_boss((fx + 1, fy))
+
+    assert not env._in_combat(env._focal_idx)
+    mask = env.action_masks()
+    assert mask[Action.TRAIN]
+
+
+def test_combat_focus_collaborate_works_with_adjacent_stranger():
+    """Adjacent non-group-mate alone is NOT combat — COLLABORATE remains valid."""
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=False)
+    env.reset(seed=0)
+    focal_idx = env._focal_idx
+    other_idx = (focal_idx + 1) % env._n_agents
+    focal = env._agents[focal_idx]
+    other = env._agents[other_idx]
+    fx, fy = focal.position
+    gs = env._world.grid_size
+    other.position = (min(fx + 1, gs - 1), fy)
+    focal.sociability = 0.9
+    other.sociability = 0.9
+    # No damage, no monster → not combat
+    mask = env.action_masks()
+    assert mask[Action.COLLABORATE]
+    assert mask[Action.TRAIN]

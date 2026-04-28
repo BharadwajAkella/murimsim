@@ -1122,6 +1122,13 @@ class CombatEnv(MultiAgentEnv):
         # so existing tests/training runs don't change behaviour silently.
         self._enable_boss: bool = enable_boss
         self._monsters: MonsterRegistry = MonsterRegistry()
+        # v17: combat-focus lock — when an agent is in combat (hostile adjacent
+        # OR took damage last tick), mask out non-combat actions like TRAIN,
+        # REST, GATHER, DEPOSIT, COLLABORATE. Prevents the immersion-breaking
+        # "agent meditates while being hit by the boss" replay frame. Cooldown
+        # of 1 tick after taking damage so a fleeing boss can't be insta-trained.
+        self._enable_combat_focus: bool = True
+        self._in_combat_cooldown: list[int] = [0] * n_agents
 
     # ── Sect home-region spawning ─────────────────────────────────────────────
 
@@ -1165,6 +1172,8 @@ class CombatEnv(MultiAgentEnv):
         self._ep_boss_attacks_landed: int = 0
         self._ep_damage_from_boss: float = 0.0
         self._ep_agents_killed_by_boss: int = 0
+        # v17 combat-focus: reset shaken-cooldown for all agents
+        self._in_combat_cooldown = [0] * self._n_agents
         if self._enable_boss:
             corner = self._random_corner()
             self._monsters.spawn_boss(corner)
@@ -1269,6 +1278,23 @@ class CombatEnv(MultiAgentEnv):
                 return Action.MOVE_N
         return Action.TRAIN
 
+    def _combat_focus_fallback(self, agent: Agent) -> Action:
+        """Redirect non-combat action while in combat → sensible combat default.
+
+        v17. Priority:
+          1. EAT — if low health and carrying food (defensive heal)
+          2. ATTACK — if any enemy adjacent (boss prioritised in _do_attack)
+          3. DEFEND — fall back to bracing
+        """
+        if agent.health < CRITICAL_HEALTH_EAT_THRESHOLD and agent.inventory.food > 0:
+            return Action.EAT
+        ax, ay = agent.position
+        if self._monsters.get_adjacent_to(ax, ay):
+            return Action.ATTACK
+        if self._nearest_adjacent_agent(agent) is not None:
+            return Action.ATTACK
+        return Action.DEFEND
+
     def _redirect_invalid_action(self, agent: Agent, action: Action) -> Action:
         """Redirect context-invalid actions to a productive fallback.
 
@@ -1290,6 +1316,13 @@ class CombatEnv(MultiAgentEnv):
             and action != Action.EAT
         ):
             return Action.EAT
+
+        # 1b. v17 combat-focus override: in combat, redirect non-combat actions
+        # to a sensible combat fallback. Survival EAT (above) still wins.
+        # Disabled if _enable_combat_focus is False or no hostile near.
+        if action in (Action.TRAIN, Action.REST, Action.GATHER, Action.DEPOSIT, Action.COLLABORATE):
+            if self._in_combat(self._focal_idx):
+                return self._combat_focus_fallback(agent)
 
         # 2. Invalid-action redirects → smart fallback (not REST)
         if action in (Action.ATTACK, Action.COLLABORATE, Action.WALK_AWAY):
@@ -1371,8 +1404,17 @@ class CombatEnv(MultiAgentEnv):
             mask[Action.ATTACK] = False
             mask[Action.DEFEND] = False
 
-        # Always allow at least TRAIN and moves — guarantee non-empty mask
-        mask[Action.TRAIN] = True
+        # v17 combat-focus: when in combat, mask out non-combat actions.
+        # Allowed in combat: MOVE_*, EAT (survival), ATTACK, DEFEND, WALK_AWAY,
+        # WITHDRAW, STEAL. Blocked: TRAIN, REST, GATHER, DEPOSIT, COLLABORATE.
+        # MOVE actions are never masked, so the mask remains non-empty without
+        # any unconditional "force TRAIN=True" guarantee.
+        if self._in_combat(self._focal_idx):
+            mask[Action.TRAIN] = False
+            mask[Action.REST] = False
+            mask[Action.GATHER] = False
+            mask[Action.DEPOSIT] = False
+            mask[Action.COLLABORATE] = False
         return mask
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
@@ -1509,6 +1551,16 @@ class CombatEnv(MultiAgentEnv):
 
         # Record damage focal took this step (from all heuristic agents combined)
         self._damage_taken_last_step[self._focal_idx] = damage_taken
+
+        # v17 combat-focus cooldown: decrement existing cooldowns; arm 1-tick
+        # shaken cooldown for any agent that took damage this step. This keeps
+        # the combat-lock active for one tick after disengagement, preventing
+        # the immersion-breaking "boss steps away → instant TRAIN" frame.
+        for i in range(self._n_agents):
+            if self._in_combat_cooldown[i] > 0:
+                self._in_combat_cooldown[i] -= 1
+            if self._damage_taken_last_step[i] > 0:
+                self._in_combat_cooldown[i] = 1
 
         # 3. Advance world + all agents
         for _ in range(self._action_ticks):
@@ -1937,6 +1989,31 @@ class CombatEnv(MultiAgentEnv):
             if max(abs(ox - ax), abs(oy - ay)) <= 1:
                 return other
         return None
+
+    def _has_adjacent_hostile(self, agent_idx: int) -> bool:
+        """Return True if a monster is within Chebyshev 1 of the agent.
+
+        Agent-on-agent hostility is detected via the damage-cooldown path
+        instead of adjacency, because two strangers standing next to each
+        other are not necessarily in combat (they may be COLLABORATE-ing).
+        Once anyone takes damage, the 1-tick shaken cooldown takes over.
+        """
+        agent = self._agents[agent_idx]
+        ax, ay = agent.position
+        return bool(self._monsters.get_adjacent_to(ax, ay))
+
+    def _in_combat(self, agent_idx: int) -> bool:
+        """v17: agent is 'in combat' if hostile is adjacent OR shaken cooldown active.
+
+        Hostile = any monster, or any non-group-mate live agent.
+        Cooldown = took damage in the previous tick (1-tick shaken window).
+        Returns False when the combat-focus feature is disabled.
+        """
+        if not self._enable_combat_focus:
+            return False
+        if self._in_combat_cooldown[agent_idx] > 0:
+            return True
+        return self._has_adjacent_hostile(agent_idx)
 
     def _adjacent_group_allies(self, agent_idx: int, ref: Agent) -> list[int]:
         """Return indices of live group members of agent_idx within Chebyshev distance 1 of ref.
