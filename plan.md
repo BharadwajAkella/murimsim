@@ -25,14 +25,17 @@
 2. ✅ `shared-stash` — group withdraw, foraging-outward, stash capacity cap
 3. ✅ `sect-scaffold` — three sects, home regions, inter-sect combat rewards
 4. ✅ `aging` + `reproduction` — age-death, trait inheritance, `spawn_from_parents`
-5. 🔲 `viewer-territory` — per-sect colors for demo legibility
-6. 🔲 Phase 8 LLM culture (Mechanism 1) — selection bias + mutation modifier at generation boundaries
-7. 🔲 Reproducibility sweeps — multi-seed runs, same-seed → same emergence
-8. 🔲 Demo recording + repo polish + outreach email (June 30)
+5. ✅ Combat audit + power growth (v15→v16) — multiplicative DEFEND, damage obs, invalid-action redirect
+6. 🔲 `v17-fixes` — investigate WITHDRAW non-retrieval and strength regression (small scope; before sects-with-multiagent)
+7. 🔲 `viewer-territory` — per-sect colors for demo legibility
+8. 🔲 Phase 8 LLM culture (Mechanism 1) — selection bias + mutation modifier at generation boundaries
+9. 🔲 Reproducibility sweeps — multi-seed runs, same-seed → same emergence
+10. 🔲 Demo recording + repo polish + outreach email (June 30)
+
+**Architectural note (Entry 21 in journal.md):** Current training uses focal-agent (1 RL student + 9 heuristic NPCs per env). True multi-agent learning requires IPPO migration. **For the MVP demo, focal-agent is acceptable** — sect-level cultural drift across generations is the claim, not multi-agent emergent coordination per-step. IPPO is post-Katja unless time allows.
 
 ### What's cut for MVP
 
-- Phase 5.6 entirely (power growth, qi training, hazard unify) — post-Katja
 - Phase 7 (movable resources, haul action) — post-Katja
 - `settlement-training-v9` full retraining run — map and metrics exist; skip retraining
 - Replay viewer polish — screen recording with overlay text is sufficient
@@ -836,15 +839,15 @@ Keep as-is; no unit changes needed.
 | Phase 3: RL Combat            | ✅ Done        | Fight/flight w/o forgetting forage                   | Probes pass + `limbic_lstm_v2_final.zip`               |
 | Phase 4: Reward Tuning        | ✅ Done        | Strength priority, gather/eat decoupled              | LSTM v4: 74 steps, 7.3% defend, `limbic_lstm_v4_final.zip` |
 | Phase 5: Group Dynamics       | ✅ Done        | Groups, flanking, cohesion, food sharing + reciprocity | LSTM v8: lifespan 105.7, attack 0.3%, eat 31.9% |
-| Phase 5.5: Settlement         | ✅ Done        | Settlement metrics, dense-patch map, shared stash, capacity cap | 5 settlement metrics logged + 5 metric tests passing |
-| Phase 5.6: Power Growth       | 🚫 Cut (MVP)  | **Cut for June 30 demo.** Post-Katja.                | —                                                      |
+| Phase 5.5: Settlement         | ✅ Done        | Settlement metrics, dense-patch map, shared stash, capacity cap | 5 settlement metrics logged; v16 closed deposit loop (4.6%) |
+| Phase 5.6: Power Growth       | ✅ Done        | TRAIN action, qi field, hazard unify, multiplicative DEFEND, damage obs | v16: TRAIN 31.3%, resistance 0.268, age 210.7 |
 | Phase 6a: Sect Scaffold       | ✅ Done        | 3 sects, home regions, inter-sect combat rewards, sect obs | SectConfig + SectRegistry + DEFAULT_SECTS in `sect.py` |
 | Phase 6b: Generations         | ✅ Done        | Aging, age-death, reproduction, trait inheritance    | `Agent.spawn_from_parents()`, `_try_reproduce()` wired |
 | Phase 7: Movable Resources    | 🚫 Cut (MVP)  | **Cut for June 30 demo.** Post-Katja.                | —                                                      |
 | Phase 8: LLM Culture          | 🔲 Next        | LLM selection bias + mutation modifier at generation boundaries | Cultural drift measurable across generations |
 
 **Current test suite:** 165 passed, 3 skipped (as of 2026-04-27)
-**Latest checkpoint:** `checkpoints/limbic_lstm_v8/limbic_lstm_v8_final.zip` (must be copied into env before eval)
+**Latest checkpoint:** `checkpoints/limbic_lstm_v16/limbic_lstm_v16_final.zip` — 1.5M steps, warm-start from v15 (weight surgery for obs 263→264). Lifespan 210.7 (age), DEPOSIT 4.6%↑↑, STEAL 2.7% emerged, DEFEND collapsed to 0.9% (model prefers WALK_AWAY 4.4%↑). Open issues for v17: WITHDRAW retrieval not actually moving items; strength regression (0.727→0.473).
 
 > **Design principle:** No named groups, no top-down abstractions until the behavior they represent
 > is observed emerging from the simulation. Code follows behavior, not the other way around.
@@ -952,7 +955,7 @@ Curriculum: expose agents at low concentration first, increase over training.
 | `shared-stash` | Group withdraw, foraging-outward reward, stash capacity cap (`STASH_MAX_ITEMS=20`), action masking for full stash. | ✅ Done | `dense-patch-map` |
 | `settlement-training-v9` | **Cut for MVP.** Map + metrics exist; retraining skipped. Bring in v8 checkpoint for eval. | 🚫 Cut (MVP) | `shared-stash` |
 
-### Phase 5.6 — Power Growth ⛔ CUT FOR MVP
+### Phase 5.6 — Power Growth ✅ COMPLETE (v10 → v16)
 
 | ID | Task | Status | Depends On |
 | -- | ---- | ------ | ---------- |
