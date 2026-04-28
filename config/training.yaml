@@ -187,6 +187,40 @@ lstm_v17:
   enable_boss: true
 
 
+# lstm_v18: tiered qi-infused strikes + concave damage curve
+#   Key changes from v17:
+#   - Action space expanded: 15 → 17 (added ATTACK_QI, ATTACK_BURST)
+#     ⚠ HARD BREAK: cannot warm-start from v17 (action-space mismatch in policy head).
+#     v18 trains from scratch — by design. v17's "survival policy" was the wrong basin
+#     anyway; warm-starting would pull v18 toward v17's escape habits.
+#   - Damage formula concave: damage = (√strength + tier.bonus) × 0.5
+#       basic (0 qi):     √s × 0.5         → 0.50 max
+#       qi-infused (1 qi): (√s + 0.3) × 0.5 → 0.65 max
+#       burst (3 qi):     (√s + 0.7) × 0.5 → 0.85 max
+#     COMBAT_MAX_DAMAGE raised 0.5 → 0.9 to leave headroom.
+#   - Qi becomes a strategic combat resource (not just a stash deposit). Creates
+#     resource pressure: deposit qi for 0.05 stash reward vs hold for spike damage.
+#   - REWARD_DEPOSIT_PER_ITEM reverted 0.02 → 0.05 (v17 dropped deposits to 0).
+#   - n_envs 4 → 8, batch_size 64 → 128 (saturate the 16-core devbox).
+lstm_v18:
+  total_timesteps: 1_500_000
+  checkpoint_freq: 100_000
+  n_envs: 8
+  curriculum_ramp_steps: 1
+  lstm_hidden_size: 64
+  n_lstm_layers: 1
+  shared_lstm: false
+  n_steps: 512
+  batch_size: 128
+  learning_rate: 0.0003          # higher LR — training from scratch, not fine-tuning
+  learning_rate_final: 0.00003
+  clip_range: 0.20
+  clip_range_final: 0.05
+  ent_coef: 0.03                 # higher initial entropy — encourage exploring 3 attack tiers
+  warm_start: null               # ⚠ MUST be null — v17 action space (15) ≠ v18 (17)
+  enable_boss: true
+
+
 #   - food_spawn_density floor: 0.03 → 0.01 (scarcer episodes make stash mandatory)
 #   - All other params unchanged from v14
 #   - Warm-starts from v14 final

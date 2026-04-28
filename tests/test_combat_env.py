@@ -15,6 +15,10 @@ from murimsim.rl.multi_env import (
     COMBAT_MAX_DAMAGE,
     CURRICULUM_START_PROB,
     CURRICULUM_RAMP_STEPS,
+    STRIKE_BASIC,
+    STRIKE_QI,
+    STRIKE_BURST,
+    ACTION_TO_STRIKE,
 )
 from murimsim.actions import Action
 from murimsim.agent import Agent
@@ -45,7 +49,7 @@ def _make_agent(strength: float, health: float = 1.0, pos: tuple = (0, 0)) -> Ag
 # ---------------------------------------------------------------------------
 
 def test_combat_damage_no_defend() -> None:
-    """damage = attacker.effective_strength * COMBAT_ATTACKER_SCALE when not defending."""
+    """damage = √(attacker.effective_strength) × COMBAT_ATTACKER_SCALE when not defending (v18)."""
     env = _make_combat_env()
     env.reset(seed=0)
 
@@ -53,7 +57,7 @@ def test_combat_damage_no_defend() -> None:
     defender = _make_agent(strength=0.4)
     damage = env._combat_damage(attacker, defender, is_defending=False)
 
-    expected = attacker.effective_strength * COMBAT_ATTACKER_SCALE
+    expected = float(np.sqrt(attacker.effective_strength)) * COMBAT_ATTACKER_SCALE
     assert abs(damage - expected) < 1e-6, f"Expected {expected:.4f}, got {damage:.4f}"
     assert 0.0 <= damage <= COMBAT_MAX_DAMAGE
 
@@ -328,3 +332,112 @@ def test_strength_affects_combat() -> None:
     dmg_weak   = env._combat_damage(weak_attacker, defender, is_defending=False)
     dmg_strong = env._combat_damage(strong_attacker, defender, is_defending=False)
     assert dmg_strong > dmg_weak, f"Strong attacker should deal more damage: {dmg_strong} vs {dmg_weak}"
+
+
+# ---------------------------------------------------------------------------
+# v18: Qi-infused strike tier tests (3 discrete tiers — basic / qi / burst)
+# ---------------------------------------------------------------------------
+
+def test_strike_tier_action_mapping() -> None:
+    """Each ATTACK_* action maps to the correct StrikeTier."""
+    assert ACTION_TO_STRIKE[Action.ATTACK]       is STRIKE_BASIC
+    assert ACTION_TO_STRIKE[Action.ATTACK_QI]    is STRIKE_QI
+    assert ACTION_TO_STRIKE[Action.ATTACK_BURST] is STRIKE_BURST
+
+
+def test_strike_tier_qi_costs() -> None:
+    """Qi costs follow the documented ladder: basic 0, qi 1, burst 3."""
+    assert STRIKE_BASIC.qi_cost == 0
+    assert STRIKE_QI.qi_cost    == 1
+    assert STRIKE_BURST.qi_cost == 3
+
+
+def test_strike_tier_damage_ordering() -> None:
+    """At the same strength, damage is ordered: basic < qi < burst."""
+    env = _make_combat_env()
+    env.reset(seed=0)
+    attacker = _make_agent(strength=0.5)
+    defender = _make_agent(strength=0.5)
+
+    dmg_basic = env._combat_damage(attacker, defender, is_defending=False, tier=STRIKE_BASIC)
+    dmg_qi    = env._combat_damage(attacker, defender, is_defending=False, tier=STRIKE_QI)
+    dmg_burst = env._combat_damage(attacker, defender, is_defending=False, tier=STRIKE_BURST)
+    assert dmg_basic < dmg_qi < dmg_burst, f"Tier ordering broken: basic={dmg_basic}, qi={dmg_qi}, burst={dmg_burst}"
+
+
+def test_strike_tier_rescues_weak_attacker() -> None:
+    """At strength=0, basic deals 0 damage but qi/burst still hurt — gives weak agents agency."""
+    env = _make_combat_env()
+    env.reset(seed=0)
+    attacker = _make_agent(strength=0.0)
+    defender = _make_agent(strength=0.5)
+
+    dmg_basic = env._combat_damage(attacker, defender, is_defending=False, tier=STRIKE_BASIC)
+    dmg_qi    = env._combat_damage(attacker, defender, is_defending=False, tier=STRIKE_QI)
+    dmg_burst = env._combat_damage(attacker, defender, is_defending=False, tier=STRIKE_BURST)
+
+    assert dmg_basic < 1e-6, f"strength=0 basic should deal ~0 damage, got {dmg_basic}"
+    assert dmg_qi    > 0.10, f"strength=0 qi-strike should still hurt, got {dmg_qi}"
+    assert dmg_burst > 0.30, f"strength=0 burst-strike should hit hard, got {dmg_burst}"
+
+
+def test_spend_strike_qi_consumes_inventory() -> None:
+    """Calling _spend_strike_qi deducts the requested cost from inventory."""
+    env = _make_combat_env()
+    env.reset(seed=0)
+    attacker = env._agents[0]
+    attacker.inventory.qi = 5
+
+    used = env._spend_strike_qi(attacker, STRIKE_QI)
+    assert used is STRIKE_QI
+    assert attacker.inventory.qi == 4
+    assert env._ep_qi_strikes_used == 1
+    assert env._ep_qi_spent_in_combat == 1
+
+    used = env._spend_strike_qi(attacker, STRIKE_BURST)
+    assert used is STRIKE_BURST
+    assert attacker.inventory.qi == 1
+    assert env._ep_burst_strikes_used == 1
+    assert env._ep_qi_spent_in_combat == 4  # 1 (qi) + 3 (burst)
+
+
+def test_spend_strike_qi_downgrades_when_insufficient() -> None:
+    """BURST request with only 1 qi downgrades to QI, not BASIC."""
+    env = _make_combat_env()
+    env.reset(seed=0)
+    attacker = env._agents[0]
+    attacker.inventory.qi = 1
+
+    used = env._spend_strike_qi(attacker, STRIKE_BURST)
+    assert used is STRIKE_QI, "Should downgrade BURST→QI when only 1 qi available"
+    assert attacker.inventory.qi == 0
+    assert env._ep_qi_strikes_used == 1
+    assert env._ep_burst_strikes_used == 0
+
+
+def test_spend_strike_qi_falls_through_to_basic() -> None:
+    """QI request with 0 qi falls back to BASIC (no consumption, no telemetry)."""
+    env = _make_combat_env()
+    env.reset(seed=0)
+    attacker = env._agents[0]
+    attacker.inventory.qi = 0
+
+    used = env._spend_strike_qi(attacker, STRIKE_QI)
+    assert used is STRIKE_BASIC
+    assert attacker.inventory.qi == 0
+    assert env._ep_qi_strikes_used == 0
+    assert env._ep_qi_spent_in_combat == 0
+
+
+def test_basic_strike_never_consumes_qi() -> None:
+    """STRIKE_BASIC has qi_cost=0 — must never touch inventory or telemetry."""
+    env = _make_combat_env()
+    env.reset(seed=0)
+    attacker = env._agents[0]
+    attacker.inventory.qi = 5
+
+    used = env._spend_strike_qi(attacker, STRIKE_BASIC)
+    assert used is STRIKE_BASIC
+    assert attacker.inventory.qi == 5
+    assert env._ep_qi_strikes_used == 0
+    assert env._ep_qi_spent_in_combat == 0

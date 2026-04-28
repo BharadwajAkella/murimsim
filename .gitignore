@@ -36,3 +36,4 @@ Zone.Identifier
 *:Zone.Identifier
 nohup.out
 logs/
+checkpoints/

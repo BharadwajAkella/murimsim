@@ -22,7 +22,7 @@ Observation layout (263 floats total):
                 strength,               # current base strength
                 hunger_resistance       # trait: how well agent tolerates hunger
 
-Action space: Discrete(15) — N_ACTIONS_PHASE6
+Action space: Discrete(17) — N_ACTIONS_PHASE6_QI (v18: + ATTACK_QI, ATTACK_BURST)
     0–3:  MOVE (N/S/E/W)
     4:    EAT
     5:    GATHER
@@ -40,13 +40,23 @@ from __future__ import annotations
 
 import copy
 import math
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
-from murimsim.actions import Action, MOVE_DELTAS, N_ACTIONS_PHASE2, N_ACTIONS_PHASE3, N_ACTIONS_PHASE5, N_ACTIONS_PHASE6
+from murimsim.actions import (
+    Action,
+    MOVE_DELTAS,
+    N_ACTIONS_PHASE2,
+    N_ACTIONS_PHASE3,
+    N_ACTIONS_PHASE5,
+    N_ACTIONS_PHASE6,
+    N_ACTIONS_PHASE6_QI,
+    ATTACK_ACTIONS,
+)
 from murimsim.agent import Agent, inherit_value  # noqa: F401 (inherit_value re-exported for tests)
 from murimsim.monster import (
     BOSS_LOOT_FOOD,
@@ -1016,11 +1026,35 @@ class MultiAgentEnv(gym.Env):
 
 
 # ── Combat constants ──────────────────────────────────────────────────────────
-COMBAT_ATTACKER_SCALE: float = 0.3   # base_damage = attacker.effective_strength * scale
+COMBAT_ATTACKER_SCALE: float = 0.5   # base_damage = (√strength + tier.bonus) × scale  (v18)
 # DEFEND is multiplicative: damage *= (1 − defender.defense_power)
 # defense_power = effective_strength×0.5 + avg_resistance×0.5
 # A master cultivator (defense_power→1.0) fully nullifies any attack
-COMBAT_MAX_DAMAGE: float = 0.5
+COMBAT_MAX_DAMAGE: float = 0.9        # v18: raised from 0.5 to leave headroom for qi-burst strikes ((1+0.7)·0.5 = 0.85)
+
+
+@dataclass(frozen=True)
+class StrikeTier:
+    """v18 qi-infused strike tier. Picked by the policy via Action.ATTACK_*."""
+
+    name: str           # human-readable label for logging / replay
+    qi_cost: int        # qi consumed from attacker.inventory on a successful strike
+    bonus: float        # additive term added to √strength BEFORE COMBAT_ATTACKER_SCALE
+
+
+# Three discrete strike tiers. Bonuses are in √strength units (added before scale).
+# Damage at strength=1.0:  basic 0.50, qi 0.65, burst 0.85.
+# Damage at strength=0.0:  basic 0.00, qi 0.15, burst 0.35  ← qi/burst rescue weak agents.
+STRIKE_BASIC: StrikeTier = StrikeTier(name="basic", qi_cost=0, bonus=0.0)
+STRIKE_QI:    StrikeTier = StrikeTier(name="qi",    qi_cost=1, bonus=0.3)
+STRIKE_BURST: StrikeTier = StrikeTier(name="burst", qi_cost=3, bonus=0.7)
+
+# Map from Action enum to the strike tier the policy is requesting.
+ACTION_TO_STRIKE: dict[Action, StrikeTier] = {
+    Action.ATTACK:       STRIKE_BASIC,
+    Action.ATTACK_QI:    STRIKE_QI,
+    Action.ATTACK_BURST: STRIKE_BURST,
+}
 
 REWARD_DEFEAT_OPPONENT: float = 0.3
 REWARD_DAMAGE_TAKEN_SCALE: float = -0.2
@@ -1052,7 +1086,7 @@ REWARD_FOOD_SHARE: float = 0.04       # reward focal receives when it shares or 
 # Foraging-outward: deposit after having been >=N tiles away from stash since last deposit
 FORAGE_OUTWARD_MIN_DIST: int = 5      # Chebyshev tiles away from stash to qualify
 REWARD_FORAGE_OUTWARD: float = 0.03   # bonus for depositing after a foraging excursion
-REWARD_DEPOSIT_PER_ITEM: float = 0.02 # v17: lowered from 0.05 — DEPOSIT discoverable but no longer dominant signal
+REWARD_DEPOSIT_PER_ITEM: float = 0.05 # v18: reverted from v17's 0.02 (deposits collapsed to 0). Stash needs to be a real choice, not a vestigial behavior.
 # Group withdrawal bonus: reward when agent withdraws from a group stash while hungry
 REWARD_GROUP_WITHDRAW_BONUS: float = 0.02
 # Stash proximity: disabled — per-tick pull toward individual stash was anti-cooperative,
@@ -1077,7 +1111,7 @@ class CombatEnv(MultiAgentEnv):
 
     Extends MultiAgentEnv with:
     - Action space Discrete(9) — adds ATTACK and DEFEND.
-    - Combat: ``damage = attacker.strength*0.3 − defender.strength*0.1*is_defending``
+    - Combat (v18): ``damage = √attacker.effective_strength × 0.5`` then × (1 − defender.defense_power) if defending
       clamped to [0, 0.5]. Requires adjacency (Manhattan ≤ 1).
     - Death drops inventory (food) onto the agent's tile.
     - Curriculum: ``combat_prob`` starts at 0.2, ramps to 1.0 over
@@ -1105,7 +1139,7 @@ class CombatEnv(MultiAgentEnv):
             n_agents=n_agents,
             seed=seed,
             render_mode=render_mode,
-            n_actions=N_ACTIONS_PHASE6,
+            n_actions=N_ACTIONS_PHASE6_QI,
         )
         self._curriculum_ramp_steps: int = curriculum_ramp_steps
         self._global_step_count: int = 0  # persists across episodes
@@ -1172,6 +1206,10 @@ class CombatEnv(MultiAgentEnv):
         self._ep_boss_attacks_landed: int = 0
         self._ep_damage_from_boss: float = 0.0
         self._ep_agents_killed_by_boss: int = 0
+        # v18: qi-infused strike telemetry
+        self._ep_qi_strikes_used: int = 0      # successful ATTACK_QI strikes (1 qi spent)
+        self._ep_burst_strikes_used: int = 0   # successful ATTACK_BURST strikes (3 qi spent)
+        self._ep_qi_spent_in_combat: int = 0   # total qi consumed by all strike actions
         # v17 combat-focus: reset shaken-cooldown for all agents
         self._in_combat_cooldown = [0] * self._n_agents
         if self._enable_boss:
@@ -1289,9 +1327,20 @@ class CombatEnv(MultiAgentEnv):
         if agent.health < CRITICAL_HEALTH_EAT_THRESHOLD and agent.inventory.food > 0:
             return Action.EAT
         ax, ay = agent.position
+        # v18: when in combat and qi is available, prefer the highest-affordable
+        # qi-infused tier — burst > qi > basic. Encourages spending hoarded qi
+        # offensively rather than letting it sit in inventory.
         if self._monsters.get_adjacent_to(ax, ay):
+            if agent.inventory.qi >= STRIKE_BURST.qi_cost:
+                return Action.ATTACK_BURST
+            if agent.inventory.qi >= STRIKE_QI.qi_cost:
+                return Action.ATTACK_QI
             return Action.ATTACK
         if self._nearest_adjacent_agent(agent) is not None:
+            if agent.inventory.qi >= STRIKE_BURST.qi_cost:
+                return Action.ATTACK_BURST
+            if agent.inventory.qi >= STRIKE_QI.qi_cost:
+                return Action.ATTACK_QI
             return Action.ATTACK
         return Action.DEFEND
 
@@ -1325,11 +1374,11 @@ class CombatEnv(MultiAgentEnv):
                 return self._combat_focus_fallback(agent)
 
         # 2. Invalid-action redirects → smart fallback (not REST)
-        if action in (Action.ATTACK, Action.COLLABORATE, Action.WALK_AWAY):
+        if action in ATTACK_ACTIONS or action in (Action.COLLABORATE, Action.WALK_AWAY):
             no_adjacent_agent = self._nearest_adjacent_agent(agent) is None
-            # ATTACK is also valid against an adjacent monster (boss).
+            # ATTACK* is also valid against an adjacent monster (boss).
             # COLLABORATE/WALK_AWAY remain agent-only.
-            if action == Action.ATTACK:
+            if action in ATTACK_ACTIONS:
                 ax, ay = agent.position
                 if no_adjacent_agent and not self._monsters.get_adjacent_to(ax, ay):
                     return self._smart_fallback(agent)
@@ -1374,6 +1423,13 @@ class CombatEnv(MultiAgentEnv):
         no_adjacent_monster = not self._monsters.get_adjacent_to(ax, ay)
         if no_adjacent_agent and no_adjacent_monster:
             mask[Action.ATTACK] = False
+            mask[Action.ATTACK_QI] = False
+            mask[Action.ATTACK_BURST] = False
+        # v18: qi-spend tiers also require sufficient qi in inventory
+        if agent.inventory.qi < STRIKE_QI.qi_cost:
+            mask[Action.ATTACK_QI] = False
+        if agent.inventory.qi < STRIKE_BURST.qi_cost:
+            mask[Action.ATTACK_BURST] = False
         if no_adjacent_agent:
             mask[Action.COLLABORATE] = False
             mask[Action.WALK_AWAY] = False
@@ -1402,6 +1458,8 @@ class CombatEnv(MultiAgentEnv):
         # Curriculum: mask combat actions when not yet enabled
         if self._rng.random() > self.combat_prob:
             mask[Action.ATTACK] = False
+            mask[Action.ATTACK_QI] = False
+            mask[Action.ATTACK_BURST] = False
             mask[Action.DEFEND] = False
 
         # v17 combat-focus: when in combat, mask out non-combat actions.
@@ -1424,7 +1482,7 @@ class CombatEnv(MultiAgentEnv):
         # Curriculum: redirect combat actions to TRAIN when not yet fully enabled.
         # TRAIN is always productive — better signal than REST.
         action_enum = Action(action)
-        if action_enum in (Action.ATTACK, Action.DEFEND):
+        if action_enum in (Action.ATTACK, Action.ATTACK_QI, Action.ATTACK_BURST, Action.DEFEND):
             if self._rng.random() > self.combat_prob:
                 action_enum = Action.TRAIN
 
@@ -1457,7 +1515,8 @@ class CombatEnv(MultiAgentEnv):
         flanking_bonus_earned = False
         self._last_action_details[self._focal_idx] = ""
         self._last_action_names[self._focal_idx] = action_enum.name.lower()
-        if action_enum == Action.ATTACK:
+        if action_enum in ATTACK_ACTIONS:
+            requested_tier = ACTION_TO_STRIKE[action_enum]
             # Check for flanking allies before the attack (target may die during it)
             pre_target = self._nearest_adjacent_agent(focal)
             if pre_target is not None:
@@ -1470,7 +1529,7 @@ class CombatEnv(MultiAgentEnv):
                 self._last_action_details[self._focal_idx] = pre_target.agent_id
             else:
                 self._last_action_details[self._focal_idx] = "no_target"
-            damage_dealt, defeated = self._do_attack(focal)
+            damage_dealt, defeated = self._do_attack(focal, requested_tier=requested_tier)
             # Track damage the target just took so its next obs reflects being hit
             if damage_dealt > 0 and pre_target is not None:
                 target_idx = self._agents.index(pre_target)
@@ -1739,6 +1798,9 @@ class CombatEnv(MultiAgentEnv):
             info["ep_boss_killed"] = self._ep_boss_killed
             info["ep_boss_attacks_landed"] = self._ep_boss_attacks_landed
             info["ep_boss_damage_dealt"] = self._ep_boss_damage_dealt
+            info["ep_qi_strikes_used"] = self._ep_qi_strikes_used
+            info["ep_burst_strikes_used"] = self._ep_burst_strikes_used
+            info["ep_qi_spent_in_combat"] = self._ep_qi_spent_in_combat
             info["ep_damage_from_boss"] = self._ep_damage_from_boss
             info["ep_agents_killed_by_boss"] = self._ep_agents_killed_by_boss
             info["ep_boss_unique_attackers"] = sum(
@@ -1748,7 +1810,7 @@ class CombatEnv(MultiAgentEnv):
 
     # ── Combat helpers ────────────────────────────────────────────────────────
 
-    def _do_attack(self, attacker: Agent) -> tuple[float, bool]:
+    def _do_attack(self, attacker: Agent, requested_tier: StrikeTier = STRIKE_BASIC) -> tuple[float, bool]:
         """Attack the nearest target within Chebyshev distance 1 (8 directions). Returns (damage_dealt, killed).
 
         Targeting priority: live boss-monster (if adjacent) > nearest agent.
@@ -1758,13 +1820,19 @@ class CombatEnv(MultiAgentEnv):
         If the attacker has group members flanking (adjacent to the target from any direction),
         each ally grants a GROUP_ATTACK_BONUS_PER_ALLY multiplicative damage bonus
         (agent targets only — no flanking bonus for boss yet).
+
+        v18: ``requested_tier`` is the qi-spend tier the policy chose
+        (STRIKE_BASIC / STRIKE_QI / STRIKE_BURST). Qi is consumed only when a
+        target is found (no qi wasted on whiffs); insufficient-qi cases
+        downgrade automatically.
         """
         # Boss takes priority when adjacent
         bx, by = attacker.position
         adjacent_monsters = self._monsters.get_adjacent_to(bx, by)
         if adjacent_monsters:
             monster = adjacent_monsters[0]
-            damage = self._combat_damage(attacker, attacker, is_defending=False)
+            tier = self._spend_strike_qi(attacker, requested_tier)
+            damage = self._combat_damage(attacker, attacker, is_defending=False, tier=tier)
             # NB: `_combat_damage` ignores the defender unless is_defending=True,
             # so passing attacker as a stand-in is safe and keeps damage scaling
             # tied to the attacker's strength only.
@@ -1781,7 +1849,8 @@ class CombatEnv(MultiAgentEnv):
             return 0.0, False
         attacker_idx = self._agents.index(attacker)
         flanking_allies = self._adjacent_group_allies(attacker_idx, target)
-        damage = self._combat_damage(attacker, target, is_defending=False)
+        tier = self._spend_strike_qi(attacker, requested_tier)
+        damage = self._combat_damage(attacker, target, is_defending=False, tier=tier)
         if flanking_allies:
             bonus = GROUP_ATTACK_BONUS_PER_ALLY * len(flanking_allies)
             damage = float(np.clip(damage * (1.0 + bonus), 0.0, COMBAT_MAX_DAMAGE))
@@ -1831,19 +1900,20 @@ class CombatEnv(MultiAgentEnv):
         gs = self._world.grid_size
         damage_to_focal = 0.0
 
-        if action == Action.ATTACK:
+        if action in ATTACK_ACTIONS:
             target = self._nearest_adjacent_agent(agent)
             if target is not None and target.alive:
                 is_focal_target = (target is focal)
                 defending = focal_defending if is_focal_target else False
-                damage = self._combat_damage(agent, target, is_defending=defending)
+                tier = self._spend_strike_qi(agent, ACTION_TO_STRIKE[action])
+                damage = self._combat_damage(agent, target, is_defending=defending, tier=tier)
                 target.health = max(0.0, target.health - damage)
                 target._check_death("combat")
                 if not target.alive:
                     self._drop_inventory(target)
                 if is_focal_target:
                     damage_to_focal = damage
-                self._last_action_names[agent_idx] = "attack"
+                self._last_action_names[agent_idx] = action.name.lower()
                 self._last_action_details[agent_idx] = target.agent_id
             else:
                 self._heuristic_step(agent)
@@ -1915,7 +1985,11 @@ class CombatEnv(MultiAgentEnv):
         adjacent_monsters = self._monsters.get_adjacent_to(ax, ay)
         if adjacent_monsters:
             monster = adjacent_monsters[0]
-            damage = self._combat_damage(agent, agent, is_defending=False)
+            # v18: heuristic agents use STRIKE_QI when affordable (1 qi for +0.15 damage),
+            # else fall back to basic. Burst is reserved for the policy to discover.
+            requested = STRIKE_QI if agent.inventory.qi >= STRIKE_QI.qi_cost else STRIKE_BASIC
+            tier = self._spend_strike_qi(agent, requested)
+            damage = self._combat_damage(agent, agent, is_defending=False, tier=tier)
             killed = monster.take_damage(damage, agent.agent_id)
             self._ep_boss_attacks_landed += 1
             self._ep_boss_damage_dealt += damage
@@ -1940,7 +2014,9 @@ class CombatEnv(MultiAgentEnv):
 
             # Attack focal if adjacent, focal appears weaker, and agent is not very social
             if agent.strength > focal.strength * 1.1 and focal.health > 0 and agent.sociability < HEURISTIC_COLLAB_THRESHOLD:
-                damage = self._combat_damage(agent, focal, is_defending=focal_defending)
+                requested = STRIKE_QI if agent.inventory.qi >= STRIKE_QI.qi_cost else STRIKE_BASIC
+                tier = self._spend_strike_qi(agent, requested)
+                damage = self._combat_damage(agent, focal, is_defending=focal_defending, tier=tier)
                 focal.health = max(0.0, focal.health - damage)
                 focal._check_death("combat")
                 if not focal.alive:
@@ -1956,11 +2032,27 @@ class CombatEnv(MultiAgentEnv):
         return 0.0
 
     def _combat_damage(
-        self, attacker: Agent, defender: Agent, is_defending: bool
+        self, attacker: Agent, defender: Agent, is_defending: bool, tier: StrikeTier = STRIKE_BASIC,
     ) -> float:
         """Compute combat damage dealt to the defender.
 
-        Base damage: attacker.effective_strength × COMBAT_ATTACKER_SCALE
+        Base damage: (√(attacker.effective_strength) + tier.bonus) × COMBAT_ATTACKER_SCALE
+
+        v18 curve: damage uses √strength so early training gains are 3-5× more
+        impactful than they would be under linear scaling, while still saturating
+        cleanly at strength=1.0. Combined with the saturating strength growth in
+        Agent.train(), this gives the realistic "fast early gains, slow late
+        gains" arc the cultivation genre expects, AND makes TRAIN feel rewarding
+        in policy gradient updates because the early derivative is steep.
+
+        Qi-infused strikes (v18, thematic): the policy chooses one of three
+        Action.ATTACK_* variants (basic, qi, burst). Each maps to a StrikeTier
+        with a flat bonus added to √strength *before* scaling. The qi-cost is
+        consumed at the call site via ``_spend_strike_qi`` (which downgrades
+        the tier if the attacker has insufficient qi). This keeps the function
+        pure and lets the policy learn to trade qi reserves for spike damage —
+        weak agents get a meaningful contribution against monsters, and rich
+        cultivators get a finisher tool.
 
         When the defender chose DEFEND, damage is multiplied by
         (1 − defender.defense_power).  defense_power ∈ [0, 1] is a blend of
@@ -1974,10 +2066,36 @@ class CombatEnv(MultiAgentEnv):
 
         Damage is clamped to [0, COMBAT_MAX_DAMAGE].
         """
-        base = attacker.effective_strength * COMBAT_ATTACKER_SCALE
+        strength_term = float(np.sqrt(attacker.effective_strength)) + tier.bonus
+        base = strength_term * COMBAT_ATTACKER_SCALE
         if is_defending:
             base *= max(0.0, 1.0 - defender.defense_power)
         return float(np.clip(base, 0.0, COMBAT_MAX_DAMAGE))
+
+    def _spend_strike_qi(self, attacker: Agent, requested: StrikeTier) -> StrikeTier:
+        """Consume qi for the requested strike tier; downgrade if insufficient.
+
+        Returns the actual tier used (≤ requested). Mutates attacker.inventory.qi
+        and bumps per-episode telemetry counters. Free tiers (qi_cost=0) never
+        downgrade and never touch inventory.
+
+        Downgrade ladder:
+          BURST (3 qi) → QI (1 qi) → BASIC (0 qi)
+        """
+        if requested.qi_cost == 0:
+            return requested
+        if attacker.inventory.qi >= requested.qi_cost:
+            attacker.inventory.qi -= requested.qi_cost
+            self._ep_qi_spent_in_combat += requested.qi_cost
+            if requested is STRIKE_BURST:
+                self._ep_burst_strikes_used += 1
+            elif requested is STRIKE_QI:
+                self._ep_qi_strikes_used += 1
+            return requested
+        # Insufficient qi — try to downgrade BURST → QI before falling to BASIC
+        if requested is STRIKE_BURST and attacker.inventory.qi >= STRIKE_QI.qi_cost:
+            return self._spend_strike_qi(attacker, STRIKE_QI)
+        return STRIKE_BASIC
 
     def _nearest_adjacent_agent(self, agent: Agent) -> Agent | None:
         """Return nearest live agent within Chebyshev distance 1 (8 directions), or None."""
