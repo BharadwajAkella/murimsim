@@ -176,3 +176,190 @@ def test_no_loot_when_boss_unkilled() -> None:
     env.reset(seed=0)
     boss = env._monsters.all_alive()[0]
     assert env._stash_registry.get_stashes_at(*boss.position) == []
+
+
+# ─── Behavioral tests (boss actually does things) ────────────────────────────
+
+
+def test_boss_steps_toward_nearest_agent() -> None:
+    """Boss should move one Chebyshev cell toward the nearest live agent each tick."""
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=True)
+    env.reset(seed=0)
+    boss = env._monsters.all_alive()[0]
+    target = env._agents[0]
+    target.position = (15, 15)
+    target.health = 1.0
+    boss.position = (5, 5)
+    pre = boss.position
+    env._monsters.tick_all(env._world, env._agents, env._rng)
+    bx, by = boss.position
+    px, py = pre
+    cheb_pre = max(abs(15 - px), abs(15 - py))
+    cheb_post = max(abs(15 - bx), abs(15 - by))
+    assert cheb_post < cheb_pre, f"Boss did not approach: {pre} -> {(bx, by)}"
+
+
+def test_boss_attacks_adjacent_agent_via_tick_all() -> None:
+    """When boss is adjacent to a live agent, tick_all returns a damage event."""
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=True)
+    env.reset(seed=0)
+    boss = env._monsters.all_alive()[0]
+    victim = env._agents[1]
+    victim.position = boss.position
+    victim.health = 1.0
+    h0 = victim.health
+    events = env._monsters.tick_all(env._world, env._agents, env._rng)
+    assert len(events) >= 1
+    mid, vid, dmg = events[0]
+    assert mid == boss.monster_id
+    assert vid == victim.agent_id
+    assert dmg > 0
+    assert victim.health < h0
+
+
+def test_boss_damage_propagates_to_focal_obs_state() -> None:
+    """Damage from boss to focal must show up in _damage_taken_last_step.
+
+    Note: env._focal_idx rotates after step(), so capture it before.
+    """
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=True)
+    env.reset(seed=0)
+    boss = env._monsters.all_alive()[0]
+    focal_idx_before = env._focal_idx
+    focal = env._agents[focal_idx_before]
+    focal.position = boss.position
+    focal.health = 1.0
+    env._global_step_count = 10**9
+    env.step(Action.TRAIN.value)
+    assert env._damage_taken_last_step[focal_idx_before] > 0
+    # Sanity: focal actually took damage
+    assert focal.health < 1.0
+
+
+def test_boss_lethal_hit_increments_kill_counter() -> None:
+    """Boss damage that drops an agent to 0 HP bumps ep_agents_killed_by_boss."""
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=True)
+    env.reset(seed=0)
+    boss = env._monsters.all_alive()[0]
+    victim = env._agents[1]
+    victim.position = boss.position
+    victim.health = 0.001
+    pre = env._ep_agents_killed_by_boss
+    env._global_step_count = 10**9
+    env.step(Action.TRAIN.value)
+    assert env._ep_agents_killed_by_boss > pre
+
+
+def test_boss_permadeath_no_action_after_death() -> None:
+    """A defeated boss must not act in subsequent ticks."""
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=True)
+    env.reset(seed=0)
+    boss = env._monsters.all_alive()[0]
+    boss.take_damage(BOSS_BASE_HEALTH + 1.0, "agent_x")
+    assert not boss.alive
+    pre_pos = boss.position
+    events = env._monsters.tick_all(env._world, env._agents, env._rng)
+    assert events == []
+    assert boss.position == pre_pos
+    assert env._monsters.all_alive() == []
+
+
+def test_boss_does_not_respawn_until_reset() -> None:
+    """A defeated boss stays gone within the episode; reset spawns a fresh one."""
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=True)
+    env.reset(seed=0)
+    boss = env._monsters.all_alive()[0]
+    boss.take_damage(BOSS_BASE_HEALTH + 1.0, "agent_x")
+    env._global_step_count = 10**9
+    env.step(Action.TRAIN.value)
+    env.step(Action.TRAIN.value)
+    assert env._monsters.all_alive() == []
+    env.reset(seed=0)
+    assert len(env._monsters.all_alive()) == 1
+
+
+def test_heuristic_non_focal_attacks_adjacent_boss() -> None:
+    """Non-focal heuristic agents must engage adjacent bosses (load-bearing for loot share)."""
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=True)
+    env.reset(seed=0)
+    boss = env._monsters.all_alive()[0]
+    non_focal_idx = (env._focal_idx + 1) % env._n_agents
+    non_focal = env._agents[non_focal_idx]
+    bx, by = boss.position
+    non_focal.position = (bx, by)
+    non_focal.health = 1.0
+    env._agents[env._focal_idx].position = (
+        (bx + 10) % env._world.grid_size,
+        (by + 10) % env._world.grid_size,
+    )
+    env._global_step_count = 10**9
+    pre_attackers = set(boss.attackers)
+    env.step(Action.TRAIN.value)
+    new_attackers = boss.attackers - pre_attackers
+    assert non_focal.agent_id in new_attackers, (
+        f"Non-focal heuristic did not attack adjacent boss; attackers={boss.attackers}"
+    )
+
+
+def test_action_mask_allows_attack_when_only_monster_adjacent() -> None:
+    """ATTACK must be unmasked when only a boss (not an agent) is adjacent."""
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=True)
+    env.reset(seed=0)
+    boss = env._monsters.all_alive()[0]
+    focal = env._agents[env._focal_idx]
+    focal.position = boss.position
+    for i, a in enumerate(env._agents):
+        if i != env._focal_idx:
+            a.position = (
+                (boss.position[0] + 10) % env._world.grid_size,
+                (boss.position[1] + 10) % env._world.grid_size,
+            )
+    env._global_step_count = 10**9
+    mask = env.action_masks()
+    assert mask[Action.ATTACK]
+    assert not mask[Action.COLLABORATE]
+    assert not mask[Action.WALK_AWAY]
+
+
+def test_end_to_end_loot_withdraw_after_boss_defeat() -> None:
+    """Full pipeline: defeat boss -> loot stash drops -> participant WITHDRAWs food."""
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=True)
+    env.reset(seed=0)
+    boss = env._monsters.all_alive()[0]
+    boss.take_damage(0.5, "agent_a")
+    boss.take_damage(0.5, "agent_b")
+    boss.take_damage(BOSS_BASE_HEALTH, "agent_c")
+    assert not boss.alive
+    env._drop_boss_loot(boss)
+    agent = env._agents[0]
+    agent.agent_id = "agent_a"
+    agent.position = boss.position
+    pre_food = agent.inventory.food
+    ok = env._stash_registry.withdraw(agent)
+    assert ok
+    assert agent.inventory.food >= pre_food + BOSS_LOOT_FOOD
+
+
+def test_boss_corner_spawn_seed_deterministic() -> None:
+    """Same seed -> same corner."""
+    env_a = CombatEnv(config=_cfg(), n_agents=4, seed=42, enable_boss=True)
+    env_a.reset(seed=42)
+    pos_a = env_a._monsters.all_alive()[0].position
+
+    env_b = CombatEnv(config=_cfg(), n_agents=4, seed=42, enable_boss=True)
+    env_b.reset(seed=42)
+    pos_b = env_b._monsters.all_alive()[0].position
+
+    assert pos_a == pos_b
+
+
+def test_unique_attacker_count_no_double_count() -> None:
+    """Unique attacker count ignores duplicate hits from the same agent."""
+    env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=True)
+    env.reset(seed=0)
+    boss = env._monsters.all_alive()[0]
+    boss.take_damage(0.1, "agent_a")
+    boss.take_damage(0.1, "agent_b")
+    boss.take_damage(0.1, "agent_a")
+    unique = sum(len(m.attackers) for m in env._monsters.all() if m.kind == "boss")
+    assert unique == 2
