@@ -1762,12 +1762,13 @@ class CombatEnv(MultiAgentEnv):
             for recipient_idx in group:
                 if recipient_idx == sharer_idx:
                     continue
+                # v19: capture pre-share affinity so the bonus reflects EXISTING
+                # reciprocity rather than the affinity bump from this very share.
+                pre_share_affinity = self._affinity(recipient_idx, focal_idx) if sharer_idx == focal_idx else 0.0
                 if self._try_food_share(sharer_idx, recipient_idx):
                     if sharer_idx == focal_idx:
                         food_share_reward += REWARD_FOOD_SHARE
-                        # v19: mutual-affinity bonus — recipient already has positive
-                        # history toward focal (signals reciprocal trust forming).
-                        if self._affinity(recipient_idx, focal_idx) > 0.0:
+                        if pre_share_affinity > 0.0:
                             food_share_reward += REWARD_MUTUAL_SHARE_BONUS
 
         # 4. Update history for focal agent

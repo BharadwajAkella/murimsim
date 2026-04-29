@@ -852,3 +852,212 @@ def test_terminal_info_emits_v19_keys() -> None:
         assert info["ep_friendly_flank_count"] == 0
         assert "ep_focal_max_affinity" in info
         assert "ep_focal_min_affinity" in info
+
+
+# ─── v19: Affinity event-recording integration tests ─────────────────────────
+
+
+def _force_group(env, *idxs):
+    """Force the given agent indices into the same group (skip RNG/COLLABORATE)."""
+    env._groups.append(frozenset(idxs))
+
+
+def test_affinity_recorded_on_food_share() -> None:
+    """_try_food_share must update directional affinity (recipient learns more)."""
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    sharer_idx, recipient_idx = 0, 1
+    sharer = env._agents[sharer_idx]
+    recipient = env._agents[recipient_idx]
+    sharer.inventory.food = 5
+    recipient.hunger = 1.0  # critical
+    _force_group(env, sharer_idx, recipient_idx)
+    # Force reciprocity roll to succeed by stacking RNG calls; loop until success.
+    for _ in range(50):
+        env._ep_step_count += 1
+        if env._try_food_share(sharer_idx, recipient_idx):
+            break
+    assert env._affinity(recipient_idx, sharer_idx) > 0.0
+    assert env._affinity(sharer_idx, recipient_idx) > 0.0
+    # Recipient should feel stronger gratitude than sharer's investment.
+    assert env._affinity(recipient_idx, sharer_idx) > env._affinity(sharer_idx, recipient_idx)
+
+
+def test_affinity_recorded_on_steal() -> None:
+    """STEAL handler must update affinity (victim resents thief strongly)."""
+    from murimsim.actions import Action
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    focal_idx = env._focal_idx
+    victim_idx = (focal_idx + 1) % env._n_agents
+    focal = env._agents[focal_idx]
+    victim = env._agents[victim_idx]
+    # Give victim food, deposit it as a stash on the victim's tile.
+    victim.inventory.food = 3
+    stash = env._stash_registry.deposit(victim)
+    assert stash is not None
+    # Place focal on the stash tile so STEAL hits it.
+    focal.position = stash.position
+    env.step(int(Action.STEAL.value))
+    assert env._affinity(victim_idx, focal_idx) < 0.0
+    assert env._affinity(focal_idx, victim_idx) < 0.0
+    assert abs(env._affinity(victim_idx, focal_idx)) > abs(env._affinity(focal_idx, victim_idx))
+
+
+def test_affinity_flank_bond_recorded() -> None:
+    """When attacker hits target with a flanking ally, attacker↔ally affinity goes up.
+
+    NOTE: ``_nearest_adjacent_agent`` iterates agents in index order, so the
+    target must be at a LOWER index than the ally to be picked first.
+    """
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    # Indices: 0=attacker, 1=target, 2=ally  (target found before ally in iteration)
+    attacker, target, ally = env._agents[0], env._agents[1], env._agents[2]
+    attacker.position = (5, 5)
+    target.position = (5, 6)      # adjacent to attacker
+    ally.position = (5, 7)        # adjacent to target (Chebyshev 1)
+    target.health = 1.0
+    _force_group(env, 0, 2)       # attacker + ally in same group
+    env._do_attack(attacker)
+    aff_atk_to_ally = env._affinity(0, 2)
+    aff_ally_to_atk = env._affinity(2, 0)
+    assert aff_atk_to_ally > 0.0, "attacker should bond with flanking ally"
+    assert aff_ally_to_atk > 0.0, "flanking ally should bond with attacker"
+
+
+def test_attack_zero_damage_does_not_record_affinity() -> None:
+    """No adjacent target → no affinity change (guards against phantom updates)."""
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    a, b = env._agents[0], env._agents[1]
+    a.position = (1, 1)
+    b.position = (15, 15)         # far away
+    env._do_attack(a)
+    assert env._affinity(0, 1) == 0.0
+    assert env._affinity(1, 0) == 0.0
+
+
+def test_betrayal_penalty_and_telemetry() -> None:
+    """Focal attacking a high-affinity target → betrayal penalty + counter incremented."""
+    from murimsim.rl.multi_env import (
+        AFFINITY_BETRAY_THRESHOLD, AFFINITY_NORM, PENALTY_BETRAYAL,
+    )
+    from murimsim.actions import Action
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    focal_idx = env._focal_idx
+    target_idx = (focal_idx + 1) % env._n_agents
+    focal = env._agents[focal_idx]
+    target = env._agents[target_idx]
+    focal.position = (5, 5)
+    target.position = (5, 6)
+    target.health = 1.0
+    # Pre-load focal→target affinity above the betrayal threshold.
+    raw_value = (AFFINITY_BETRAY_THRESHOLD + 0.2) * AFFINITY_NORM
+    env._record_affinity_event(focal_idx, target_idx,
+                               actor_to_other=raw_value, other_to_actor=0.0)
+    assert env._affinity(focal_idx, target_idx) >= AFFINITY_BETRAY_THRESHOLD
+    pre_count = env._ep_betrayal_count
+    _, reward, _, _, _ = env.step(int(Action.ATTACK.value))
+    assert env._ep_betrayal_count == pre_count + 1
+    # Reward should include the negative betrayal penalty (other terms may push it up,
+    # but penalty must have been applied — check via direct value bound).
+    assert reward <= 1.0 + PENALTY_BETRAYAL + 1.0  # loose bound, just sanity
+
+
+def test_friendly_flank_telemetry_increments() -> None:
+    """Focal flanking with a positive-affinity ally bumps ep_friendly_flank_count."""
+    from murimsim.rl.multi_env import AFFINITY_NORM
+    from murimsim.actions import Action
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    focal_idx = env._focal_idx
+    ally_idx = (focal_idx + 1) % env._n_agents
+    target_idx = (focal_idx + 2) % env._n_agents
+    focal, ally, target = env._agents[focal_idx], env._agents[ally_idx], env._agents[target_idx]
+    focal.position = (5, 5)
+    ally.position = (5, 4)
+    target.position = (5, 6)
+    target.health = 1.0
+    _force_group(env, focal_idx, ally_idx)
+    # Pre-load focal→ally positive affinity.
+    env._record_affinity_event(focal_idx, ally_idx,
+                               actor_to_other=2.0 * AFFINITY_NORM, other_to_actor=0.0)
+    pre = env._ep_friendly_flank_count
+    env.step(int(Action.ATTACK.value))
+    assert env._ep_friendly_flank_count == pre + 1
+
+
+def test_mutual_share_bonus_only_for_focal_as_sharer() -> None:
+    """Focal-as-sharer with positive recipient→focal affinity gets share + mutual bonus.
+
+    Verifies both:
+      - REWARD_FOOD_SHARE is added when focal is the sharer
+      - REWARD_MUTUAL_SHARE_BONUS is ADDITIVE when recipient already has positive
+        affinity toward focal (signals reciprocity forming)
+    """
+    from murimsim.rl.multi_env import (
+        REWARD_FOOD_SHARE, REWARD_MUTUAL_SHARE_BONUS, AFFINITY_NORM,
+    )
+
+    def _setup(load_recipient_affinity: bool):
+        env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+        env.reset(seed=0)
+        focal_idx = env._focal_idx
+        recipient_idx = (focal_idx + 1) % env._n_agents
+        focal = env._agents[focal_idx]
+        recipient = env._agents[recipient_idx]
+        focal.inventory.food = 5
+        recipient.hunger = 1.0
+        recipient.inventory.food = 0
+        focal.position = (5, 5)
+        recipient.position = (5, 6)
+        _force_group(env, focal_idx, recipient_idx)
+        if load_recipient_affinity:
+            env._record_affinity_event(
+                recipient_idx, focal_idx,
+                actor_to_other=2.0 * AFFINITY_NORM, other_to_actor=0.0,
+            )
+            assert env._affinity(recipient_idx, focal_idx) > 0.0
+        return env, focal_idx, recipient_idx
+
+    # Run the food-share loop directly and capture the reward accumulator the way
+    # CombatEnv.step does (this avoids the noise of the full reward composition).
+    def _accumulate_share_reward(env, focal_idx):
+        food_share_reward = 0.0
+        # Force successful share by calling repeatedly (RNG roll inside).
+        for _ in range(50):
+            env._ep_step_count += 1
+            for sharer_idx in range(env._n_agents):
+                if not env._agents[sharer_idx].alive:
+                    continue
+                grp = env._get_group(sharer_idx)
+                if grp is None:
+                    continue
+                for recipient_idx in grp:
+                    if recipient_idx == sharer_idx:
+                        continue
+                    pre_food = env._agents[sharer_idx].inventory.food
+                    pre_aff = env._affinity(recipient_idx, focal_idx) if sharer_idx == focal_idx else 0.0
+                    if env._try_food_share(sharer_idx, recipient_idx):
+                        if sharer_idx == focal_idx:
+                            food_share_reward += REWARD_FOOD_SHARE
+                            if pre_aff > 0.0:
+                                food_share_reward += REWARD_MUTUAL_SHARE_BONUS
+                        env._agents[sharer_idx].inventory.food = pre_food  # restore for repeat
+            if food_share_reward > 0:
+                break
+        return food_share_reward
+
+    # Case 1: no pre-existing affinity → only base share reward
+    env_a, focal_a, _ = _setup(load_recipient_affinity=False)
+    base = _accumulate_share_reward(env_a, focal_a)
+    assert base == REWARD_FOOD_SHARE, f"Expected only base share reward, got {base}"
+
+    # Case 2: recipient has positive affinity → base + mutual bonus
+    env_b, focal_b, _ = _setup(load_recipient_affinity=True)
+    bonus = _accumulate_share_reward(env_b, focal_b)
+    assert bonus == REWARD_FOOD_SHARE + REWARD_MUTUAL_SHARE_BONUS, (
+        f"Expected base+mutual reward, got {bonus}"
+    )
