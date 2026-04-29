@@ -1081,3 +1081,113 @@ def test_mutual_share_bonus_only_for_focal_as_sharer() -> None:
     assert bonus == REWARD_FOOD_SHARE + REWARD_MUTUAL_SHARE_BONUS, (
         f"Expected base+mutual reward, got {bonus}"
     )
+
+
+# ── v19c: extra interaction-event sources ──────────────────────────────────────
+def test_collaborate_records_symmetric_affinity_bond() -> None:
+    """Successful _try_collaborate (group formed) records +AFFINITY_COLLAB_BOTH both ways."""
+    from murimsim.rl.multi_env import AFFINITY_COLLAB_BOTH, AFFINITY_NORM, HEURISTIC_COLLAB_THRESHOLD
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    focal_idx = env._focal_idx
+    other_idx = (focal_idx + 1) % env._n_agents
+    focal = env._agents[focal_idx]
+    other = env._agents[other_idx]
+    focal.position = (5, 5)
+    other.position = (5, 6)
+    other.sociability = max(other.sociability, HEURISTIC_COLLAB_THRESHOLD + 0.05)
+    _isolate_agents(env, focal_idx, other_idx)
+    assert env._affinity(focal_idx, other_idx) == 0.0
+    formed = env._try_collaborate(focal_idx)
+    assert formed
+    expected = AFFINITY_COLLAB_BOTH / AFFINITY_NORM
+    assert abs(env._affinity(focal_idx, other_idx) - expected) < 1e-6
+    assert abs(env._affinity(other_idx, focal_idx) - expected) < 1e-6
+
+
+def test_collaborate_no_bond_when_already_grouped() -> None:
+    """_try_collaborate is a no-op when both agents already share a group; no extra bond."""
+    from murimsim.rl.multi_env import HEURISTIC_COLLAB_THRESHOLD
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    focal_idx = env._focal_idx
+    other_idx = (focal_idx + 1) % env._n_agents
+    focal = env._agents[focal_idx]
+    other = env._agents[other_idx]
+    focal.position = (5, 5)
+    other.position = (5, 6)
+    other.sociability = max(other.sociability, HEURISTIC_COLLAB_THRESHOLD + 0.05)
+    _isolate_agents(env, focal_idx, other_idx)
+    assert env._try_collaborate(focal_idx)
+    aff_after_first = env._affinity(focal_idx, other_idx)
+    # Second call: already grouped, returns False, no further bond accrual.
+    assert not env._try_collaborate(focal_idx)
+    assert env._affinity(focal_idx, other_idx) == aff_after_first
+
+
+def test_joint_kill_bonds_pairs_all_attackers() -> None:
+    """_record_joint_kill_bonds wires symmetric +AFFINITY_JOINT_KILL between every contributor pair."""
+    from murimsim.rl.multi_env import AFFINITY_JOINT_KILL, AFFINITY_NORM
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    a0, a1, a2 = env._agents[0], env._agents[1], env._agents[2]
+    env._record_joint_kill_bonds({a0.agent_id, a1.agent_id, a2.agent_id})
+    expected = AFFINITY_JOINT_KILL / AFFINITY_NORM
+    for i, j in [(0, 1), (0, 2), (1, 2)]:
+        assert abs(env._affinity(i, j) - expected) < 1e-6
+        assert abs(env._affinity(j, i) - expected) < 1e-6
+    # Non-contributor pair — no bond.
+    assert env._affinity(0, 3) == 0.0
+
+
+def test_proximity_bonds_accrue_for_adjacent_agents() -> None:
+    """Co-located agents accumulate proximity bond on every PROXIMITY_TICK_EVERY-th step."""
+    from murimsim.rl.multi_env import (
+        AFFINITY_PROXIMITY_PER_STEP, AFFINITY_PROXIMITY_TICK_EVERY,
+        AFFINITY_PROXIMITY_RADIUS, AFFINITY_NORM,
+    )
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    # Place agents 0 and 1 adjacent; agents 2 and 3 far away.
+    env._agents[0].position = (5, 5)
+    env._agents[1].position = (5, 5 + AFFINITY_PROXIMITY_RADIUS)  # within radius
+    env._agents[2].position = (20, 20)
+    env._agents[3].position = (20, 22)
+    # Force tick alignment, then call directly.
+    env._ep_step_count = AFFINITY_PROXIMITY_TICK_EVERY
+    pre = env._affinity(0, 1)
+    env._apply_proximity_bonds()
+    post = env._affinity(0, 1)
+    expected_delta = AFFINITY_PROXIMITY_PER_STEP / AFFINITY_NORM
+    assert abs((post - pre) - expected_delta) < 1e-6
+    # Should be symmetric.
+    assert abs(env._affinity(1, 0) - post) < 1e-6
+    # Far agents (0 and 2) should not have any bond.
+    assert env._affinity(0, 2) == 0.0
+
+
+def test_proximity_bonds_skip_off_tick_steps() -> None:
+    """Proximity sweep is a no-op when _ep_step_count is not aligned to TICK_EVERY."""
+    from murimsim.rl.multi_env import AFFINITY_PROXIMITY_TICK_EVERY
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    env._agents[0].position = (5, 5)
+    env._agents[1].position = (5, 6)
+    # Off-tick step.
+    env._ep_step_count = AFFINITY_PROXIMITY_TICK_EVERY + 1
+    pre = env._affinity(0, 1)
+    env._apply_proximity_bonds()
+    assert env._affinity(0, 1) == pre
+
+
+def test_proximity_bonds_skip_dead_agents() -> None:
+    """Dead agents don't accrue proximity bonds (or get them)."""
+    from murimsim.rl.multi_env import AFFINITY_PROXIMITY_TICK_EVERY
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    env._agents[0].position = (5, 5)
+    env._agents[1].position = (5, 6)
+    env._agents[1].alive = False
+    env._ep_step_count = AFFINITY_PROXIMITY_TICK_EVERY
+    env._apply_proximity_bonds()
+    assert env._affinity(0, 1) == 0.0

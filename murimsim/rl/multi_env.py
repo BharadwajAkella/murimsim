@@ -102,6 +102,12 @@ AFFINITY_ATTACK_ATTACKER: float = -0.3   # A → B: mild commitment to enmity
 AFFINITY_STEAL_VICTIM: float = -0.7
 AFFINITY_STEAL_THIEF: float = -0.2
 AFFINITY_FLANK_BOTH: float = 0.5         # symmetric — both chose to engage same target
+# v19c: additional event sources to raise per-pair event rate above the decay floor.
+AFFINITY_COLLAB_BOTH: float = 0.4        # symmetric — voluntarily formed a group together
+AFFINITY_JOINT_KILL: float = 0.6         # symmetric — both contributed to a monster kill
+AFFINITY_PROXIMITY_PER_STEP: float = 0.015  # tiny per-tick bond for being within radius
+AFFINITY_PROXIMITY_RADIUS: int = 2       # Chebyshev radius for proximity bond
+AFFINITY_PROXIMITY_TICK_EVERY: int = 5   # apply proximity sweep every N env steps
 
 # Reward shaping (v19)
 REWARD_MUTUAL_SHARE_BONUS: float = 0.03  # extra to focal-sharer when both sides have positive affinity
@@ -440,6 +446,9 @@ class MultiAgentEnv(gym.Env):
                     self._try_reproduce(agent)
 
         self._prune_dead_from_groups()
+
+        # v19c: per-step proximity bond accrual.
+        self._apply_proximity_bonds()
 
         # Settlement tracking: per-step updates for all agents
         self._ep_group_member_ticks += sum(len(g) for g in self._groups)
@@ -811,6 +820,56 @@ class MultiAgentEnv(gym.Env):
         val, step = entry
         decayed = val * (AFFINITY_DECAY_PER_STEP ** max(0, self._ep_step_count - step))
         return float(np.clip(decayed / AFFINITY_NORM, -1.0, 1.0))
+
+    def _record_joint_kill_bonds(self, attacker_ids: set[str] | list[str]) -> None:
+        """Record symmetric joint-kill bonds between every pair of monster contributors.
+
+        Called when a monster dies. Each unordered pair of attacker agent_ids that
+        are still resolvable to live env agents gets a +AFFINITY_JOINT_KILL bond
+        in both directions (shared-victory reciprocity).
+        """
+        if not attacker_ids:
+            return
+        # Resolve agent_ids → indices once.
+        id_to_idx = {a.agent_id: i for i, a in enumerate(self._agents)}
+        indices = [id_to_idx[aid] for aid in attacker_ids if aid in id_to_idx]
+        for a in range(len(indices)):
+            for b in range(a + 1, len(indices)):
+                self._record_affinity_event(
+                    actor_idx=indices[a], other_idx=indices[b],
+                    actor_to_other=AFFINITY_JOINT_KILL,
+                    other_to_actor=AFFINITY_JOINT_KILL,
+                )
+
+    def _apply_proximity_bonds(self) -> None:
+        """Apply small symmetric +affinity to every pair of live agents within radius.
+
+        Called every AFFINITY_PROXIMITY_TICK_EVERY env steps. O(N²) per tick;
+        trivial for n_agents≤16. Steady-state target: with delta d per tick and
+        decay λ per step, a continuously-adjacent pair settles at raw ≈
+        d / (1 - λ^TICK_EVERY) — chosen so persistent neighbours can cross the
+        betrayal/mutual-share thresholds without one-off events doing it alone.
+        """
+        if self._ep_step_count % AFFINITY_PROXIMITY_TICK_EVERY != 0:
+            return
+        r = AFFINITY_PROXIMITY_RADIUS
+        n = self._n_agents
+        for i in range(n):
+            ai = self._agents[i]
+            if not ai.alive:
+                continue
+            xi, yi = ai.position
+            for j in range(i + 1, n):
+                aj = self._agents[j]
+                if not aj.alive:
+                    continue
+                xj, yj = aj.position
+                if max(abs(xi - xj), abs(yi - yj)) <= r:
+                    self._record_affinity_event(
+                        actor_idx=i, other_idx=j,
+                        actor_to_other=AFFINITY_PROXIMITY_PER_STEP,
+                        other_to_actor=AFFINITY_PROXIMITY_PER_STEP,
+                    )
 
     # ── Observation builder ───────────────────────────────────────────────────
 
@@ -1758,6 +1817,9 @@ class CombatEnv(MultiAgentEnv):
         # Remove dead agents from any groups
         self._prune_dead_from_groups()
 
+        # v19c: per-step proximity bond accrual.
+        self._apply_proximity_bonds()
+
         # Settlement tracking: per-step updates for all agents
         self._ep_group_member_ticks += sum(len(g) for g in self._groups)
         for i, agent in enumerate(self._agents):
@@ -1988,6 +2050,8 @@ class CombatEnv(MultiAgentEnv):
             self._ep_boss_damage_dealt += damage
             if killed:
                 self._ep_boss_killed += 1
+                # v19c: shared victory bond for every pair of contributors.
+                self._record_joint_kill_bonds(monster.attackers)
                 self._drop_boss_loot(monster)
             return damage, killed
 
@@ -2336,6 +2400,12 @@ class CombatEnv(MultiAgentEnv):
         # Form a group only if the neighbour is also social enough
         if neighbour.sociability >= HEURISTIC_COLLAB_THRESHOLD:
             self._form_group(focal_idx, neighbour_idx)
+            # v19c: voluntary group formation creates a symmetric bond.
+            self._record_affinity_event(
+                actor_idx=focal_idx, other_idx=neighbour_idx,
+                actor_to_other=AFFINITY_COLLAB_BOTH,
+                other_to_actor=AFFINITY_COLLAB_BOTH,
+            )
             return True
         return False
 
