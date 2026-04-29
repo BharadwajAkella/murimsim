@@ -164,8 +164,9 @@ def test_boss_observation_overlay() -> None:
     # Place focal next to boss so boss is in the 5×5 view
     focal.position = boss.position
     obs = env._build_obs(env._focal_idx)
-    # Agent grid sits at flat indices 100..200, shape (5,5,4) — center is wy=wx=2
-    agent_grid = obs[100:200].reshape(5, 5, 4)
+    # Agent grid sits at flat indices 100..225, shape (5,5,5) — center is wy=wx=2.
+    # v19 added affinity channel (idx 4); monsters get neutral affinity (0.5).
+    agent_grid = obs[100:225].reshape(5, 5, 5)
     # Boss at same tile → wy=wx=2 should have presence > 0 and strength > 1.0
     assert agent_grid[2, 2, 0] > 0.0
     assert agent_grid[2, 2, 2] >= boss.strength - 1e-6

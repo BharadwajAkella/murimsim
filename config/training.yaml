@@ -221,6 +221,45 @@ lstm_v18:
   enable_boss: true
 
 
+# lstm_v19: emergent allegiance via pairwise affinity matrix
+#   Key changes from v18:
+#   - Sect identity removed entirely (no more sect_id, no sect-region spawn).
+#   - Pairwise affinity matrix: directional, exponentially-decaying scalar per
+#     ordered (i, j) agent pair, updated on share/attack/steal/flank events.
+#     Asymmetric magnitudes — victim builds more hostility than attacker, etc.
+#   - Obs grows: agent grid 5×5×4 → 5×5×5 (added affinity channel, tile-MAX).
+#     OBS_TOTAL_SIZE 264 → 289. ⚠ HARD BREAK: cannot warm-start v18 (obs/policy
+#     input shape mismatch).
+#   - Reward shaping:
+#       * Coordinated-attack bonus scaled by mean focal→flanker affinity
+#         (familiar coordination > random coordination).
+#       * Mutual-share bonus when focal shares with someone whose affinity
+#         to focal is already positive (signals reciprocity forming).
+#       * Betrayal penalty when focal attacks a high-affinity (>0.5) target.
+#       * Focal-as-recipient share bonus REMOVED (was teaching "stand near
+#         scripted sharers"; rubber-duck critique #2).
+#   - New telemetry: ep_betrayal_count, ep_friendly_flank_count,
+#     ep_focal_max_affinity, ep_focal_min_affinity.
+#   - All other v18 params kept (qi-infused strikes, boss enabled, etc.)
+lstm_v19:
+  total_timesteps: 1_500_000
+  checkpoint_freq: 100_000
+  n_envs: 12
+  curriculum_ramp_steps: 1
+  lstm_hidden_size: 64
+  n_lstm_layers: 1
+  shared_lstm: false
+  n_steps: 512
+  batch_size: 128
+  learning_rate: 0.0003
+  learning_rate_final: 0.00003
+  clip_range: 0.20
+  clip_range_final: 0.05
+  ent_coef: 0.03
+  warm_start: null               # ⚠ MUST be null — v18 obs (264) ≠ v19 (289)
+  enable_boss: true
+
+
 #   - food_spawn_density floor: 0.03 → 0.01 (scarcer episodes make stash mandatory)
 #   - All other params unchanged from v14
 #   - Warm-starts from v14 final

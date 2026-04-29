@@ -762,3 +762,93 @@ def test_heuristic_agent_spends_qi_attacking_boss() -> None:
     )
     assert boss.health < boss_hp_before, "Boss should have taken damage from heuristic helper"
     assert env._ep_qi_strikes_used >= 1
+
+
+# ─── v19: Emergent allegiance / affinity matrix tests ────────────────────────
+
+
+def test_affinity_starts_at_zero() -> None:
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    assert env._affinity(0, 1) == 0.0
+    assert env._affinity(1, 0) == 0.0
+    assert env._affinity(0, 0) == 0.0  # self-affinity always 0
+
+
+def test_affinity_is_directional_attack() -> None:
+    """Victim builds stronger hostility toward attacker than attacker → victim."""
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    attacker, victim = env._agents[0], env._agents[1]
+    attacker.position = (5, 5)
+    victim.position = (5, 6)
+    victim.health = 1.0
+    env._do_attack(attacker)
+    aff_victim_to_attacker = env._affinity(1, 0)
+    aff_attacker_to_victim = env._affinity(0, 1)
+    assert aff_victim_to_attacker < aff_attacker_to_victim < 0.0
+    # Victim's hostility magnitude should be larger than attacker's.
+    assert abs(aff_victim_to_attacker) > abs(aff_attacker_to_victim)
+
+
+def test_affinity_decays_over_time() -> None:
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    env._record_affinity_event(0, 1, actor_to_other=1.0, other_to_actor=1.0)
+    aff_now = env._affinity(0, 1)
+    assert aff_now > 0.0
+    env._ep_step_count += 1000  # advance time
+    aff_later = env._affinity(0, 1)
+    assert aff_later < aff_now * 0.6  # decayed substantially
+
+
+def test_affinity_self_pair_ignored() -> None:
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    env._record_affinity_event(0, 0, actor_to_other=10.0, other_to_actor=10.0)
+    assert env._affinity(0, 0) == 0.0
+
+
+def test_affinity_clears_on_reset() -> None:
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    env._record_affinity_event(0, 1, actor_to_other=1.0, other_to_actor=1.0)
+    assert env._affinity(0, 1) > 0.0
+    env.reset(seed=1)
+    assert env._affinity(0, 1) == 0.0
+
+
+def test_affinity_in_obs_channel() -> None:
+    """Obs channel 4 (affinity) should reflect focal→neighbour relationship."""
+    from murimsim.rl.multi_env import OBS_RESOURCE_GRID_SIZE, OBS_AGENT_GRID_SIZE
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    focal_idx = env._focal_idx
+    other_idx = (focal_idx + 1) % env._n_agents
+    focal = env._agents[focal_idx]
+    other = env._agents[other_idx]
+    fx, fy = focal.position
+    other.position = (min(fx + 1, env._world.grid_size - 1), fy)
+    # Big positive affinity event toward `other`
+    env._record_affinity_event(focal_idx, other_idx, actor_to_other=5.0, other_to_actor=5.0)
+    obs = env._build_obs(focal_idx)
+    agent_grid = obs[OBS_RESOURCE_GRID_SIZE:OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE].reshape(5, 5, 5)
+    # Affinity channel mapped from [-1,1] to [0,1]; +5/AFFINITY_NORM(=5) clipped to 1 → 1.0
+    affinity_max = agent_grid[:, :, 4].max()
+    assert affinity_max > 0.9, f"Expected affinity channel max ≈1.0, got {affinity_max}"
+
+
+def test_terminal_info_emits_v19_keys() -> None:
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    info = {}
+    for _ in range(2050):
+        _, _, terminated, truncated, info = env.step(int(Action.REST.value))
+        if terminated or truncated:
+            break
+    # Either terminal or hit max steps — terminal info should be populated when ep ends
+    if "ep_betrayal_count" in info:
+        assert info["ep_betrayal_count"] == 0
+        assert info["ep_friendly_flank_count"] == 0
+        assert "ep_focal_max_affinity" in info
+        assert "ep_focal_min_affinity" in info

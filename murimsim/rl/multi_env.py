@@ -72,7 +72,7 @@ from murimsim.world import World
 OBS_VIEW_SIZE: int = 5
 
 OBS_N_RESOURCE_CH: int = 4          # food, qi, materials, poison
-OBS_N_AGENT_CH: int = 4             # agent_present, agent_health, agent_strength, agent_sociability
+OBS_N_AGENT_CH: int = 5             # agent_present, agent_health, agent_strength, agent_sociability, affinity
 OBS_N_STASH_CH: int = 2             # my_stash, enemy_stash
 OBS_CHANNEL_ORDER: list[str] = ["food", "qi", "materials", "poison"]
 
@@ -86,6 +86,28 @@ OBS_TOTAL_SIZE: int = OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE + OBS_STASH_G
 TERRAIN_FAM_SCALE: float = 200.0   # ticks_near_food / SCALE → [0, 1]
 REWARD_EMA_ALPHA: float = 0.10
 REWARD_EMA_SCALE: float = 0.5      # EMA normalised: 0 = −scale, 1 = +scale
+
+# ── Affinity / pairwise interaction memory (v19 emergent allegiance) ──────────
+# Per-directed-pair scalar with exponential decay. Stored raw and clamped to
+# [-AFFINITY_NORM, +AFFINITY_NORM] on access. Decay applied lazily on read/write
+# so we don't sweep the whole matrix each step.
+AFFINITY_DECAY_PER_STEP: float = 0.999   # half-life ~693 steps (≈35% of 2000-step ep)
+AFFINITY_NORM: float = 5.0               # divisor → clamp to [-1, 1] for obs/reward use
+# Asymmetric event magnitudes — see store_memory rationale.
+# Each event records two updates: actor→other and other→actor with different magnitudes.
+AFFINITY_SHARE_RECIPIENT: float = 1.0    # B (recipient) → A (sharer): strong gratitude
+AFFINITY_SHARE_SHARER: float = 0.3       # A → B: mild investment ("I helped them")
+AFFINITY_ATTACK_VICTIM: float = -1.0     # B (victim) → A (attacker): strong hostility
+AFFINITY_ATTACK_ATTACKER: float = -0.3   # A → B: mild commitment to enmity
+AFFINITY_STEAL_VICTIM: float = -0.7
+AFFINITY_STEAL_THIEF: float = -0.2
+AFFINITY_FLANK_BOTH: float = 0.5         # symmetric — both chose to engage same target
+
+# Reward shaping (v19)
+REWARD_MUTUAL_SHARE_BONUS: float = 0.03  # extra to focal-sharer when both sides have positive affinity
+REWARD_FRIENDLY_FLANK_MAX_MULT: float = 1.0  # flanking bonus scaled by (1 + min(1, max(0, mean_affinity) * MULT))
+PENALTY_BETRAYAL: float = -0.20          # extra penalty for attacking high-affinity target
+AFFINITY_BETRAY_THRESHOLD: float = 0.5   # focal's affinity-toward-target above this → betrayal
 
 # ── Heuristic constants (non-focal agents) ────────────────────────────────────
 HEURISTIC_HUNGER_EAT: float = 0.5   # eat when hunger exceeds this
@@ -208,6 +230,11 @@ class MultiAgentEnv(gym.Env):
         self._reward_ema: list[float] = []
         self._combat_experience: list[float] = []  # Phase 3c: updated on fights
 
+        # v19: per-directed-pair affinity scalar with lazy exp decay.
+        # _affinity_raw[i][j] = (value_at_last_update, step_at_last_update).
+        # i, j are agent indices. Initialised lazily on first interaction.
+        self._affinity_raw: dict[int, dict[int, tuple[float, int]]] = {}
+
     # ── Gymnasium API ────────────────────────────────────────────────────────
 
     def _initial_position(self, idx: int, grid_size: int) -> tuple[int, int]:
@@ -282,6 +309,9 @@ class MultiAgentEnv(gym.Env):
         # Reciprocity memory: _help_received[recipient][helper] = step_when_helped
         # Cleared each episode so past-life debts don't carry over.
         self._help_received: dict[int, dict[int, int]] = {}
+        # v19: pairwise affinity matrix — clear at episode reset so allegiances
+        # don't leak across seeds.
+        self._affinity_raw = {}
         # Per-episode step counter (for reciprocity window comparison)
         self._ep_step_count: int = 0
 
@@ -317,6 +347,10 @@ class MultiAgentEnv(gym.Env):
         self._ep_friendly_steals: int = 0       # steals from group-mate stash
         self._ep_bank_withdrawals: int = 0      # WITHDRAW that retrieved from own stash
         self._ep_granary_withdrawals: int = 0   # WITHDRAW that retrieved from group-mate stash
+
+        # v19 instrumentation — emergent allegiance signals
+        self._ep_betrayal_count: int = 0          # focal attacked high-affinity target
+        self._ep_friendly_flank_count: int = 0    # focal flanked alongside positive-affinity ally
 
         # Foraging-outward tracking: max Chebyshev dist from own stash since last deposit
         self._max_dist_since_deposit: list[float] = [0.0] * self._n_agents
@@ -695,7 +729,61 @@ class MultiAgentEnv(gym.Env):
             self._help_received[recipient_idx] = {}
         self._help_received[recipient_idx][sharer_idx] = self._ep_step_count
 
+        # v19: directional affinity update (asymmetric — recipient learns more)
+        self._record_affinity_event(
+            actor_idx=sharer_idx, other_idx=recipient_idx,
+            actor_to_other=AFFINITY_SHARE_SHARER,
+            other_to_actor=AFFINITY_SHARE_RECIPIENT,
+        )
+
         return True
+
+    # ── Affinity (v19 emergent allegiance) ────────────────────────────────────
+
+    def _record_affinity_event(
+        self,
+        actor_idx: int,
+        other_idx: int,
+        actor_to_other: float,
+        other_to_actor: float,
+    ) -> None:
+        """Record a directed pairwise interaction event.
+
+        ``actor_to_other`` is added to actor's affinity toward other; the
+        symmetric ``other_to_actor`` is added to other's affinity toward
+        actor. Magnitudes are typically asymmetric (e.g. attack victim
+        builds more hostility than attacker).
+        """
+        if actor_idx == other_idx:
+            return
+        for i, j, delta in (
+            (actor_idx, other_idx, actor_to_other),
+            (other_idx, actor_idx, other_to_actor),
+        ):
+            row = self._affinity_raw.setdefault(i, {})
+            cur_val, cur_step = row.get(j, (0.0, self._ep_step_count))
+            # Decay existing value to current step before adding new event.
+            decayed = cur_val * (AFFINITY_DECAY_PER_STEP ** max(0, self._ep_step_count - cur_step))
+            new_val = decayed + delta
+            row[j] = (new_val, self._ep_step_count)
+
+    def _affinity(self, i: int, j: int) -> float:
+        """Return i's current affinity toward j, normalised to [-1, 1].
+
+        Uses lazy exponential decay: stored values are aged forward to the
+        current episode step on read.
+        """
+        if i == j:
+            return 0.0
+        row = self._affinity_raw.get(i)
+        if not row:
+            return 0.0
+        entry = row.get(j)
+        if entry is None:
+            return 0.0
+        val, step = entry
+        decayed = val * (AFFINITY_DECAY_PER_STEP ** max(0, self._ep_step_count - step))
+        return float(np.clip(decayed / AFFINITY_NORM, -1.0, 1.0))
 
     # ── Observation builder ───────────────────────────────────────────────────
 
@@ -725,8 +813,10 @@ class MultiAgentEnv(gym.Env):
         resource_window[gy0:gy0 + (y1 - y0), gx0:gx0 + (x1 - x0), :] = grid_stack[y0:y1, x0:x1, :]
         flat_resources = resource_window.reshape(-1)  # 100
 
-        # Agent channels (agent_present, agent_health, agent_strength, agent_sociability)
+        # Agent channels (agent_present, agent_health, agent_strength, agent_sociability, affinity)
         agent_window = np.zeros((OBS_VIEW_SIZE, OBS_VIEW_SIZE, OBS_N_AGENT_CH), dtype=np.float32)
+        # Default affinity channel = 0.5 (neutral, mapped from affinity=0.0)
+        agent_window[:, :, 4] = 0.5
         for i, other in enumerate(self._agents):
             if i == agent_idx or not other.alive:
                 continue
@@ -738,7 +828,14 @@ class MultiAgentEnv(gym.Env):
                 agent_window[wy, wx, 1] = max(agent_window[wy, wx, 1], other.health)          # health
                 agent_window[wy, wx, 2] = max(agent_window[wy, wx, 2], other.strength)        # strength
                 agent_window[wy, wx, 3] = max(agent_window[wy, wx, 3], other.sociability)     # sociability
-        flat_agents = agent_window.reshape(-1)  # 100
+                # v19: affinity to neighbour, mapped from [-1, 1] to [0, 1]; tile-MAX of strongest signal.
+                aff = self._affinity(agent_idx, i)
+                aff_mapped = (aff + 1.0) / 2.0
+                # Take whichever value is further from neutral (0.5) — preserves dominant signal.
+                cur = float(agent_window[wy, wx, 4])
+                if abs(aff_mapped - 0.5) > abs(cur - 0.5):
+                    agent_window[wy, wx, 4] = aff_mapped
+        flat_agents = agent_window.reshape(-1)  # OBS_AGENT_GRID_SIZE
 
         # Stash channels (my_stash, enemy_stash)
         stash_window = np.zeros((OBS_VIEW_SIZE, OBS_VIEW_SIZE, OBS_N_STASH_CH), dtype=np.float32)
@@ -913,16 +1010,29 @@ class MultiAgentEnv(gym.Env):
             stolen = self._stash_registry.steal(agent)
             if stolen is not None:
                 is_friendly = False
+                victim_idx = -1
                 if agent_idx >= 0:
                     group = self._get_group(agent_idx)
                     if group:
                         is_friendly = any(
                             self._agents[i].agent_id == stolen.owner_id for i in group
                         )
+                    # Find victim's agent index for affinity update
+                    for i, a in enumerate(self._agents):
+                        if a.agent_id == stolen.owner_id:
+                            victim_idx = i
+                            break
                 if is_friendly:
                     self._ep_friendly_steals += 1
                 else:
                     self._ep_pure_steals += 1
+                # v19: directional affinity — victim resents thief strongly
+                if agent_idx >= 0 and victim_idx >= 0:
+                    self._record_affinity_event(
+                        actor_idx=agent_idx, other_idx=victim_idx,
+                        actor_to_other=AFFINITY_STEAL_THIEF,
+                        other_to_actor=AFFINITY_STEAL_VICTIM,
+                    )
 
         elif action_enum == Action.TRAIN:
             x, y = agent.position
@@ -1227,6 +1337,7 @@ class CombatEnv(MultiAgentEnv):
                 agent_window[wy, wx, 1] = max(agent_window[wy, wx, 1], health_norm)
                 agent_window[wy, wx, 2] = max(agent_window[wy, wx, 2], monster.strength)
                 # sociability stays 0 — monsters can't collaborate
+                # affinity stays 0.5 (neutral) — no relationship with monsters
         # Writing back is unnecessary because reshape is a view, but be explicit
         obs[OBS_RESOURCE_GRID_SIZE:
             OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE] = agent_window.reshape(-1)
@@ -1491,6 +1602,9 @@ class CombatEnv(MultiAgentEnv):
 
         # 1. Apply focal agent's action
         flanking_bonus_earned = False
+        # v19 emergent allegiance trackers (per step)
+        focal_betrayal: bool = False           # focal attacked a high-affinity target
+        focal_flank_affinity: float = 0.0      # mean focal→flanker affinity, ∈ [0, 1]
         self._last_action_details[self._focal_idx] = ""
         self._last_action_names[self._focal_idx] = action_enum.name.lower()
         if action_enum in ATTACK_ACTIONS:
@@ -1501,6 +1615,18 @@ class CombatEnv(MultiAgentEnv):
                 flankers = self._adjacent_group_allies(self._focal_idx, pre_target)
                 flanking_bonus_earned = len(flankers) > 0
                 self._last_action_details[self._focal_idx] = pre_target.agent_id
+                # v19: scale flank bonus by focal's affinity to flankers (clip to non-negative).
+                if flankers:
+                    target_idx_for_aff = self._agents.index(pre_target)
+                    affs = [max(0.0, self._affinity(self._focal_idx, fi)) for fi in flankers]
+                    focal_flank_affinity = float(sum(affs) / len(affs))
+                    # Betrayal: focal attacking a target it has positive history with.
+                    if self._affinity(self._focal_idx, target_idx_for_aff) >= AFFINITY_BETRAY_THRESHOLD:
+                        focal_betrayal = True
+                else:
+                    target_idx_for_aff = self._agents.index(pre_target)
+                    if self._affinity(self._focal_idx, target_idx_for_aff) >= AFFINITY_BETRAY_THRESHOLD:
+                        focal_betrayal = True
             else:
                 self._last_action_details[self._focal_idx] = "no_target"
             damage_dealt, defeated = self._do_attack(focal, requested_tier=requested_tier)
@@ -1622,6 +1748,9 @@ class CombatEnv(MultiAgentEnv):
 
         # Food sharing: each live agent attempts to share with critically hungry group allies.
         # Focal agent gets a reward signal; heuristic agents share silently.
+        # v19: focal-as-recipient bonus removed (rubber-duck critique #2 — taught
+        # "be near scripted sharers"). Only reward focal-as-sharer, with extra for
+        # mutual positive affinity.
         food_share_reward = 0.0
         focal_idx = self._focal_idx
         for sharer_idx in range(self._n_agents):
@@ -1634,9 +1763,12 @@ class CombatEnv(MultiAgentEnv):
                 if recipient_idx == sharer_idx:
                     continue
                 if self._try_food_share(sharer_idx, recipient_idx):
-                    # Focal gets reward if it shared OR if it was the recipient
-                    if sharer_idx == focal_idx or recipient_idx == focal_idx:
+                    if sharer_idx == focal_idx:
                         food_share_reward += REWARD_FOOD_SHARE
+                        # v19: mutual-affinity bonus — recipient already has positive
+                        # history toward focal (signals reciprocal trust forming).
+                        if self._affinity(recipient_idx, focal_idx) > 0.0:
+                            food_share_reward += REWARD_MUTUAL_SHARE_BONUS
 
         # 4. Update history for focal agent
         # Exploration reward is survival-gated: full reward when well-fed, zero when starving
@@ -1671,9 +1803,18 @@ class CombatEnv(MultiAgentEnv):
         # Per-tick cohesion reward: alive group members within range
         if focal.alive:
             reward += self._group_cohesion_reward(self._focal_idx)
-        # Coordinated attack: bonus when focal attacks with a flanking group ally
+        # Coordinated attack: bonus when focal attacks with a flanking group ally.
+        # v19: scaled by mean focal→flanker affinity — coordination with familiar
+        # allies pays more than coordination with strangers.
         if flanking_bonus_earned and focal.alive:
-            reward += REWARD_COORDINATED_ATTACK
+            scale = 1.0 + REWARD_FRIENDLY_FLANK_MAX_MULT * focal_flank_affinity
+            reward += REWARD_COORDINATED_ATTACK * scale
+            if focal_flank_affinity > 0.0:
+                self._ep_friendly_flank_count += 1
+        # v19: betrayal penalty — focal attacked someone it had positive history with.
+        if focal_betrayal:
+            reward += PENALTY_BETRAYAL
+            self._ep_betrayal_count += 1
         # Food sharing: reward focal for participating in mutual aid
         if focal.alive:
             reward += food_share_reward
@@ -1772,6 +1913,18 @@ class CombatEnv(MultiAgentEnv):
             info["ep_boss_unique_attackers"] = sum(
                 len(m.attackers) for m in self._monsters.all() if m.kind == "boss"
             )
+            # v19 emergent allegiance signals
+            info["ep_betrayal_count"] = self._ep_betrayal_count
+            info["ep_friendly_flank_count"] = self._ep_friendly_flank_count
+            # Sample of focal's strongest current relationships (max abs affinity to any other agent)
+            focal_row = self._affinity_raw.get(self._focal_idx, {})
+            if focal_row:
+                affs = [self._affinity(self._focal_idx, j) for j in focal_row.keys()]
+                info["ep_focal_max_affinity"] = max(affs) if affs else 0.0
+                info["ep_focal_min_affinity"] = min(affs) if affs else 0.0
+            else:
+                info["ep_focal_max_affinity"] = 0.0
+                info["ep_focal_min_affinity"] = 0.0
         return obs, reward, terminated, False, info
 
     # ── Combat helpers ────────────────────────────────────────────────────────
@@ -1814,6 +1967,7 @@ class CombatEnv(MultiAgentEnv):
         if target is None:
             return 0.0, False
         attacker_idx = self._agents.index(attacker)
+        target_idx = self._agents.index(target)
         flanking_allies = self._adjacent_group_allies(attacker_idx, target)
         tier = self._spend_strike_qi(attacker, requested_tier)
         damage = self._combat_damage(attacker, target, is_defending=False, tier=tier)
@@ -1822,6 +1976,22 @@ class CombatEnv(MultiAgentEnv):
             damage = float(np.clip(damage * (1.0 + bonus), 0.0, COMBAT_MAX_DAMAGE))
         target.health = max(0.0, target.health - damage)
         target._check_death("combat")
+        # v19: directional affinity — record only when the attack actually landed.
+        # Attacker → target: mild commitment to enmity. Target → attacker: strong hostility.
+        if damage > 0:
+            self._record_affinity_event(
+                actor_idx=attacker_idx, other_idx=target_idx,
+                actor_to_other=AFFINITY_ATTACK_ATTACKER,
+                other_to_actor=AFFINITY_ATTACK_VICTIM,
+            )
+            # Flank-assist bond: each flanking ally and the attacker reinforce each
+            # other (both chose to engage the same target — coordinated combat).
+            for fidx in flanking_allies:
+                self._record_affinity_event(
+                    actor_idx=attacker_idx, other_idx=fidx,
+                    actor_to_other=AFFINITY_FLANK_BOTH,
+                    other_to_actor=AFFINITY_FLANK_BOTH,
+                )
         if not target.alive:
             self._drop_inventory(target)
             return damage, True
