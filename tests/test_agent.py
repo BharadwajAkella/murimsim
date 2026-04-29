@@ -245,7 +245,7 @@ def test_to_replay_dict_fields():
     """to_replay_dict includes all required replay format fields."""
     agent = _make_agent()
     d = agent.to_replay_dict(action="gather", action_detail="Gathered food")
-    required = {"id", "sect", "pos", "health", "hunger", "resistances", "adventure_spirit", "action", "action_detail", "alive"}
+    required = {"id", "pos", "health", "hunger", "resistances", "adventure_spirit", "action", "action_detail", "alive"}
     assert required <= d.keys()
     assert d["action"] == "gather"
     assert d["alive"] is True
@@ -506,28 +506,6 @@ def test_spawn_from_parents_initial_state():
     assert child.health == 1.0
     assert child.hunger == 0.0
     assert child.age == 0
-
-
-def test_spawn_from_parents_sect_inheritance_agreement():
-    """Offspring inherits sect_id when both parents share the same sect."""
-    rng = np.random.default_rng(3)
-    mom = _make_parent("mom")
-    mom.sect_id = "iron_fang"
-    dad = _make_parent("dad")
-    dad.sect_id = "iron_fang"
-    child = Agent.spawn_from_parents("c", (0, 0), mom, dad, rng)
-    assert child.sect_id == "iron_fang"
-
-
-def test_spawn_from_parents_sect_none_on_mismatch():
-    """Offspring has sect_id='none' when parents belong to different sects."""
-    rng = np.random.default_rng(3)
-    mom = _make_parent("mom")
-    mom.sect_id = "iron_fang"
-    dad = _make_parent("dad")
-    dad.sect_id = "jade_lotus"
-    child = Agent.spawn_from_parents("c", (0, 0), mom, dad, rng)
-    assert child.sect_id == "none"
 
 
 def test_reproduction_tracked_in_env():

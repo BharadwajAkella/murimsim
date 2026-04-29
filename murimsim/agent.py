@@ -125,7 +125,6 @@ class Agent:
     inventory: AgentInventory = dataclasses.field(default_factory=AgentInventory)
     alive: bool = True
     death_cause: str = ""           # "starvation" | "hazard" | "combat" | ""
-    sect_id: str = "none"           # assigned by CombatEnv when sect_config is set
     age: int = 0                    # ticks lived; death occurs at max_age (from config)
     # Tracks cumulative recent exposure per resistance_stat; decays per tick
     _intakes: dict[str, float] = dataclasses.field(
@@ -197,8 +196,7 @@ class Agent:
         (via :func:`inherit_value`). Resistances are Lamarckian — acquired
         resistance from parents is passed to the offspring along with the noise.
 
-        The offspring starts with full health, zero hunger, zero age, and
-        inherits the parents' sect_id if they agree (otherwise "none").
+        The offspring starts with full health, zero hunger, and zero age.
 
         Args:
             agent_id: Unique identifier for the new agent.
@@ -221,7 +219,6 @@ class Agent:
             )
             for key in all_resistance_keys
         }
-        sect = parent1.sect_id if parent1.sect_id == parent2.sect_id else "none"
         return cls(
             agent_id=agent_id,
             position=position,
@@ -232,7 +229,6 @@ class Agent:
             sociability=       inherit_value(parent1.sociability,       parent2.sociability,       rng, sigma),
             hunger_resistance= inherit_value(parent1.hunger_resistance, parent2.hunger_resistance, rng, sigma),
             resistances=inherited_resistances,
-            sect_id=sect,
         )
 
     @classmethod
@@ -518,7 +514,6 @@ class Agent:
         """Return a dict matching the replay format spec."""
         return {
             "id": self.agent_id,
-            "sect": self.sect_id,
             "pos": list(self.position),
             "health": round(self.health, 4),
             "hunger": round(self.hunger, 4),

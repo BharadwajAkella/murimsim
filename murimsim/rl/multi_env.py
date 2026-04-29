@@ -65,7 +65,6 @@ from murimsim.monster import (
     Monster,
     MonsterRegistry,
 )
-from murimsim.sect import SectConfig
 from murimsim.stash import Stash, StashRegistry
 from murimsim.world import World
 
@@ -1058,9 +1057,6 @@ ACTION_TO_STRIKE: dict[Action, StrikeTier] = {
 
 REWARD_DEFEAT_OPPONENT: float = 0.3
 REWARD_DAMAGE_TAKEN_SCALE: float = -0.2
-# Sect-aware combat bonuses (Phase 6a): only active when both agents have named sects.
-REWARD_INTER_SECT_DEFEAT_BONUS: float = 0.15   # extra reward for defeating an enemy-sect agent
-REWARD_SAME_SECT_ATTACK_PENALTY: float = -0.10 # penalty for attacking a same-sect ally
 REWARD_GROUP_FORMATION: float = 0.05   # small bonus when bilateral COLLABORATE succeeds
 # Per-tick bonus for each live group member within proximity range.
 # Rewards staying in a live, nearby group rather than just being "in" a group.
@@ -1131,7 +1127,6 @@ class CombatEnv(MultiAgentEnv):
         seed: int | None = None,
         render_mode: str | None = None,
         curriculum_ramp_steps: int = CURRICULUM_RAMP_STEPS,
-        sect_config: SectConfig | None = None,
         enable_boss: bool = False,
     ) -> None:
         super().__init__(
@@ -1143,7 +1138,6 @@ class CombatEnv(MultiAgentEnv):
         )
         self._curriculum_ramp_steps: int = curriculum_ramp_steps
         self._global_step_count: int = 0  # persists across episodes
-        self._sect_config: SectConfig | None = sect_config
         # Per-agent last action detail — target agent id, stash id, or "" — reset each step
         self._last_action_details: list[str] = [""] * n_agents
         # Per-agent last action name (tracks heuristic agents too, unlike record_combat.py)
@@ -1164,18 +1158,6 @@ class CombatEnv(MultiAgentEnv):
         self._enable_combat_focus: bool = True
         self._in_combat_cooldown: list[int] = [0] * n_agents
 
-    # ── Sect home-region spawning ─────────────────────────────────────────────
-
-    def _initial_position(self, idx: int, grid_size: int) -> tuple[int, int]:
-        """Spawn agents inside the sect's home region when a sect is configured."""
-        if self._sect_config is None:
-            return super()._initial_position(idx, grid_size)
-        x_lo, x_hi = self._sect_config.home_x_range
-        y_lo, y_hi = self._sect_config.home_y_range
-        x = int(self._rng.integers(x_lo, x_hi + 1))
-        y = int(self._rng.integers(y_lo, y_hi + 1))
-        return (x, y)
-
     # ── Curriculum ────────────────────────────────────────────────────────────
 
     @property
@@ -1190,11 +1172,8 @@ class CombatEnv(MultiAgentEnv):
         seed: int | None = None,
         options: dict | None = None,
     ) -> tuple[np.ndarray, dict]:
-        """Reset the environment and assign sect_id to all agents if configured."""
+        """Reset the environment."""
         obs, info = super().reset(seed=seed, options=options)
-        if self._sect_config is not None:
-            for agent in self._agents:
-                agent.sect_id = self._sect_config.sect_id
         # v17 instrumentation — flee context (CombatEnv-only since WALK_AWAY is a combat action)
         self._ep_walk_away_count: int = 0
         self._ep_flee_strength_diff_sum: float = 0.0
@@ -1502,7 +1481,6 @@ class CombatEnv(MultiAgentEnv):
         focal_defending = (action_enum == Action.DEFEND)
         group_formed = False
         stash_bonus = 0.0
-        sect_attack_penalty = 0.0
 
         # Snapshot hazard distances before the action for approach/flee tracking
         prev_pos = focal.position
@@ -1522,10 +1500,6 @@ class CombatEnv(MultiAgentEnv):
             if pre_target is not None:
                 flankers = self._adjacent_group_allies(self._focal_idx, pre_target)
                 flanking_bonus_earned = len(flankers) > 0
-                # Sect-aware reward shaping (only when both agents belong to named sects)
-                if focal.sect_id != "none" and pre_target.sect_id != "none":
-                    if focal.sect_id == pre_target.sect_id:
-                        sect_attack_penalty = REWARD_SAME_SECT_ATTACK_PENALTY
                 self._last_action_details[self._focal_idx] = pre_target.agent_id
             else:
                 self._last_action_details[self._focal_idx] = "no_target"
@@ -1535,11 +1509,6 @@ class CombatEnv(MultiAgentEnv):
                 target_idx = self._agents.index(pre_target)
                 self._damage_taken_last_step[target_idx] = damage_dealt
             defeat_bonus = REWARD_DEFEAT_OPPONENT if defeated else 0.0
-            # Extra defeat bonus when eliminating an enemy-sect agent
-            if defeated and pre_target is not None:
-                if focal.sect_id != "none" and pre_target.sect_id != "none":
-                    if focal.sect_id != pre_target.sect_id:
-                        defeat_bonus += REWARD_INTER_SECT_DEFEAT_BONUS
         elif action_enum == Action.DEFEND:
             focal.rest()  # defending = hold ground + minor health recovery
         elif action_enum == Action.COLLABORATE:
@@ -1705,8 +1674,6 @@ class CombatEnv(MultiAgentEnv):
         # Coordinated attack: bonus when focal attacks with a flanking group ally
         if flanking_bonus_earned and focal.alive:
             reward += REWARD_COORDINATED_ATTACK
-        # Sect-aware combat penalty: discourage attacking same-sect allies
-        reward += sect_attack_penalty
         # Food sharing: reward focal for participating in mutual aid
         if focal.alive:
             reward += food_share_reward
@@ -1747,7 +1714,6 @@ class CombatEnv(MultiAgentEnv):
             "ep_action_rates": action_rates,
             "ep_hazard_approaches": dict(self._ep_hazard_approaches),
             "ep_hazard_flees": dict(self._ep_hazard_flees),
-            "ep_sect_id": self._sect_config.sect_id if self._sect_config is not None else "none",
         }
         if terminated:
             info["ep_lifespan"] = self._ep_steps

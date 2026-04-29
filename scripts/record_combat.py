@@ -24,7 +24,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from murimsim.actions import Action
 from murimsim.replay import ReplayLogger
 from murimsim.rl.multi_env import CombatEnv
-from murimsim.sect import DEFAULT_SECTS
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "default.yaml"
 TRAIN_CONFIG_PATH = Path(__file__).parent.parent / "config" / "training.yaml"
@@ -131,11 +130,6 @@ def main() -> None:
     env = CombatEnv(config=config, n_agents=args.agents, seed=args.seed)
     env_obs_size: int = env.observation_space.shape[0]
 
-    # Assign round-robin sect IDs for viewer coloring (no home-region spawning in recording mode)
-    def _assign_sect_ids() -> None:
-        for i, agent in enumerate(env._agents):
-            agent.sect_id = DEFAULT_SECTS.by_index(i).sect_id
-
     # Compat shim: if model was trained on a smaller obs space (e.g. M3=209 vs M4=234),
     # strip the extra features by dropping the enemy-stash channel from the stash section.
     # Layout: resources(100) + agents(75) + stash(N) + stats(9)
@@ -159,7 +153,6 @@ def main() -> None:
         return obs[:model_obs_size]
 
     obs, _ = env.reset(seed=args.seed)
-    _assign_sect_ids()
 
     # Enable full combat immediately (skip curriculum ramp for interesting replays)
     if not args.no_combat:
