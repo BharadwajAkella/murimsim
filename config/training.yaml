@@ -260,6 +260,29 @@ lstm_v19:
   enable_boss: true
 
 
+# lstm_v19b: v19 + anonymous spawn-clustering (commit 7a4d5b7)
+#   3 clusters, radius 4, centres resampled per reset; no identity tags.
+#   Restores collab opportunities lost when sect-region spawn was removed.
+#   Same hyperparams as v19; clean from-scratch training (obs unchanged: 289).
+lstm_v19b:
+  total_timesteps: 1_500_000
+  checkpoint_freq: 100_000
+  n_envs: 12
+  curriculum_ramp_steps: 1
+  lstm_hidden_size: 64
+  n_lstm_layers: 1
+  shared_lstm: false
+  n_steps: 512
+  batch_size: 128
+  learning_rate: 0.0003
+  learning_rate_final: 0.00003
+  clip_range: 0.20
+  clip_range_final: 0.05
+  ent_coef: 0.03
+  warm_start: null
+  enable_boss: true
+
+
 #   - food_spawn_density floor: 0.03 → 0.01 (scarcer episodes make stash mandatory)
 #   - All other params unchanged from v14
 #   - Warm-starts from v14 final
