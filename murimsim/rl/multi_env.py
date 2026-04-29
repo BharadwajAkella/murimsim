@@ -235,15 +235,40 @@ class MultiAgentEnv(gym.Env):
         # i, j are agent indices. Initialised lazily on first interaction.
         self._affinity_raw: dict[int, dict[int, tuple[float, int]]] = {}
 
+        # v19b: anonymous spawn clustering — agents start in N small clusters so
+        # the focal has nearby neighbours from tick 0 (no identity tag, just
+        # spatial seeding). Replaces the sect-region spawn that was lost in
+        # commit 6b1d1f2 without re-introducing sect identity.
+        self._spawn_cluster_count: int = 3
+        self._spawn_cluster_radius: int = 4
+        self._spawn_cluster_centers: list[tuple[int, int]] | None = None
+
     # ── Gymnasium API ────────────────────────────────────────────────────────
 
     def _initial_position(self, idx: int, grid_size: int) -> tuple[int, int]:
         """Return the starting ``(x, y)`` position for agent *idx* at episode reset.
 
-        Subclasses may override this to constrain agents to a home region.
-        By default, positions are uniformly random within the grid.
+        Default behaviour: spawn agents in a small number of anonymous clusters
+        (no identity tags — coalition formation must still emerge from behaviour).
+        Cluster centres are sampled once per reset and reused so all agents in a
+        cluster start within ``SPAWN_CLUSTER_RADIUS`` Chebyshev cells of the centre.
+        Set ``self._spawn_cluster_count`` to 0 to fall back to uniform random spawn.
         """
-        return (int(self._rng.integers(0, grid_size)), int(self._rng.integers(0, grid_size)))
+        if getattr(self, "_spawn_cluster_count", 0) <= 0:
+            return (int(self._rng.integers(0, grid_size)),
+                    int(self._rng.integers(0, grid_size)))
+        # Build cluster centres lazily on first agent of the reset.
+        if not getattr(self, "_spawn_cluster_centers", None):
+            self._spawn_cluster_centers = [
+                (int(self._rng.integers(0, grid_size)),
+                 int(self._rng.integers(0, grid_size)))
+                for _ in range(self._spawn_cluster_count)
+            ]
+        cx, cy = self._spawn_cluster_centers[idx % len(self._spawn_cluster_centers)]
+        r = self._spawn_cluster_radius
+        x = int(np.clip(cx + self._rng.integers(-r, r + 1), 0, grid_size - 1))
+        y = int(np.clip(cy + self._rng.integers(-r, r + 1), 0, grid_size - 1))
+        return (x, y)
 
     def reset(
         self,
@@ -288,6 +313,8 @@ class MultiAgentEnv(gym.Env):
         self._max_age: int = int(cfg.get("agent", {}).get("max_age", 0))
 
         gs = self._world.grid_size
+        # v19b: clear cluster centres so they're freshly resampled this episode.
+        self._spawn_cluster_centers = None
         self._agents = [
             Agent.spawn(
                 f"agent_{i}",

@@ -191,6 +191,10 @@ def test_boss_steps_toward_nearest_agent() -> None:
     target.position = (15, 15)
     target.health = 1.0
     boss.position = (5, 5)
+    # Move the other agents far from boss so 'target' is unambiguously nearest.
+    gs = env._world.grid_size
+    for i in range(1, env._n_agents):
+        env._agents[i].position = (gs - 1, gs - 1 - 2 * i)
     pre = boss.position
     env._monsters.tick_all(env._world, env._agents, env._rng)
     bx, by = boss.position
@@ -373,7 +377,10 @@ def test_combat_focus_masks_train_when_boss_adjacent():
     """In_combat (boss adjacent) → action_masks() blocks TRAIN/REST/GATHER/DEPOSIT/COLLABORATE."""
     env = CombatEnv(config=_cfg(), n_agents=4, seed=0, enable_boss=False)
     env.reset(seed=0)
+    env._global_step_count = 1_000_000  # combat_prob = 1.0 so ATTACK/DEFEND aren't masked
     focal = env._agents[env._focal_idx]
+    # Move focal to a known interior cell so boss can be safely placed adjacent.
+    focal.position = (10, 10)
     fx, fy = focal.position
     boss = env._monsters.spawn_boss((fx + 1, fy))
 

@@ -862,6 +862,22 @@ def _force_group(env, *idxs):
     env._groups.append(frozenset(idxs))
 
 
+def _isolate_agents(env, *keep_idxs):
+    """Move all agents NOT in keep_idxs to far corners so they don't interfere.
+
+    Used by behavioural tests that depend on specific spatial setups; the v19b
+    spawn-clustering can place unrelated agents adjacent to the test fixtures
+    and confuse target-selection / flanking / boss-pathing.
+    """
+    keep = set(keep_idxs)
+    gs = env._world.grid_size
+    far = (gs - 1, gs - 1)
+    for i, a in enumerate(env._agents):
+        if i not in keep:
+            a.position = far
+            far = (far[0], max(0, far[1] - 2))  # spread them out
+
+
 def test_affinity_recorded_on_food_share() -> None:
     """_try_food_share must update directional affinity (recipient learns more)."""
     env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
@@ -946,6 +962,7 @@ def test_betrayal_penalty_and_telemetry() -> None:
     from murimsim.actions import Action
     env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
     env.reset(seed=0)
+    env._global_step_count = CURRICULUM_RAMP_STEPS  # combat_prob = 1.0
     focal_idx = env._focal_idx
     target_idx = (focal_idx + 1) % env._n_agents
     focal = env._agents[focal_idx]
@@ -953,6 +970,7 @@ def test_betrayal_penalty_and_telemetry() -> None:
     focal.position = (5, 5)
     target.position = (5, 6)
     target.health = 1.0
+    _isolate_agents(env, focal_idx, target_idx)
     # Pre-load focal→target affinity above the betrayal threshold.
     raw_value = (AFFINITY_BETRAY_THRESHOLD + 0.2) * AFFINITY_NORM
     env._record_affinity_event(focal_idx, target_idx,
@@ -972,6 +990,7 @@ def test_friendly_flank_telemetry_increments() -> None:
     from murimsim.actions import Action
     env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
     env.reset(seed=0)
+    env._global_step_count = CURRICULUM_RAMP_STEPS  # combat_prob = 1.0
     focal_idx = env._focal_idx
     ally_idx = (focal_idx + 1) % env._n_agents
     target_idx = (focal_idx + 2) % env._n_agents
@@ -980,6 +999,7 @@ def test_friendly_flank_telemetry_increments() -> None:
     ally.position = (5, 4)
     target.position = (5, 6)
     target.health = 1.0
+    _isolate_agents(env, focal_idx, ally_idx, target_idx)
     _force_group(env, focal_idx, ally_idx)
     # Pre-load focal→ally positive affinity.
     env._record_affinity_event(focal_idx, ally_idx,

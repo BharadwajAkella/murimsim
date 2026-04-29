@@ -110,6 +110,8 @@ def aggregate(results: list[dict]) -> dict[str, str]:
         "ep_focal_collaborate_count", "ep_reproductions", "ep_deaths_by_age",
         "ep_boss_killed", "ep_boss_attacks_landed", "ep_boss_damage_dealt",
         "ep_damage_from_boss", "ep_agents_killed_by_boss", "ep_boss_unique_attackers",
+        "ep_betrayal_count", "ep_friendly_flank_count",
+        "ep_focal_max_affinity", "ep_focal_min_affinity",
     ]
     out: dict[str, str] = {}
     for k in keys:
