@@ -283,6 +283,31 @@ lstm_v19b:
   enable_boss: true
 
 
+# lstm_v20: rebaseline of v19b on the IPPO-prep env code (commits 24fce09,
+#   9860b6f, 8fc1ce1, fe1eb44, 63dd9f2). No hyperparam change vs v19b — this
+#   run is the soak-test for the new RNG-pure action_masks, per-agent mask
+#   parametrization, and lifecycle metadata. Provides the apples-to-apples
+#   single-focal baseline that future IPPO runs (v20a feedforward, v20b
+#   recurrent) will be compared against.
+lstm_v20:
+  total_timesteps: 1_500_000
+  checkpoint_freq: 100_000
+  n_envs: 12
+  curriculum_ramp_steps: 1
+  lstm_hidden_size: 64
+  n_lstm_layers: 1
+  shared_lstm: false
+  n_steps: 512
+  batch_size: 128
+  learning_rate: 0.0003
+  learning_rate_final: 0.00003
+  clip_range: 0.20
+  clip_range_final: 0.05
+  ent_coef: 0.03
+  warm_start: null
+  enable_boss: true
+
+
 #   - food_spawn_density floor: 0.03 → 0.01 (scarcer episodes make stash mandatory)
 #   - All other params unchanged from v14
 #   - Warm-starts from v14 final
