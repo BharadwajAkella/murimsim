@@ -1191,3 +1191,48 @@ def test_proximity_bonds_skip_dead_agents() -> None:
     env._ep_step_count = AFFINITY_PROXIMITY_TICK_EVERY
     env._apply_proximity_bonds()
     assert env._affinity(0, 1) == 0.0
+
+
+# ── P0.1 (IPPO migration prep): action_masks RNG-purity ───────────────────────
+def test_action_masks_repeated_calls_are_stable() -> None:
+    """Repeated action_masks() calls within a step must return identical masks
+    and not consume RNG more than once (lazy-cached curriculum gate).
+
+    Required for IPPO: masks will be queried per-(env, agent) every rollout step.
+    Any per-call RNG draw would scramble env stochasticity vs single-focal mode.
+    """
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    # Mid-curriculum so the gate genuinely toggles.
+    env._global_step_count = max(1, CURRICULUM_RAMP_STEPS // 2)
+    env._cached_curriculum_attack_allowed = None  # force fresh
+
+    first = env.action_masks().copy()
+    state_after_first = env._rng.bit_generator.state
+    for _ in range(50):
+        m = env.action_masks()
+        assert np.array_equal(m, first), "action_masks must be stable within a step"
+    # After the first call, no further RNG advance should occur.
+    assert env._rng.bit_generator.state == state_after_first
+
+
+def test_action_masks_and_step_redirect_agree_within_step() -> None:
+    """Within one step, action_masks() and step()'s redirect must consult the
+    SAME curriculum boolean. Previously two independent _rng.random() calls
+    could disagree (mask says attack allowed, step redirects to TRAIN, or vice versa).
+    """
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    env._global_step_count = max(1, CURRICULUM_RAMP_STEPS // 2)
+    env._cached_curriculum_attack_allowed = None
+
+    # Calling action_masks should populate the cache. Subsequent _curriculum_attack_allowed()
+    # must return the cached value (no new draw, no disagreement risk).
+    _ = env.action_masks()
+    cached = env._cached_curriculum_attack_allowed
+    assert cached is not None, "action_masks() must populate the cache"
+    for _ in range(10):
+        assert env._curriculum_attack_allowed() == cached
+    # After step(), the cache is invalidated so the next mask call draws fresh.
+    env.step(int(Action.MOVE_N.value))
+    assert env._cached_curriculum_attack_allowed is None

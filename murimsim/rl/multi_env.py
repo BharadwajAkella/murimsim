@@ -285,6 +285,8 @@ class MultiAgentEnv(gym.Env):
         effective_seed = seed if seed is not None else self._seed
 
         self._rng = np.random.default_rng(effective_seed)
+        # P0.1: reset per-step curriculum gate cache.
+        self._cached_curriculum_attack_allowed = None
 
         cfg = copy.deepcopy(self._config)
         cfg["world"]["seed"] = effective_seed
@@ -577,6 +579,8 @@ class MultiAgentEnv(gym.Env):
             info["ep_friendly_steals"] = self._ep_friendly_steals
             info["ep_bank_withdrawals"] = self._ep_bank_withdrawals
             info["ep_granary_withdrawals"] = self._ep_granary_withdrawals
+        # P0.1: invalidate per-step curriculum cache so next step draws fresh.
+        self._cached_curriculum_attack_allowed = None
         return obs, reward, terminated, False, info
 
     def render(self) -> None:
@@ -1353,6 +1357,13 @@ class CombatEnv(MultiAgentEnv):
         # of 1 tick after taking damage so a fleeing boss can't be insta-trained.
         self._enable_combat_focus: bool = True
         self._in_combat_cooldown: list[int] = [0] * n_agents
+        # P0.1 (IPPO migration prep): per-step cached curriculum gate for ATTACK/DEFEND.
+        # None = no draw yet for the current step. Set by _curriculum_attack_allowed()
+        # on first access (action_masks or step), invalidated at end of step. Same draw
+        # used by both mask construction and action redirect, so they always agree.
+        # Removes the previous RNG side-effect from action_masks(), which would otherwise
+        # be called per-(env, agent) every rollout step in IPPO and scramble env RNG.
+        self._cached_curriculum_attack_allowed: bool | None = None
 
     # ── Curriculum ────────────────────────────────────────────────────────────
 
@@ -1361,6 +1372,21 @@ class CombatEnv(MultiAgentEnv):
         """Current probability that a combat action is allowed (not masked to REST)."""
         frac = min(1.0, self._global_step_count / max(1, self._curriculum_ramp_steps))
         return CURRICULUM_START_PROB + (CURRICULUM_END_PROB - CURRICULUM_START_PROB) * frac
+
+    def _curriculum_attack_allowed(self) -> bool:
+        """Pure per-step curriculum gate. Draws once per step on first access, caches.
+
+        Repeated calls within the same step return the same value without consuming
+        RNG. The cache is invalidated at the end of every ``step()`` so the next step
+        draws fresh against the updated ``combat_prob``. Tests that manipulate
+        ``_global_step_count`` directly will see the gate re-drawn on the next call
+        because the cache is always invalidated post-step.
+        """
+        if self._cached_curriculum_attack_allowed is None:
+            self._cached_curriculum_attack_allowed = (
+                self._rng.random() <= self.combat_prob
+            )
+        return self._cached_curriculum_attack_allowed
 
     # ── reset override ────────────────────────────────────────────────────────
     def reset(
@@ -1631,8 +1657,9 @@ class CombatEnv(MultiAgentEnv):
         if not self._stash_registry.get_enemy_stashes_at(agent.agent_id, *agent.position):
             mask[Action.STEAL] = False
 
-        # Curriculum: mask combat actions when not yet enabled
-        if self._rng.random() > self.combat_prob:
+        # Curriculum: mask combat actions when not yet enabled.
+        # Uses cached per-step gate (P0.1) — pure with respect to RNG.
+        if not self._curriculum_attack_allowed():
             mask[Action.ATTACK] = False
             mask[Action.ATTACK_QI] = False
             mask[Action.ATTACK_BURST] = False
@@ -1656,10 +1683,11 @@ class CombatEnv(MultiAgentEnv):
         self._global_step_count += 1
 
         # Curriculum: redirect combat actions to TRAIN when not yet fully enabled.
-        # TRAIN is always productive — better signal than REST.
+        # TRAIN is always productive — better signal than REST. Uses the same cached
+        # gate as action_masks() so the two never disagree within a single step.
         action_enum = Action(action)
         if action_enum in (Action.ATTACK, Action.ATTACK_QI, Action.ATTACK_BURST, Action.DEFEND):
-            if self._rng.random() > self.combat_prob:
+            if not self._curriculum_attack_allowed():
                 action_enum = Action.TRAIN
 
         focal = self._agents[self._focal_idx]
@@ -2015,6 +2043,8 @@ class CombatEnv(MultiAgentEnv):
             else:
                 info["ep_focal_max_affinity"] = 0.0
                 info["ep_focal_min_affinity"] = 0.0
+        # P0.1: invalidate per-step curriculum cache so next step draws fresh.
+        self._cached_curriculum_attack_allowed = None
         return obs, reward, terminated, False, info
 
     # ── Combat helpers ────────────────────────────────────────────────────────
