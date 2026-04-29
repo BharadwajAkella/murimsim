@@ -742,6 +742,46 @@ window.STAGE_HISTORY = [
     "avg_dist_from_stash": 1.5119750080531316,
     "avg_revisit_entropy": 2.496241732085681,
     "avg_group_persistence": 8.97,
+    "f_metric": null
+  },
+  {
+    "id": "smoke_ippo_prep_seed0",
+    "label": "smoke_ippo_prep seed=0",
+    "phase": "auto",
+    "steps_trained": 4096,
+    "metric_unit": "steps",
+    "avg_lifespan": 52.68421052631579,
+    "avg_strength": 0.5150236419314151,
+    "avg_power": 0.27715920511069203,
+    "action_rates": {
+      "gather": 0.0868,
+      "train": 0.5031,
+      "collaborate": 0.0331,
+      "rest": 0.0682,
+      "move_n": 0.0634,
+      "walk_away": 0.0293,
+      "eat": 0.0357,
+      "attack": 0.0261,
+      "move_s": 0.0643,
+      "move_w": 0.0717,
+      "deposit": 0.0386,
+      "move_e": 0.0599,
+      "defend": 0.0256,
+      "attack_burst": 0.0238,
+      "attack_qi": 0.0233
+    },
+    "gather_rate_pct": 8.7,
+    "eat_rate_pct": 3.6,
+    "train_rate_pct": 50.3,
+    "deposit_rate_pct": 3.9,
+    "avg_deaths_by_cause": {
+      "starvation": 5.951612903225806
+    },
+    "avg_stash_fill_rate": 1.0524122807017544,
+    "avg_stash_withdraw_rate": 0.0,
+    "avg_dist_from_stash": 1.8156199302024796,
+    "avg_revisit_entropy": 2.984465242707822,
+    "avg_group_persistence": 31.098684210526315,
     "f_metric": null,
     "highlight": "latest"
   }

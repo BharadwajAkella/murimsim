@@ -1351,3 +1351,94 @@ def test_lifecycle_flags_cleared_each_step() -> None:
     # Even though we set it before step, the step start cleared it
     # (no real death this step), so info reports died=False.
     assert info["lifecycle"][2]["died"] is False
+
+
+# ── P0.1/P0.3 gap-fill: stronger integration tests ────────────────────────────
+def test_curriculum_attack_allowed_matches_combat_prob_statistically() -> None:
+    """Across many cache invalidations, the True rate of _curriculum_attack_allowed
+    must converge to combat_prob. Confirms the cache draws fresh per step and
+    isn't pinned to one boolean for the whole episode.
+    """
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    # Pin global_step to 30% of ramp; then read the actual combat_prob (not 0.3,
+    # because there's a CURRICULUM_START_PROB floor).
+    env._global_step_count = int(0.3 * CURRICULUM_RAMP_STEPS)
+    target_prob = env.combat_prob
+    assert 0.0 < target_prob < 1.0, "test setup must yield a non-degenerate probability"
+
+    allowed_count = 0
+    n_trials = 800
+    for _ in range(n_trials):
+        env._cached_curriculum_attack_allowed = None  # simulate fresh step
+        if env._curriculum_attack_allowed():
+            allowed_count += 1
+    empirical = allowed_count / n_trials
+    # 800 trials → standard error ≈ 0.018; 0.05 absolute tolerance is comfortable.
+    assert abs(empirical - target_prob) < 0.05, (
+        f"empirical={empirical:.3f} vs target={target_prob:.3f}"
+    )
+
+
+def test_action_masks_does_not_mutate_focal_idx() -> None:
+    """Calling action_masks(agent_idx=other) must not move focal index.
+    Regression guard: IPPO will call masks for every agent per step.
+    """
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    original_focal = env._focal_idx
+    for idx in range(4):
+        _ = env.action_masks(agent_idx=idx)
+    assert env._focal_idx == original_focal
+
+
+def test_lifecycle_info_survives_real_death_through_step() -> None:
+    """Force an agent to die via real step path; verify info['lifecycle']
+    has died=True and (since reproduction triggers in-place) born=True with
+    a new unique life_id.
+    """
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    initial_life_ids = list(env._life_ids)
+
+    # Drive a non-focal agent's health to ~0 so the next world tick kills it.
+    victim_slot = (env._focal_idx + 1) % 4
+    env._agents[victim_slot].health = 0.001
+    env._agents[victim_slot].hunger = 0.99  # also starving for good measure
+
+    # Step until victim dies (max 50 steps to bound the test).
+    died_step_info = None
+    for _ in range(50):
+        _obs, _r, term, _trunc, info = env.step(int(Action.MOVE_N.value))
+        if info["lifecycle"][victim_slot]["died"]:
+            died_step_info = info
+            break
+        if term:
+            break
+    assert died_step_info is not None, "victim never died in 50 steps"
+    entry = died_step_info["lifecycle"][victim_slot]
+    assert entry["died"] is True
+    # With ≥2 survivors, _try_reproduce fires same step → born=True, new life_id.
+    if entry["born"]:
+        assert entry["life_id"] != initial_life_ids[victim_slot]
+        assert entry["alive"] is True  # newborn is alive
+
+
+def test_life_ids_remain_unique_across_many_rebirths() -> None:
+    """Rebirth should issue monotonically-increasing life_ids; no duplicates,
+    no reuse. IPPO relies on life_id changes to reset hidden state.
+    """
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    seen_life_ids = set(env._life_ids)
+    # Fire many rebirths manually.
+    for slot in [0, 1, 2, 3, 1, 0, 2, 3, 1, 2]:
+        victim = env._agents[slot]
+        victim.alive = False
+        victim.health = 0.0
+        victim.death_cause = "test"
+        env._lifecycle_died_step[slot] = True
+        env._try_reproduce(victim)
+        new_id = env._life_ids[slot]
+        assert new_id not in seen_life_ids, f"life_id {new_id} reused at slot {slot}"
+        seen_life_ids.add(new_id)
