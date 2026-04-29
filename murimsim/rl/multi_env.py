@@ -249,6 +249,19 @@ class MultiAgentEnv(gym.Env):
         self._spawn_cluster_radius: int = 4
         self._spawn_cluster_centers: list[tuple[int, int]] | None = None
 
+        # P0.3: per-slot lifecycle tracking for IPPO hidden-state resets.
+        # ``_life_ids[s]`` is the unique id of the agent currently occupying
+        # slot s; it changes on rebirth so the trainer knows to reset the
+        # recurrent state for that slot. ``_lifecycle_died_step`` and
+        # ``_lifecycle_born_step`` are per-step boolean flags emitted in
+        # ``info["lifecycle"]`` and cleared at the start of every step.
+        # A slot can have both flags True in the same step (death + same-step
+        # rebirth via ``_try_reproduce``).
+        self._life_ids: list[int] = list(range(n_agents))
+        self._next_life_id: int = n_agents
+        self._lifecycle_died_step: list[bool] = [False] * n_agents
+        self._lifecycle_born_step: list[bool] = [False] * n_agents
+
     # ── Gymnasium API ────────────────────────────────────────────────────────
 
     def _initial_position(self, idx: int, grid_size: int) -> tuple[int, int]:
@@ -347,6 +360,12 @@ class MultiAgentEnv(gym.Env):
         # v19: pairwise affinity matrix — clear at episode reset so allegiances
         # don't leak across seeds.
         self._affinity_raw = {}
+        # P0.3: re-init per-slot lifecycle tracking. Each slot gets a fresh
+        # life id so the trainer treats episode start as a "born" boundary.
+        self._life_ids = list(range(self._n_agents))
+        self._next_life_id = self._n_agents
+        self._lifecycle_died_step = [False] * self._n_agents
+        self._lifecycle_born_step = [False] * self._n_agents
         # Per-episode step counter (for reciprocity window comparison)
         self._ep_step_count: int = 0
 
@@ -397,6 +416,11 @@ class MultiAgentEnv(gym.Env):
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
         assert self._world is not None
 
+        # P0.3: clear per-step lifecycle flags. Populated by death detection
+        # and _try_reproduce; emitted in info["lifecycle"] at end of step.
+        self._lifecycle_died_step = [False] * self._n_agents
+        self._lifecycle_born_step = [False] * self._n_agents
+
         focal = self._agents[self._focal_idx]
         hunger_prev = focal.hunger
         health_prev = focal.health
@@ -438,13 +462,16 @@ class MultiAgentEnv(gym.Env):
         # 3. Advance world + all agents
         for _ in range(self._action_ticks):
             self._world.step()
-            for agent in self._agents:
+            for i, agent in enumerate(self._agents):
                 was_alive = agent.alive
                 agent.tick(self._max_age)
                 if was_alive and not agent.alive:
                     cause = agent.death_cause or "unknown"
                     self._ep_deaths_by_cause[cause] = self._ep_deaths_by_cause.get(cause, 0) + 1
                     self._drop_inventory(agent)
+                    # P0.3: flag the slot before reproduce — same-step rebirth
+                    # will then also set the born flag (both True is valid).
+                    self._lifecycle_died_step[i] = True
                     self._try_reproduce(agent)
 
         self._prune_dead_from_groups()
@@ -581,7 +608,30 @@ class MultiAgentEnv(gym.Env):
             info["ep_granary_withdrawals"] = self._ep_granary_withdrawals
         # P0.1: invalidate per-step curriculum cache so next step draws fresh.
         self._cached_curriculum_attack_allowed = None
+        # P0.3: emit per-slot lifecycle metadata (IPPO hidden-state resets).
+        info["lifecycle"] = self._build_lifecycle_info()
         return obs, reward, terminated, False, info
+
+    def _build_lifecycle_info(self) -> list[dict[str, Any]]:
+        """Per-slot lifecycle dicts for the just-completed step.
+
+        Each entry: ``{"slot": idx, "life_id": int, "died": bool,
+        "born": bool, "alive": bool}``. IPPO consumes this to (a) reset
+        recurrent hidden state when ``born`` flips True (life_id changed)
+        and (b) mask transitions from inactive slots in PPO loss.
+        A slot can have both ``died`` and ``born`` True in the same step
+        (rebirth via ``_try_reproduce``).
+        """
+        return [
+            {
+                "slot": i,
+                "life_id": self._life_ids[i],
+                "died": self._lifecycle_died_step[i],
+                "born": self._lifecycle_born_step[i],
+                "alive": self._agents[i].alive if i < len(self._agents) else False,
+            }
+            for i in range(self._n_agents)
+        ]
 
     def render(self) -> None:
         pass  # Rendering handled by web viewer
@@ -684,6 +734,11 @@ class MultiAgentEnv(gym.Env):
         idx = self._agents.index(deceased)
         self._agents[idx] = offspring
         self._ep_reproductions += 1
+        # P0.3: record same-step rebirth for this slot. The slot transitions
+        # alive→dead→born within one step; trainers must reset recurrent state.
+        self._lifecycle_born_step[idx] = True
+        self._life_ids[idx] = self._next_life_id
+        self._next_life_id += 1
 
     def _stash_proximity_reward(self, agent_idx: int) -> float:
         """Per-tick stash proximity bonus — currently disabled (REWARD_STASH_PROXIMITY=0.0).
@@ -1691,6 +1746,10 @@ class CombatEnv(MultiAgentEnv):
         assert self._world is not None
         self._global_step_count += 1
 
+        # P0.3: clear per-step lifecycle flags before death detection runs.
+        self._lifecycle_died_step = [False] * self._n_agents
+        self._lifecycle_born_step = [False] * self._n_agents
+
         # Curriculum: redirect combat actions to TRAIN when not yet fully enabled.
         # TRAIN is always productive — better signal than REST. Uses the same cached
         # gate as action_masks() so the two never disagree within a single step.
@@ -1842,13 +1901,15 @@ class CombatEnv(MultiAgentEnv):
         # 3. Advance world + all agents
         for _ in range(self._action_ticks):
             self._world.step()
-            for agent in self._agents:
+            for i, agent in enumerate(self._agents):
                 was_alive = agent.alive
                 agent.tick(self._max_age)
                 if was_alive and not agent.alive:
                     cause = agent.death_cause or "unknown"
                     self._ep_deaths_by_cause[cause] = self._ep_deaths_by_cause.get(cause, 0) + 1
                     self._drop_inventory(agent)
+                    # P0.3: flag slot died — _try_reproduce may also flag born (rebirth same step).
+                    self._lifecycle_died_step[i] = True
                     self._try_reproduce(agent)
 
         # Remove dead agents from any groups
@@ -2054,6 +2115,8 @@ class CombatEnv(MultiAgentEnv):
                 info["ep_focal_min_affinity"] = 0.0
         # P0.1: invalidate per-step curriculum cache so next step draws fresh.
         self._cached_curriculum_attack_allowed = None
+        # P0.3: emit per-slot lifecycle metadata (IPPO hidden-state resets).
+        info["lifecycle"] = self._build_lifecycle_info()
         return obs, reward, terminated, False, info
 
     # ── Combat helpers ────────────────────────────────────────────────────────

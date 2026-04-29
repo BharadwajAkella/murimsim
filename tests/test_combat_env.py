@@ -1282,3 +1282,72 @@ def test_redirect_invalid_action_uses_per_agent_combat_state() -> None:
     # When evaluated for agent 0, TRAIN should pass through (not in combat).
     redirected_for_0 = env._redirect_invalid_action(env._agents[0], Action.TRAIN, agent_idx=0)
     assert redirected_for_0 == Action.TRAIN, "agent 0 not in combat → TRAIN passes through"
+
+
+# ── P0.3 (IPPO migration prep): lifecycle metadata in info ────────────────────
+def test_step_info_contains_lifecycle_per_slot() -> None:
+    """Every step must emit info['lifecycle'] with n_agents per-slot dicts.
+
+    Used by the IPPO trainer to reset recurrent hidden state on rebirth and
+    to mask out transitions from dead/empty slots.
+    """
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    _obs, _r, _term, _trunc, info = env.step(int(Action.MOVE_N.value))
+    assert "lifecycle" in info
+    lc = info["lifecycle"]
+    assert isinstance(lc, list) and len(lc) == 4
+    for i, entry in enumerate(lc):
+        assert entry["slot"] == i
+        assert isinstance(entry["life_id"], int)
+        assert isinstance(entry["died"], bool)
+        assert isinstance(entry["born"], bool)
+        assert isinstance(entry["alive"], bool)
+        # Fresh episode, no deaths in 1 step → all flags False.
+        assert not entry["died"]
+        assert not entry["born"]
+        assert entry["alive"]
+
+
+def test_lifecycle_flags_fire_on_rebirth() -> None:
+    """When _try_reproduce replaces a slot in-place, that slot's lifecycle entry
+    for the step must have died=True, born=True, and a NEW life_id.
+    """
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    initial_life_ids = list(env._life_ids)
+
+    # Force agent at slot 1 to die: drive health to 0 then trigger a tick via step.
+    # We bypass the normal action path by directly killing the agent and calling
+    # the internal death-handling code path. Easiest: set hunger high so tick kills.
+    victim = env._agents[1]
+    victim.health = 0.0
+    victim.alive = False
+    victim.death_cause = "test"
+    env._drop_inventory(victim)
+    env._lifecycle_died_step = [False] * env._n_agents
+    env._lifecycle_born_step = [False] * env._n_agents
+    env._lifecycle_died_step[1] = True
+    env._try_reproduce(victim)
+
+    # Slot 1 should now have a new occupant with a new life_id.
+    assert env._life_ids[1] != initial_life_ids[1]
+    assert env._lifecycle_born_step[1]
+    # Other slots untouched.
+    for j in (0, 2, 3):
+        assert env._life_ids[j] == initial_life_ids[j]
+        assert not env._lifecycle_born_step[j]
+
+
+def test_lifecycle_flags_cleared_each_step() -> None:
+    """The died/born flags in info['lifecycle'] reflect ONLY the current step,
+    not the cumulative history. They must clear at the start of every step.
+    """
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    # Force a fake "died" flag from a hypothetical prior step.
+    env._lifecycle_died_step[2] = True
+    _obs, _r, _term, _trunc, info = env.step(int(Action.MOVE_N.value))
+    # Even though we set it before step, the step start cleared it
+    # (no real death this step), so info reports died=False.
+    assert info["lifecycle"][2]["died"] is False
