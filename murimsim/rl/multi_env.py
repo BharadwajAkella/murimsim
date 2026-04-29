@@ -1546,7 +1546,9 @@ class CombatEnv(MultiAgentEnv):
             return Action.ATTACK
         return Action.DEFEND
 
-    def _redirect_invalid_action(self, agent: Agent, action: Action) -> Action:
+    def _redirect_invalid_action(
+        self, agent: Agent, action: Action, agent_idx: int | None = None
+    ) -> Action:
         """Redirect context-invalid actions to a productive fallback.
 
         Two redirect types:
@@ -1572,7 +1574,9 @@ class CombatEnv(MultiAgentEnv):
         # to a sensible combat fallback. Survival EAT (above) still wins.
         # Disabled if _enable_combat_focus is False or no hostile near.
         if action in (Action.TRAIN, Action.REST, Action.GATHER, Action.DEPOSIT, Action.COLLABORATE):
-            if self._in_combat(self._focal_idx):
+            # P0.2: prefer caller-supplied agent_idx; fall back to focal for back-compat.
+            idx = agent_idx if agent_idx is not None else self._focal_idx
+            if self._in_combat(idx):
                 return self._combat_focus_fallback(agent)
 
         # 2. Invalid-action redirects → smart fallback (not REST)
@@ -1605,8 +1609,12 @@ class CombatEnv(MultiAgentEnv):
                 return self._smart_fallback(agent)
         return action
 
-    def action_masks(self) -> np.ndarray:
-        """Return a boolean mask of currently valid actions for the focal agent.
+    def action_masks(self, agent_idx: int | None = None) -> np.ndarray:
+        """Return a boolean mask of currently valid actions for an agent.
+
+        Defaults to the focal agent for backward compatibility with the
+        single-agent SB3 training loop. P0.2 (IPPO prep): pass agent_idx
+        to query masks for any agent in the same env without mutating focal.
 
         True = action is feasible right now.  Used by MaskableRecurrentPPO (v17+)
         to zero out infeasible logits before sampling, so the model never needs to
@@ -1615,7 +1623,8 @@ class CombatEnv(MultiAgentEnv):
         This is the correct long-term fix. _redirect_invalid_action() is a safety
         net for RecurrentPPO which doesn't support masking natively.
         """
-        agent = self._agents[self._focal_idx]
+        idx = agent_idx if agent_idx is not None else self._focal_idx
+        agent = self._agents[idx]
         mask = np.ones(self.action_space.n, dtype=bool)
 
         # Social actions require an adjacent agent — except ATTACK, which is
@@ -1670,7 +1679,7 @@ class CombatEnv(MultiAgentEnv):
         # WITHDRAW, STEAL. Blocked: TRAIN, REST, GATHER, DEPOSIT, COLLABORATE.
         # MOVE actions are never masked, so the mask remains non-empty without
         # any unconditional "force TRAIN=True" guarantee.
-        if self._in_combat(self._focal_idx):
+        if self._in_combat(idx):
             mask[Action.TRAIN] = False
             mask[Action.REST] = False
             mask[Action.GATHER] = False
@@ -1693,7 +1702,7 @@ class CombatEnv(MultiAgentEnv):
         focal = self._agents[self._focal_idx]
 
         # Redirect actions that have no valid target/precondition → REST
-        action_enum = self._redirect_invalid_action(focal, action_enum)
+        action_enum = self._redirect_invalid_action(focal, action_enum, agent_idx=self._focal_idx)
         hunger_prev = focal.hunger
         health_prev = focal.health
         inv_food_prev = focal.inventory.food
@@ -2150,7 +2159,7 @@ class CombatEnv(MultiAgentEnv):
         so all agents run the actual trained policy during replay.
         """
         # Apply the same survival redirect + invalid-action guards that focal agents get.
-        action = self._redirect_invalid_action(agent, action)
+        action = self._redirect_invalid_action(agent, action, agent_idx=agent_idx)
 
         ax, ay = agent.position
         fx, fy = focal.position

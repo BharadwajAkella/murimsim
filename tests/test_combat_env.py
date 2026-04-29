@@ -1236,3 +1236,49 @@ def test_action_masks_and_step_redirect_agree_within_step() -> None:
     # After step(), the cache is invalidated so the next mask call draws fresh.
     env.step(int(Action.MOVE_N.value))
     assert env._cached_curriculum_attack_allowed is None
+
+
+# ── P0.2 (IPPO migration prep): per-agent action_masks / redirect ─────────────
+def test_action_masks_can_be_queried_per_agent_idx() -> None:
+    """action_masks(agent_idx) must mask based on THAT agent's local context,
+    not the focal's. Required so IPPO can compute masks for every agent in a step
+    without rotating focal.
+    """
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    env._global_step_count = CURRICULUM_RAMP_STEPS  # combat_prob=1, no curriculum mask
+
+    # Give agent 0 zero food, agent 1 plenty of food. EAT mask differs per agent.
+    env._agents[0].inventory.food = 0
+    env._agents[1].inventory.food = 5
+
+    mask0 = env.action_masks(agent_idx=0)
+    mask1 = env.action_masks(agent_idx=1)
+    assert not mask0[Action.EAT], "agent 0 has no food → EAT must be masked"
+    assert mask1[Action.EAT], "agent 1 has food → EAT must be allowed"
+
+    # Default (no arg) targets focal — must be back-compat with single-agent loop.
+    default_mask = env.action_masks()
+    focal_mask = env.action_masks(agent_idx=env._focal_idx)
+    assert np.array_equal(default_mask, focal_mask)
+
+
+def test_redirect_invalid_action_uses_per_agent_combat_state() -> None:
+    """_redirect_invalid_action(agent, action, agent_idx) must consult agent_idx's
+    combat cooldown — not focal's — when deciding combat-focus fallback.
+    """
+    env = CombatEnv(config=_load_cfg(), n_agents=4, seed=0)
+    env.reset(seed=0)
+    env._global_step_count = CURRICULUM_RAMP_STEPS
+
+    # Force agent 1 in-combat, focal (0) NOT in combat.
+    env._in_combat_cooldown[0] = 0
+    env._in_combat_cooldown[1] = 5
+
+    # When evaluated for agent 1, TRAIN should be redirected (in-combat focus).
+    redirected_for_1 = env._redirect_invalid_action(env._agents[1], Action.TRAIN, agent_idx=1)
+    assert redirected_for_1 != Action.TRAIN, "agent 1 in combat → TRAIN must be redirected"
+
+    # When evaluated for agent 0, TRAIN should pass through (not in combat).
+    redirected_for_0 = env._redirect_invalid_action(env._agents[0], Action.TRAIN, agent_idx=0)
+    assert redirected_for_0 == Action.TRAIN, "agent 0 not in combat → TRAIN passes through"
