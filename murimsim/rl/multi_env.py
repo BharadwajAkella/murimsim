@@ -62,6 +62,9 @@ from murimsim.monster import (
     BOSS_LOOT_FOOD,
     BOSS_LOOT_MATERIALS,
     BOSS_LOOT_QI,
+    MINION_LOOT_FOOD,
+    MINION_LOOT_MATERIALS,
+    MINION_LOOT_QI,
     Monster,
     MonsterRegistry,
 )
@@ -1521,6 +1524,7 @@ class CombatEnv(MultiAgentEnv):
         curriculum_ramp_steps: int = CURRICULUM_RAMP_STEPS,
         enable_boss: bool = False,
         enable_carry_cost: bool = False,
+        n_minions: int = 0,
     ) -> None:
         super().__init__(
             config=config,
@@ -1544,6 +1548,8 @@ class CombatEnv(MultiAgentEnv):
         self._enable_boss: bool = enable_boss
         # v21c: inventory weight penalises combat strength and TRAIN gain.
         self._enable_carry_cost: bool = enable_carry_cost
+        # v22: number of minions to spawn at episode start (and respawn after kill).
+        self._n_minions: int = int(n_minions)
         self._monsters: MonsterRegistry = MonsterRegistry()
         # v17: combat-focus lock — when an agent is in combat (hostile adjacent
         # OR took damage last tick), mask out non-combat actions like TRAIN,
@@ -1615,6 +1621,10 @@ class CombatEnv(MultiAgentEnv):
         if self._enable_boss:
             corner = self._random_corner()
             self._monsters.spawn_boss(corner)
+        # v22: minion spawns — random interior tiles so the policy must engage.
+        for _ in range(self._n_minions):
+            pos = self._random_interior_tile()
+            self._monsters.spawn_minion(pos)
         # Rebuild obs so first frame reflects the boss spawn
         obs = self._build_obs(self._focal_idx)
         return obs, info
@@ -1660,6 +1670,15 @@ class CombatEnv(MultiAgentEnv):
         corners = [(0, 0), (gs - 1, 0), (0, gs - 1), (gs - 1, gs - 1)]
         idx = int(self._rng.integers(0, len(corners)))
         return corners[idx]
+
+    def _random_interior_tile(self) -> tuple[int, int]:
+        """Pick an interior tile (not on border) for minion spawns."""
+        gs = self._world.grid_size  # type: ignore[union-attr]
+        if gs <= 4:
+            return (gs // 2, gs // 2)
+        x = int(self._rng.integers(2, gs - 2))
+        y = int(self._rng.integers(2, gs - 2))
+        return (x, y)
 
     # ── step override ─────────────────────────────────────────────────────────
 
@@ -2069,6 +2088,16 @@ class CombatEnv(MultiAgentEnv):
             else:
                 self._boss_respawn_countdown = -1
 
+        # v22: minion respawn — if any minion died, top up to n_minions immediately
+        # so combat pressure is sustained throughout the episode (no countdown —
+        # minions are weak and meant to be repeatedly engaged).
+        if self._n_minions > 0:
+            n_alive_minions = sum(
+                1 for m in self._monsters.all() if m.kind == "minion" and m.alive
+            )
+            for _ in range(self._n_minions - n_alive_minions):
+                self._monsters.spawn_minion(self._random_interior_tile())
+
         # Record damage focal took this step (from all heuristic agents combined)
         self._damage_taken_last_step[self._focal_idx] = damage_taken
 
@@ -2422,7 +2451,7 @@ class CombatEnv(MultiAgentEnv):
         return damage, False
 
     def _drop_boss_loot(self, monster: Monster) -> None:
-        """On boss death, register a shared loot stash for every attacker.
+        """On boss/minion death, register a shared loot stash for every attacker.
 
         The stash's owner_id is the monster_id (sentinel), with all attacker
         agent_ids as participants — so every contributor can WITHDRAW from it
@@ -2430,13 +2459,21 @@ class CombatEnv(MultiAgentEnv):
         """
         if not monster.attackers:
             return
+        if monster.kind == "minion":
+            food = MINION_LOOT_FOOD
+            qi = MINION_LOOT_QI
+            materials = MINION_LOOT_MATERIALS
+        else:
+            food = BOSS_LOOT_FOOD
+            qi = BOSS_LOOT_QI
+            materials = BOSS_LOOT_MATERIALS
         loot = Stash(
             stash_id=f"{monster.monster_id}_loot",
             owner_id=monster.monster_id,
             position=monster.position,
-            food=BOSS_LOOT_FOOD,
-            qi=BOSS_LOOT_QI,
-            materials=BOSS_LOOT_MATERIALS,
+            food=food,
+            qi=qi,
+            materials=materials,
             poison=0,
             participants=sorted(monster.attackers),
         )

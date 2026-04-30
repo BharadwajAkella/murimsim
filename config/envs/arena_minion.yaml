@@ -1,0 +1,99 @@
+# v22 arena_minion — small dense map for forced winnable combat.
+#
+# Design rationale:
+#   - 12x12 grid: pairwise distance is bounded so agents can't flee to opposite
+#     corners (v21 failure mode). Boss-on agents in 30x30 hit mean distance ~14;
+#     here the diameter is ~16 Chebyshev so flee-then-train is not an option.
+#   - 2x food density vs default keeps agents fed even with combat attrition.
+#   - 2 minions (HP=1.5, str=0.9) — winnable solo by a strong agent, easy duo,
+#     auto-respawn so combat pressure is constant.
+#   - No flame/poison hazards: minions are the only attrition source we want to
+#     measure; hazard pile-on confounds the affinity signal.
+#   - mountain kept for terrain variety (cheap traversal cost only).
+
+world:
+  grid_size: 12
+  seed: 42
+  action_ticks: 5
+
+resources:
+  - id: food
+    display_name: "Food"
+    regen_ticks: 200
+    gatherable: true
+    spawn_density: 0.10
+    effect: positive
+    effect_params:
+      hunger_restore: 0.3
+    traversal_effects: []
+
+  - id: qi
+    display_name: "Qi Crystal"
+    regen_ticks: 400
+    gatherable: true
+    spawn_density: 0.04
+    effect: positive
+    effect_params:
+      qi_restore: 0.5
+    traversal_effects: []
+
+  - id: materials
+    display_name: "Materials"
+    regen_ticks: 300
+    gatherable: true
+    spawn_density: 0.05
+    effect: neutral
+    effect_params: {}
+    traversal_effects: []
+
+  - id: poison
+    display_name: "Poison"
+    regen_ticks: 150
+    gatherable: true
+    spawn_density: 0.0
+    effect: negative
+    effect_params:
+      potency: 0.4
+    traversal_effects: []
+
+  - id: mountain
+    display_name: "Mountain Pass"
+    regen_ticks: 0
+    gatherable: false
+    spawn_density: 0.0
+    spawn_clusters: true
+    cluster_count: 1
+    cluster_radius: 2
+    cluster_fill_prob: 0.45
+    effect: negative
+    effect_params: {}
+    traversal_effects:
+      - trigger: on_enter
+        attribute: health
+        delta: -0.04
+        resistance_stat: qi_drain
+
+agent:
+  poison_resistance_min: 0.05
+  poison_resistance_max: 0.30
+  flame_resistance_min: 0.0
+  flame_resistance_max: 0.10
+  qi_drain_resistance_min: 0.0
+  qi_drain_resistance_max: 0.20
+  strength_min: 0.2
+  strength_max: 0.8
+  adventure_spirit_min: 0.1
+  adventure_spirit_max: 0.9
+  sociability_min: 0.1
+  sociability_max: 0.9
+  hunger_resistance_min: 0.1
+  hunger_resistance_max: 0.5
+  max_age: 0
+
+domain_randomization:
+  enabled: false
+
+# v22 per-arena overrides — read by build_envs in scripts/train_ippo*.py
+arena:
+  enable_boss: false
+  n_minions: 2

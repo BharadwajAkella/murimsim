@@ -71,7 +71,55 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="v21c: inventory weight reduces combat strength and TRAIN gain.",
     )
+    p.add_argument(
+        "--arena-mix",
+        type=str,
+        default=None,
+        help=(
+            "v22: round-robin mix of arena configs across n_envs. Format: "
+            "'base:1,arena_minion:2,arena_boss:1' — each token resolves to "
+            "config/envs/<name>.yaml ('base' uses --config). Per-arena flags "
+            "(enable_boss, n_minions) are read from the YAML's `arena` section. "
+            "If omitted, all envs use --config with global flags."
+        ),
+    )
     return p.parse_args()
+
+
+# v22: arena-mix support — load alternate env configs and per-arena flags.
+ARENA_CONFIG_DIR = Path(__file__).resolve().parent.parent / "config" / "envs"
+
+
+def _parse_arena_mix(spec: str) -> list[str]:
+    """Parse 'base:1,arena_minion:2,arena_boss:1' into a flat list of arena names."""
+    out: list[str] = []
+    for token in spec.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if ":" in token:
+            name, count = token.split(":", 1)
+            out.extend([name.strip()] * int(count))
+        else:
+            out.append(token)
+    return out
+
+
+def _load_arena_config(arena_name: str, base_cfg: dict) -> tuple[dict, dict]:
+    """Return (env_config, arena_flags) for an arena name.
+
+    ``arena_flags`` keys: enable_boss (bool), enable_carry_cost (bool), n_minions (int).
+    'base' returns (base_cfg, {}) — caller layers global CLI flags on top.
+    """
+    if arena_name == "base":
+        return base_cfg, {}
+    path = ARENA_CONFIG_DIR / f"{arena_name}.yaml"
+    if not path.exists():
+        raise FileNotFoundError(f"Arena config not found: {path}")
+    with open(path) as f:
+        full = yaml.safe_load(f)
+    arena_flags = full.pop("arena", {}) or {}
+    return full, arena_flags
 
 
 def build_envs(
@@ -81,17 +129,39 @@ def build_envs(
     seed: int,
     enable_boss: bool = False,
     enable_carry_cost: bool = False,
+    arena_mix: str | None = None,
 ) -> list[IPPOEnv]:
     envs: list[IPPOEnv] = []
+    if arena_mix:
+        arena_names = _parse_arena_mix(arena_mix)
+        if not arena_names:
+            raise ValueError(f"Empty arena-mix: {arena_mix!r}")
+    else:
+        arena_names = None
     for i in range(n_envs):
-        env = IPPOEnv(
-            config=config,
-            n_agents=n_agents,
-            seed=seed + i,
-            curriculum_ramp_steps=0,
-            enable_boss=enable_boss,
-            enable_carry_cost=enable_carry_cost,
-        )
+        if arena_names is not None:
+            arena = arena_names[i % len(arena_names)]
+            env_cfg, arena_flags = _load_arena_config(arena, config)
+            env = IPPOEnv(
+                config=env_cfg,
+                n_agents=n_agents,
+                seed=seed + i,
+                curriculum_ramp_steps=0,
+                enable_boss=bool(arena_flags.get("enable_boss", enable_boss)),
+                enable_carry_cost=bool(
+                    arena_flags.get("enable_carry_cost", enable_carry_cost)
+                ),
+                n_minions=int(arena_flags.get("n_minions", 0)),
+            )
+        else:
+            env = IPPOEnv(
+                config=config,
+                n_agents=n_agents,
+                seed=seed + i,
+                curriculum_ramp_steps=0,
+                enable_boss=enable_boss,
+                enable_carry_cost=enable_carry_cost,
+            )
         envs.append(env)
     return envs
 
@@ -140,6 +210,7 @@ def train(args: argparse.Namespace) -> dict:
         cfg, args.n_envs, args.n_agents, args.seed,
         enable_boss=getattr(args, "enable_boss", False),
         enable_carry_cost=getattr(args, "enable_carry_cost", False),
+        arena_mix=getattr(args, "arena_mix", None),
     )
     obs, action_masks, active_mask = collect_initial_state(envs, args.seed)
 

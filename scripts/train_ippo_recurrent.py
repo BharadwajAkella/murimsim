@@ -80,7 +80,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="v21c: inventory weight reduces combat strength and TRAIN gain.",
     )
+    p.add_argument(
+        "--arena-mix",
+        type=str,
+        default=None,
+        help="v22: round-robin arena mix (see scripts/train_ippo.py).",
+    )
     return p.parse_args()
+
+
+# v22: reuse arena-mix helpers from the FF trainer to avoid duplication.
+from scripts.train_ippo import (  # noqa: E402
+    _load_arena_config,
+    _parse_arena_mix,
+)
 
 
 def build_envs(
@@ -90,18 +103,40 @@ def build_envs(
     seed: int,
     enable_boss: bool = False,
     enable_carry_cost: bool = False,
+    arena_mix: str | None = None,
 ) -> list[IPPOEnv]:
-    return [
-        IPPOEnv(
-            config=config,
-            n_agents=n_agents,
-            seed=seed + i,
-            curriculum_ramp_steps=0,
-            enable_boss=enable_boss,
-            enable_carry_cost=enable_carry_cost,
-        )
-        for i in range(n_envs)
-    ]
+    if arena_mix:
+        arena_names = _parse_arena_mix(arena_mix)
+        if not arena_names:
+            raise ValueError(f"Empty arena-mix: {arena_mix!r}")
+    else:
+        arena_names = None
+    envs: list[IPPOEnv] = []
+    for i in range(n_envs):
+        if arena_names is not None:
+            arena = arena_names[i % len(arena_names)]
+            env_cfg, arena_flags = _load_arena_config(arena, config)
+            envs.append(IPPOEnv(
+                config=env_cfg,
+                n_agents=n_agents,
+                seed=seed + i,
+                curriculum_ramp_steps=0,
+                enable_boss=bool(arena_flags.get("enable_boss", enable_boss)),
+                enable_carry_cost=bool(
+                    arena_flags.get("enable_carry_cost", enable_carry_cost)
+                ),
+                n_minions=int(arena_flags.get("n_minions", 0)),
+            ))
+        else:
+            envs.append(IPPOEnv(
+                config=config,
+                n_agents=n_agents,
+                seed=seed + i,
+                curriculum_ramp_steps=0,
+                enable_boss=enable_boss,
+                enable_carry_cost=enable_carry_cost,
+            ))
+    return envs
 
 
 def collect_initial_state(envs: list[IPPOEnv], seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -143,6 +178,7 @@ def train(args: argparse.Namespace) -> dict:
         cfg, args.n_envs, args.n_agents, args.seed,
         enable_boss=getattr(args, "enable_boss", False),
         enable_carry_cost=getattr(args, "enable_carry_cost", False),
+        arena_mix=getattr(args, "arena_mix", None),
     )
     obs, action_masks, active_mask = collect_initial_state(envs, args.seed)
 

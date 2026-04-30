@@ -37,6 +37,17 @@ BOSS_LOOT_MATERIALS: int = 5
 BOSS_ATTACK_DAMAGE_SCALE: float = 0.4   # multiplied by boss.strength for damage
 BOSS_ATTACK_MAX_DAMAGE: float = 0.6
 
+# ── Minion tunables ──────────────────────────────────────────────────────────
+# v22: Easier-to-beat NPC for forcing combat in resource-rich arena maps.
+# A solo strong agent can kill one in 3-4 hits; two weak agents can co-kill.
+MINION_BASE_HEALTH: float = 1.5
+MINION_BASE_STRENGTH: float = 0.9
+MINION_LOOT_FOOD: int = 8
+MINION_LOOT_QI: int = 2
+MINION_LOOT_MATERIALS: int = 1
+MINION_ATTACK_DAMAGE_SCALE: float = 0.25
+MINION_ATTACK_MAX_DAMAGE: float = 0.30
+
 
 @dataclasses.dataclass
 class Monster:
@@ -161,6 +172,57 @@ class BossMonster(Monster):
         return live[0]  # placeholder; registry passes a sorted list
 
 
+@dataclasses.dataclass
+class MinionMonster(Monster):
+    """v22 minion — weaker hunter that's actually killable by 1-2 agents.
+
+    Same hunt heuristic as :class:`BossMonster` but with reduced HP/strength
+    and per-instance damage caps. Drops a small loot stash on death so combat
+    has a real payoff. Used in the dense ``arena_minion`` map for forcing
+    contact-combat that is winnable, generating the joint-kill bonds the
+    affinity system rewards.
+    """
+
+    def step(
+        self,
+        world: World,
+        agents: list[Agent],
+        rng: np.random.Generator,
+    ) -> tuple[str | None, float]:
+        if not self.alive:
+            return None, 0.0
+        target = self._nearest_live_agent(agents)
+        if target is None:
+            return None, 0.0
+        bx, by = self.position
+        tx, ty = target.position
+        cheb = max(abs(tx - bx), abs(ty - by))
+        if cheb <= 1:
+            damage = self.attack_damage()
+            target.health = max(0.0, target.health - damage)
+            target._check_death("combat")
+            return target.agent_id, damage
+        dx = int(np.sign(tx - bx))
+        dy = int(np.sign(ty - by))
+        new_x = int(np.clip(bx + dx, 0, world.grid_size - 1))
+        new_y = int(np.clip(by + dy, 0, world.grid_size - 1))
+        self.position = (new_x, new_y)
+        return None, 0.0
+
+    def attack_damage(self) -> float:
+        return float(np.clip(
+            self.strength * MINION_ATTACK_DAMAGE_SCALE,
+            0.0, MINION_ATTACK_MAX_DAMAGE,
+        ))
+
+    @staticmethod
+    def _nearest_live_agent(agents: list[Agent]) -> Agent | None:
+        live = [a for a in agents if a.alive]
+        if not live:
+            return None
+        return live[0]
+
+
 class MonsterRegistry:
     """Holds all monsters in a single environment instance."""
 
@@ -187,6 +249,22 @@ class MonsterRegistry:
         self._monsters.append(boss)
         logger.debug("Spawned boss %s at %s", mid, position)
         return boss
+
+    def spawn_minion(self, position: tuple[int, int]) -> MinionMonster:
+        """v22 — create a minion at ``position`` and register it."""
+        mid = f"minion_{self._next_idx}"
+        self._next_idx += 1
+        minion = MinionMonster(
+            monster_id=mid,
+            kind="minion",
+            position=position,
+            health=MINION_BASE_HEALTH,
+            max_health=MINION_BASE_HEALTH,
+            strength=MINION_BASE_STRENGTH,
+        )
+        self._monsters.append(minion)
+        logger.debug("Spawned minion %s at %s", mid, position)
+        return minion
 
     # ── Queries ──────────────────────────────────────────────────────────────
 
