@@ -27,13 +27,18 @@ Per-agent reward and events are populated by P1.2 inside the underlying
 
 Limitations (intentional, deferred to later phases)
 ---------------------------------------------------
-- P2.2: Action resolution order is fixed (focal slot first, then ascending
-  index). This privileges low-index slots in kill-steal scenarios. To be
-  randomized in P2.2.
 - P2.3: Slot state on rebirth is not yet centrally reset. Tracked separately.
 - Non-focal slots only receive base + combat-shaping reward (no exploration,
   flank, betrayal, food share, group cohesion, train, resistance, stash
   proximity). Sufficient for proof-of-life IPPO; extend in P3 as needed.
+
+P2.2: Action resolution order
+-----------------------------
+The focal slot is randomly chosen from currently-alive slots each step,
+using the env's RNG (deterministic with seed). Logged in
+``info['resolution_order']`` (length n_agents, focal first then ascending
+non-focal indices). This rotates kill-steal privilege fairly across slots
+over many steps.
 """
 from __future__ import annotations
 
@@ -66,10 +71,25 @@ class IPPOEnv(CombatEnv):
         # exclude dead-at-start slots from PPO loss).
         active_mask = np.array([a.alive for a in self._agents], dtype=bool)
 
-        # Route actions through the existing single-focal step + overrides path.
-        # The focal slot's action is taken from actions[focal_idx]; all other
-        # slots are routed through _execute_override_action.
+        # P2.2: randomize which slot is treated as the focal this step. The
+        # focal slot's action runs first in CombatEnv.step (winning kill-steal
+        # contention), then non-focal slots iterate in ascending index order.
+        # To prevent permanent low-index privilege, pick the focal uniformly
+        # from currently-alive slots using the env's RNG (deterministic with
+        # seed). Over many steps, every slot has equal chance of being focal,
+        # so kill-steal advantage averages out across slots.
+        live_indices = np.where(active_mask)[0]
+        if len(live_indices) > 0:
+            focal_choice = int(self._rng.choice(live_indices))
+            self._focal_idx = focal_choice
         focal_idx = self._focal_idx
+
+        # Build resolution order = [focal, then non-focal in ascending order].
+        # Logged in info for determinism debugging and downstream analysis.
+        resolution_order = [focal_idx] + [
+            i for i in range(self._n_agents) if i != focal_idx
+        ]
+
         focal_action = int(actions[focal_idx])
         overrides = {
             i: int(actions[i])
@@ -114,5 +134,6 @@ class IPPOEnv(CombatEnv):
 
         info["active_mask"] = active_mask
         info["action_masks_post"] = action_masks_post
+        info["resolution_order"] = resolution_order
 
         return obs_arr, rewards, terminated, truncated, info
