@@ -189,7 +189,18 @@ def train(args: argparse.Namespace) -> dict:
                 next_obs[e_i] = o
                 next_masks[e_i] = info["action_masks_post"]
                 # active for the NEXT step = currently alive slots
-                next_active[e_i] = np.array([a.alive for a in env._agents], dtype=bool)
+                env_next_active = np.array([a.alive for a in env._agents], dtype=bool)
+                # Auto-reset any env where the entire population has collapsed.
+                # _try_reproduce requires >=2 survivors, so once population drops
+                # below 2 the env permanently dies out. We reset rather than
+                # leaving a dead env collecting empty rollouts.
+                if not env_next_active.any():
+                    reset_seed = args.seed + e_i + 1_000_000 * (it + 1)
+                    o, info = env.reset_all(seed=reset_seed)
+                    next_obs[e_i] = o
+                    next_masks[e_i] = info["action_masks"]
+                    env_next_active = info["active_mask"]
+                next_active[e_i] = env_next_active
 
             buffer.add(
                 obs=obs,

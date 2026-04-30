@@ -75,3 +75,15 @@ def test_smoke_train_deterministic_with_seed(tmp_path):
         assert s1[k] == pytest.approx(s2[k], rel=1e-5, abs=1e-6), (
             f"non-deterministic at key {k}: {s1[k]} vs {s2[k]}"
         )
+
+
+def test_smoke_train_recovers_from_population_collapse(tmp_path):
+    """Long-horizon run survives population die-out via auto-reset."""
+    # 8192 transitions @ 2 envs × 4 agents × 128 rollout = 8 iters,
+    # enough to push past the 4-agent reproduce floor (needs >=2 survivors).
+    args = _smoke_args(seed=42, total_steps=8192, tmpdir=str(tmp_path))
+    summary = train(args)
+    # If auto-reset works, n_active stays positive in the final window.
+    assert summary["n_active"] > 0, (
+        f"trainer collapsed to all-dead by end of run: {summary}"
+    )
