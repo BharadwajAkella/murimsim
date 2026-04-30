@@ -75,6 +75,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Spawn boss monster per episode (v17 common-enemy emergence pressure).",
     )
+    p.add_argument(
+        "--enable-carry-cost",
+        action="store_true",
+        help="v21c: inventory weight reduces combat strength and TRAIN gain.",
+    )
     return p.parse_args()
 
 
@@ -84,6 +89,7 @@ def build_envs(
     n_agents: int,
     seed: int,
     enable_boss: bool = False,
+    enable_carry_cost: bool = False,
 ) -> list[IPPOEnv]:
     return [
         IPPOEnv(
@@ -92,6 +98,7 @@ def build_envs(
             seed=seed + i,
             curriculum_ramp_steps=0,
             enable_boss=enable_boss,
+            enable_carry_cost=enable_carry_cost,
         )
         for i in range(n_envs)
     ]
@@ -135,6 +142,7 @@ def train(args: argparse.Namespace) -> dict:
     envs = build_envs(
         cfg, args.n_envs, args.n_agents, args.seed,
         enable_boss=getattr(args, "enable_boss", False),
+        enable_carry_cost=getattr(args, "enable_carry_cost", False),
     )
     obs, action_masks, active_mask = collect_initial_state(envs, args.seed)
 

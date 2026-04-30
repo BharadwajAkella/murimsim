@@ -1293,7 +1293,12 @@ class MultiAgentEnv(gym.Env):
         elif action_enum == Action.TRAIN:
             x, y = agent.position
             qi_val = self._world.get_qi_field_value(x, y) if "qi" in self._world.resources else 0.0
+            pre_strength = agent.strength
             agent.train(qi_field_value=qi_val)
+            if self._enable_carry_cost:
+                gain = agent.strength - pre_strength
+                if gain > 0:
+                    agent.strength = pre_strength + gain * self._carry_factor(agent)
             # Training reward is applied in _compute_reward via strength_delta tracking.
 
         return food_gathered, hazard_damage, stash_bonus
@@ -1457,6 +1462,14 @@ BOSS_RESPAWN_DELAY: int = 60
 LEGACY_AFFINITY_THRESHOLD: float = 0.3   # normalised; ≈ raw 1.5 (= 1 share + 1 joint-kill)
 LEGACY_UNLOCK_TICKS: int = 50            # half of RECIPROCITY_WINDOW
 
+# v21c carry-cost: heavy inventory makes you weaker in combat AND slower to TRAIN.
+# No hard cap on stack sizes — instead a soft proportional penalty so that
+# specialisation (lean fighters vs. heavy-laden transporters) becomes a real
+# strategic axis. Feature-flagged via enable_carry_cost on CombatEnv ctor so
+# pre-v21c behaviour is byte-identical when disabled.
+CARRY_STRENGTH_PENALTY_PER_ITEM: float = 0.04  # 4% strength loss per inventory item
+CARRY_MIN_STRENGTH_FRAC: float = 0.10          # floor: never go below 10% of strength
+
 # Shared stash rewards
 # Foraging-outward: deposit after having been >=N tiles away from stash since last deposit
 FORAGE_OUTWARD_MIN_DIST: int = 5      # Chebyshev tiles away from stash to qualify
@@ -1507,6 +1520,7 @@ class CombatEnv(MultiAgentEnv):
         render_mode: str | None = None,
         curriculum_ramp_steps: int = CURRICULUM_RAMP_STEPS,
         enable_boss: bool = False,
+        enable_carry_cost: bool = False,
     ) -> None:
         super().__init__(
             config=config,
@@ -1528,6 +1542,8 @@ class CombatEnv(MultiAgentEnv):
         # v17: boss monster — common-enemy emergence pressure. Disabled by default
         # so existing tests/training runs don't change behaviour silently.
         self._enable_boss: bool = enable_boss
+        # v21c: inventory weight penalises combat strength and TRAIN gain.
+        self._enable_carry_cost: bool = enable_carry_cost
         self._monsters: MonsterRegistry = MonsterRegistry()
         # v17: combat-focus lock — when an agent is in combat (hostile adjacent
         # OR took damage last tick), mask out non-combat actions like TRAIN,
@@ -2490,7 +2506,12 @@ class CombatEnv(MultiAgentEnv):
         elif action == Action.TRAIN:
             x, y = agent.position
             qi_val = self._world.get_qi_field_value(x, y) if "qi" in self._world.resources else 0.0
+            pre_strength = agent.strength
             agent.train(qi_field_value=qi_val)
+            if self._enable_carry_cost:
+                gain = agent.strength - pre_strength
+                if gain > 0:
+                    agent.strength = pre_strength + gain * self._carry_factor(agent)
             self._last_action_names[agent_idx] = "train"
             self._last_action_details[agent_idx] = ""
 
@@ -2575,6 +2596,28 @@ class CombatEnv(MultiAgentEnv):
         self._last_action_details[agent_idx] = ""
         return 0.0
 
+    def _carry_factor(self, agent: Agent) -> float:
+        """v21c — multiplicative penalty applied to combat strength and TRAIN gain.
+
+        The more inventory an agent carries, the weaker each swing and the
+        slower each cultivation step. No hard cap on stack sizes — instead a
+        soft, learnable trade-off so that lean fighters and heavy-laden
+        transporters can emerge as distinct strategies.
+
+        Formula::
+
+            factor = max(CARRY_MIN_STRENGTH_FRAC,
+                         1 - CARRY_STRENGTH_PENALTY_PER_ITEM * inventory.total())
+
+        With the defaults (4% per item, 10% floor) an agent carrying 5 items
+        attacks at ~80% strength; 22+ items hits the floor at 10%.
+        """
+        items = agent.inventory.total()
+        if items <= 0:
+            return 1.0
+        factor = 1.0 - CARRY_STRENGTH_PENALTY_PER_ITEM * items
+        return max(CARRY_MIN_STRENGTH_FRAC, factor)
+
     def _combat_damage(
         self, attacker: Agent, defender: Agent, is_defending: bool, tier: StrikeTier = STRIKE_BASIC,
     ) -> float:
@@ -2611,6 +2654,8 @@ class CombatEnv(MultiAgentEnv):
         Damage is clamped to [0, COMBAT_MAX_DAMAGE].
         """
         strength_term = float(np.sqrt(attacker.effective_strength)) + tier.bonus
+        if self._enable_carry_cost:
+            strength_term *= self._carry_factor(attacker)
         base = strength_term * COMBAT_ATTACKER_SCALE
         if is_defending:
             base *= max(0.0, 1.0 - defender.defense_power)
