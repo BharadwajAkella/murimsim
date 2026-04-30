@@ -708,6 +708,43 @@ class MultiAgentEnv(gym.Env):
             self._world._grid["food"][y, x] = 1.0
         agent.inventory.food = 0
 
+    def _reset_slot_state(self, idx: int) -> None:
+        """Wipe all slot-keyed runtime state for slot ``idx``.
+
+        Called on rebirth (``_try_reproduce``) so the offspring inherits only
+        the slot index and traits — never the deceased's social or shaping
+        state. Without this, IPPO learns spurious cross-life correlations and
+        the rotating-focal symmetry leaks bookkeeping between distinct lives.
+
+        Cleared:
+            * outgoing affinity row     (``_affinity_raw[idx]``)
+            * incoming affinity column  (``_affinity_raw[other][idx]`` for all)
+            * help-received (both directions in ``_help_received``)
+            * reward EMA scalar
+            * damage-taken-last-step scalar
+            * group membership (slot is removed; group dissolves if size < 2)
+        """
+        # Drop the slot from any group BEFORE resurrection — _leave_group
+        # handles the size<2 dissolution.
+        self._leave_group(idx)
+
+        # Outgoing affinity row.
+        self._affinity_raw.pop(idx, None)
+        # Incoming affinity column.
+        for other_row in self._affinity_raw.values():
+            other_row.pop(idx, None)
+
+        # Help-received bookkeeping (both directions).
+        self._help_received.pop(idx, None)
+        for other_help in self._help_received.values():
+            other_help.pop(idx, None)
+
+        # Per-slot scalars.
+        if 0 <= idx < len(self._reward_ema):
+            self._reward_ema[idx] = 0.0
+        if 0 <= idx < len(self._damage_taken_last_step):
+            self._damage_taken_last_step[idx] = 0.0
+
     def _try_reproduce(self, deceased: Agent) -> None:
         """Replace a dead (age-death) agent with an offspring of two random survivors.
 
@@ -733,6 +770,10 @@ class MultiAgentEnv(gym.Env):
         )
         # Replace the deceased in the _agents list
         idx = self._agents.index(deceased)
+        # P2.3: wipe all slot-keyed runtime state BEFORE installing the
+        # offspring so the new life starts with a clean slate (no inherited
+        # affinity, help-received, reward EMA, damage, or group membership).
+        self._reset_slot_state(idx)
         self._agents[idx] = offspring
         self._ep_reproductions += 1
         # P0.3: record same-step rebirth for this slot. The slot transitions
