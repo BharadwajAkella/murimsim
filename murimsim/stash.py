@@ -34,6 +34,10 @@ class Stash:
         qi:        Qi items stored.
         materials: Material items stored.
         poison:    Poison items stored.
+        participants: Extra agent_ids allowed to withdraw alongside the owner.
+        claim_unlock_step: v21b — for legacy_stash bequests. -1 means never
+            opens to non-participants. Otherwise, once the env step counter
+            reaches this value, ANY agent at the stash position can withdraw.
     """
 
     stash_id: str
@@ -47,14 +51,26 @@ class Stash:
     # Used for shared loot drops (e.g. boss-kill rewards split across attackers).
     # Empty list (default) means owner-only access.
     participants: list[str] = dataclasses.field(default_factory=list)
+    # v21b: legacy stash unlock — see class docstring.
+    claim_unlock_step: int = -1
 
     def total(self) -> int:
         """Return the total number of items in this stash."""
         return self.food + self.qi + self.materials + self.poison
 
-    def is_accessible_to(self, agent_id: str) -> bool:
-        """True if ``agent_id`` is the owner or a registered participant."""
-        return agent_id == self.owner_id or agent_id in self.participants
+    def is_accessible_to(self, agent_id: str, current_step: int | None = None) -> bool:
+        """True if ``agent_id`` is the owner, a registered participant, or the
+        legacy unlock step has been reached for the given ``current_step``.
+        """
+        if agent_id == self.owner_id or agent_id in self.participants:
+            return True
+        if (
+            self.claim_unlock_step >= 0
+            and current_step is not None
+            and current_step >= self.claim_unlock_step
+        ):
+            return True
+        return False
 
     def as_dict(self) -> dict[str, int]:
         """Return resource counts as a plain dict."""
@@ -76,6 +92,7 @@ class Stash:
             "materials": self.materials,
             "poison": self.poison,
             "participants": list(self.participants),
+            "claim_unlock_step": self.claim_unlock_step,
         }
 
 
@@ -154,16 +171,18 @@ class StashRegistry:
         logger.debug("Agent %s deposited stash %s at %s", owner_id, stash_id, stash.position)
         return stash
 
-    def withdraw(self, agent: Agent) -> bool:
+    def withdraw(self, agent: Agent, current_step: int | None = None) -> bool:
         """Move all own stash contents at ``agent.position`` into ``agent.inventory``.
 
         Merges resources from every stash owned by this agent at the current
-        position. All such stashes are removed from the registry.
+        position. Legacy stashes whose unlock step has been reached are also
+        included when ``current_step`` is provided. All merged stashes are
+        removed from the registry.
 
         Returns:
             ``True`` if at least one item was transferred, ``False`` otherwise.
         """
-        own_stashes = self.get_own_stash_at(agent.agent_id, *agent.position)
+        own_stashes = self.get_own_stash_at(agent.agent_id, *agent.position, current_step)
         if not own_stashes:
             return False
 
@@ -180,16 +199,21 @@ class StashRegistry:
 
         return transferred
 
-    def withdraw_group(self, agent: Agent, group_member_ids: list[str]) -> int:
+    def withdraw_group(
+        self, agent: Agent, group_member_ids: list[str], current_step: int | None = None,
+    ) -> int:
         """Withdraw food from any group member's stash at ``agent.position``.
 
         Merges food-only from stashes owned by any member of ``group_member_ids``
-        (including agent itself) at the agent's current position.
+        (including agent itself) at the agent's current position. Legacy stashes
+        whose unlock step has been reached are also included for the agent itself
+        (via ``get_own_stash_at(agent.agent_id, ..., current_step)``).
         Non-food items stay in the stash (food is the shared resource).
 
         Args:
             agent:            The withdrawing agent.
             group_member_ids: Agent IDs of all group members including ``agent``.
+            current_step:     Current env step (enables legacy-stash unlock).
 
         Returns:
             Total food items transferred (0 if nothing was available).
@@ -197,7 +221,10 @@ class StashRegistry:
         food_transferred = 0
         pos = agent.position
         for mid in group_member_ids:
-            stashes = self.get_own_stash_at(mid, *pos)
+            # Only the agent itself benefits from legacy unlock here; group-mates'
+            # legacy stashes are handled when those agents withdraw themselves.
+            cs = current_step if mid == agent.agent_id else None
+            stashes = self.get_own_stash_at(mid, *pos, cs)
             for stash in stashes:
                 if stash.food > 0:
                     food_transferred += stash.food
@@ -247,18 +274,23 @@ class StashRegistry:
         """Return all stashes at grid position ``(x, y)``."""
         return [s for s in self._stashes.values() if s.position == (x, y)]
 
-    def get_own_stash_at(self, agent_id: str, x: int, y: int) -> list[Stash]:
-        """Return stashes at ``(x, y)`` accessible to ``agent_id`` (owner or participant)."""
+    def get_own_stash_at(
+        self, agent_id: str, x: int, y: int, current_step: int | None = None,
+    ) -> list[Stash]:
+        """Return stashes at ``(x, y)`` accessible to ``agent_id`` (owner, participant,
+        or legacy stash whose unlock step has been reached for ``current_step``)."""
         return [
             s for s in self._stashes.values()
-            if s.is_accessible_to(agent_id) and s.position == (x, y)
+            if s.is_accessible_to(agent_id, current_step) and s.position == (x, y)
         ]
 
-    def get_enemy_stashes_at(self, agent_id: str, x: int, y: int) -> list[Stash]:
+    def get_enemy_stashes_at(
+        self, agent_id: str, x: int, y: int, current_step: int | None = None,
+    ) -> list[Stash]:
         """Return stashes at ``(x, y)`` NOT accessible to ``agent_id``."""
         return [
             s for s in self._stashes.values()
-            if not s.is_accessible_to(agent_id) and s.position == (x, y)
+            if not s.is_accessible_to(agent_id, current_step) and s.position == (x, y)
         ]
 
     def get_stashes_for_owner(self, agent_id: str) -> list[Stash]:

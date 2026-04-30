@@ -699,14 +699,65 @@ class MultiAgentEnv(gym.Env):
                 new_groups.append(frozenset(pruned))
         self._groups = new_groups
 
-    def _drop_inventory(self, agent: Agent) -> None:
-        """Drop a dead agent's food inventory onto its tile (if tile is empty)."""
-        if agent.inventory.food <= 0:
+    def _drop_inventory(self, agent: Agent, killer_idx: int | None = None) -> None:
+        """Deposit a deceased agent's inventory into a legacy_stash at its death tile.
+
+        v21b semantics:
+          * All four resources (food, qi, materials, poison) are bequeathed.
+          * Eligible heirs (participants) = agents whose
+            ``_affinity_raw[deceased_idx][heir_idx] >= LEGACY_AFFINITY_THRESHOLD``,
+            excluding ``killer_idx`` and the deceased itself.
+          * After ``LEGACY_UNLOCK_TICKS`` steps, any agent at the position can
+            withdraw via the standard WITHDRAW path (lockout is enforced by
+            :meth:`Stash.is_accessible_to` checking ``current_step``).
+          * Empty inventory → no-op (no zero-value stash registered).
+        """
+        inv = agent.inventory
+        total = inv.food + inv.qi + inv.materials + inv.poison
+        if total <= 0:
             return
-        x, y = agent.position
-        if self._world.get_grid_view("food")[y, x] == 0.0:
-            self._world._grid["food"][y, x] = 1.0
-        agent.inventory.food = 0
+
+        # Find deceased's slot index (if still in the list).
+        try:
+            deceased_idx = self._agents.index(agent)
+        except ValueError:
+            deceased_idx = -1
+
+        # Build heirs list from outgoing-affinity row of the deceased.
+        eligible_heirs: list[str] = []
+        if deceased_idx >= 0:
+            for heir_idx in range(len(self._agents)):
+                if heir_idx == deceased_idx or heir_idx == killer_idx:
+                    continue
+                heir_agent = self._agents[heir_idx]
+                if not heir_agent.alive:
+                    continue
+                # Use the env's normalised affinity helper which applies decay.
+                if self._affinity(deceased_idx, heir_idx) >= LEGACY_AFFINITY_THRESHOLD:
+                    eligible_heirs.append(heir_agent.agent_id)
+
+        # Sentinel owner_id avoids accidental access if the slot is reincarnated
+        # with the same agent_id (max_age path); only participants list gates
+        # early access.
+        owner_sentinel = f"{agent.agent_id}__deceased"
+        stash_id = f"{agent.agent_id}_legacy_{self._ep_step_count}"
+        legacy = Stash(
+            stash_id=stash_id,
+            owner_id=owner_sentinel,
+            position=agent.position,
+            food=inv.food,
+            qi=inv.qi,
+            materials=inv.materials,
+            poison=inv.poison,
+            participants=sorted(eligible_heirs),
+            claim_unlock_step=self._ep_step_count + LEGACY_UNLOCK_TICKS,
+        )
+        self._stash_registry.register(legacy)
+        # Wipe inventory so it can't be double-credited.
+        inv.food = 0
+        inv.qi = 0
+        inv.materials = 0
+        inv.poison = 0
 
     def _reset_slot_state(self, idx: int) -> None:
         """Wipe all slot-keyed runtime state for slot ``idx``.
@@ -1186,9 +1237,13 @@ class MultiAgentEnv(gym.Env):
             if group:
                 member_ids = [self._agents[i].agent_id for i in group]
                 # Detect retrieval source: own (bank) or group-mate (granary)
-                own_here = self._stash_registry.get_own_stash_at(agent.agent_id, *agent.position)
+                own_here = self._stash_registry.get_own_stash_at(
+                    agent.agent_id, *agent.position, self._ep_step_count,
+                )
                 own_food_here = sum(s.food for s in own_here)
-                food_got = self._stash_registry.withdraw_group(agent, member_ids)
+                food_got = self._stash_registry.withdraw_group(
+                    agent, member_ids, current_step=self._ep_step_count,
+                )
                 self._ep_items_withdrawn += food_got
                 if food_got > 0:
                     stash_bonus += REWARD_GROUP_WITHDRAW_BONUS
@@ -1198,10 +1253,12 @@ class MultiAgentEnv(gym.Env):
                     else:
                         self._ep_bank_withdrawals += 1
             else:
-                at_pos = self._stash_registry.get_own_stash_at(agent.agent_id, *agent.position)
+                at_pos = self._stash_registry.get_own_stash_at(
+                    agent.agent_id, *agent.position, self._ep_step_count,
+                )
                 items_here = sum(s.total() for s in at_pos)
                 self._ep_items_withdrawn += items_here
-                transferred = self._stash_registry.withdraw(agent)
+                transferred = self._stash_registry.withdraw(agent, current_step=self._ep_step_count)
                 if transferred:
                     self._ep_bank_withdrawals += 1
 
@@ -1391,6 +1448,14 @@ REWARD_FOOD_SHARE: float = 0.04       # reward focal receives when it shares or 
 # boss at a random corner. Without respawn, the boss is a one-shot event per
 # episode and provides no sustained learning signal across long rollouts.
 BOSS_RESPAWN_DELAY: int = 60
+
+# v21b: legacy stash bequest — when an agent dies (any cause), all of its
+# inventory is deposited into a Stash at its death position. Eligible heirs
+# (participants) are agents the deceased had _affinity() (normalised to [-1,1])
+# >= LEGACY_AFFINITY_THRESHOLD to, EXCLUDING the killer (if combat death).
+# After LEGACY_UNLOCK_TICKS, ANY agent at the position can withdraw.
+LEGACY_AFFINITY_THRESHOLD: float = 0.3   # normalised; ≈ raw 1.5 (= 1 share + 1 joint-kill)
+LEGACY_UNLOCK_TICKS: int = 50            # half of RECIPROCITY_WINDOW
 
 # Shared stash rewards
 # Foraging-outward: deposit after having been >=N tiles away from stash since last deposit
@@ -2336,7 +2401,7 @@ class CombatEnv(MultiAgentEnv):
                     other_to_actor=AFFINITY_FLANK_BOTH,
                 )
         if not target.alive:
-            self._drop_inventory(target)
+            self._drop_inventory(target, killer_idx=attacker_idx)
             return damage, True
         return damage, False
 
@@ -2389,7 +2454,7 @@ class CombatEnv(MultiAgentEnv):
                 target.health = max(0.0, target.health - damage)
                 target._check_death("combat")
                 if not target.alive:
-                    self._drop_inventory(target)
+                    self._drop_inventory(target, killer_idx=agent_idx)
                 if is_focal_target:
                     damage_to_focal = damage
                 self._last_action_names[agent_idx] = action.name.lower()
@@ -2499,7 +2564,7 @@ class CombatEnv(MultiAgentEnv):
                 focal.health = max(0.0, focal.health - damage)
                 focal._check_death("combat")
                 if not focal.alive:
-                    self._drop_inventory(focal)
+                    self._drop_inventory(focal, killer_idx=agent_idx)
                 self._last_action_names[agent_idx] = "attack"
                 self._last_action_details[agent_idx] = focal.agent_id
                 return damage
