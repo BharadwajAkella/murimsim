@@ -67,6 +67,7 @@ from murimsim.monster import (
 )
 from murimsim.stash import Stash, StashRegistry
 from murimsim.world import World
+from murimsim.rl.agent_events import AgentStepEvents, StepEventBuffer
 
 # ── Observation layout constants ─────────────────────────────────────────────
 OBS_VIEW_SIZE: int = 5
@@ -1028,11 +1029,12 @@ class MultiAgentEnv(gym.Env):
         self,
         hunger_prev: float,
         health_prev: float,
-        food_gathered: int,
-        hazard_damage: float,
-        agent: Agent,
+        food_gathered: int = 0,
+        hazard_damage: float = 0.0,
+        agent: Agent | None = None,
         exploration_reward: float = 0.0,
         inv_food_prev: int = 0,
+        events: "AgentStepEvents | None" = None,
     ) -> float:
         """Compute shaped per-step reward.
 
@@ -1045,7 +1047,18 @@ class MultiAgentEnv(gym.Env):
 
         Stage 6b additions:
         - Health recovery bonus: rewards regaining health after eating or resting.
+
+        P1.2 (IPPO migration prep):
+        - Optional ``events`` kwarg: if supplied, ``food_gathered`` and
+          ``hazard_damage`` are read from the events object instead of the
+          positional args. All other positional callers behave identically
+          (their args are passed through unchanged), guaranteeing byte-identity
+          for the existing focal-only training path.
         """
+        if events is not None:
+            food_gathered = events.food_gathered
+            hazard_damage = events.hazard_damage
+        assert agent is not None, "_compute_reward requires an agent"
         reward = REWARD_ALIVE
         hunger_relief = hunger_prev - agent.hunger
         if hunger_relief > 0:
@@ -1750,6 +1763,24 @@ class CombatEnv(MultiAgentEnv):
         self._lifecycle_died_step = [False] * self._n_agents
         self._lifecycle_born_step = [False] * self._n_agents
 
+        # P1.2: per-step event buffer + per-agent pre-state snapshot.
+        # Snapshot BEFORE any action is applied so end-of-step deltas are correct.
+        # Capture the acting focal index — it advances at end-of-step, so we
+        # need to remember which slot actually performed the focal action.
+        acting_focal_idx = self._focal_idx
+        step_events = StepEventBuffer(self._n_agents)
+        agent_pre_state = [
+            {
+                "hunger": ag.hunger,
+                "health": ag.health,
+                "inv_food": ag.inventory.food,
+                "alive": ag.alive,
+            }
+            for ag in self._agents
+        ]
+        # Track per-non-focal damage dealt this step (heuristic / override path).
+        heuristic_damage_dealt = [0.0] * self._n_agents
+
         # Curriculum: redirect combat actions to TRAIN when not yet fully enabled.
         # TRAIN is always productive — better signal than REST. Uses the same cached
         # gate as action_masks() so the two never disagree within a single step.
@@ -1869,6 +1900,9 @@ class CombatEnv(MultiAgentEnv):
                 else:
                     dmg = self._heuristic_combat_step(agent, focal, focal_defending)
                 damage_taken += dmg
+                # P1.2: attribute damage_dealt to the non-focal slot.
+                if dmg > 0:
+                    heuristic_damage_dealt[i] += dmg
 
         # 2b. v17: monster tick (after agent actions). Boss may attack any
         # adjacent live agent; we bookkeep damage to focal so its obs reflects
@@ -2117,6 +2151,52 @@ class CombatEnv(MultiAgentEnv):
         self._cached_curriculum_attack_allowed = None
         # P0.3: emit per-slot lifecycle metadata (IPPO hidden-state resets).
         info["lifecycle"] = self._build_lifecycle_info()
+
+        # P1.2: populate per-agent events + per-agent reward.
+        # Use acting_focal_idx (captured before _focal_idx advanced) so events
+        # are attributed to the slot that actually performed the focal action.
+        focal_ev = step_events[acting_focal_idx]
+        focal_ev.food_gathered = int(food_gathered)
+        focal_ev.hazard_damage = float(hazard_damage)
+        focal_ev.damage_dealt = float(damage_dealt)
+        focal_ev.damage_taken = float(damage_taken)
+        focal_ev.defeated = bool(defeat_bonus > 0.0)
+        focal_ev.stash_bonus = float(stash_bonus)
+        focal_ev.group_formed = bool(group_formed)
+        focal_ev.betrayal = bool(focal_betrayal)
+        # Non-focal slots: damage_dealt from heuristic/override return, and
+        # damage_taken from _damage_taken_last_step (already populated by
+        # focal ATTACK + monster ticks above).
+        for i in range(self._n_agents):
+            if i == acting_focal_idx:
+                continue
+            ev = step_events[i]
+            ev.damage_dealt = float(heuristic_damage_dealt[i])
+            ev.damage_taken = float(self._damage_taken_last_step[i])
+
+        # Compute per-agent reward array. Acting-focal slot reuses the existing
+        # scalar to preserve byte-identity. Other slots use _compute_combat_reward
+        # with the per-slot pre-state and the events buffer; dead-at-start slots
+        # get 0.0.
+        per_agent_reward = np.zeros(self._n_agents, dtype=np.float64)
+        per_agent_reward[acting_focal_idx] = float(reward)
+        for i in range(self._n_agents):
+            if i == acting_focal_idx:
+                continue
+            if not agent_pre_state[i]["alive"]:
+                continue
+            ag_i = self._agents[i]
+            per_agent_reward[i] = self._compute_combat_reward(
+                hunger_prev=agent_pre_state[i]["hunger"],
+                health_prev=agent_pre_state[i]["health"],
+                agent=ag_i,
+                inv_food_prev=agent_pre_state[i]["inv_food"],
+                events=step_events[i],
+            )
+
+        info["agent_events"] = step_events.events
+        info["per_agent_reward"] = per_agent_reward
+
         return obs, reward, terminated, False, info
 
     # ── Combat helpers ────────────────────────────────────────────────────────
@@ -2534,16 +2614,28 @@ class CombatEnv(MultiAgentEnv):
         self,
         hunger_prev: float,
         health_prev: float,
-        food_gathered: int,
-        hazard_damage: float,
-        agent: Agent,
-        exploration_reward: float,
-        damage_dealt: float,
-        damage_taken: float,
-        defeat_bonus: float,
+        food_gathered: int = 0,
+        hazard_damage: float = 0.0,
+        agent: Agent | None = None,
+        exploration_reward: float = 0.0,
+        damage_dealt: float = 0.0,
+        damage_taken: float = 0.0,
+        defeat_bonus: float = 0.0,
         inv_food_prev: int = 0,
+        events: "AgentStepEvents | None" = None,
     ) -> float:
-        """Phase 3c reward: Phase 3b reward + combat shaping."""
+        """Phase 3c reward: Phase 3b reward + combat shaping.
+
+        P1.2: optional ``events`` kwarg overrides ``food_gathered``,
+        ``hazard_damage``, ``damage_dealt``, ``damage_taken``, ``defeat_bonus``.
+        Existing positional callers are unchanged.
+        """
+        if events is not None:
+            food_gathered = events.food_gathered
+            hazard_damage = events.hazard_damage
+            damage_dealt = events.damage_dealt
+            damage_taken = events.damage_taken
+            defeat_bonus = REWARD_DEFEAT_OPPONENT if events.defeated else 0.0
         reward = self._compute_reward(hunger_prev, health_prev, food_gathered, hazard_damage, agent, exploration_reward, inv_food_prev)
         reward += REWARD_DAMAGE_TAKEN_SCALE * damage_taken
         reward += defeat_bonus
