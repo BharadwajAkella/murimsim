@@ -51,6 +51,33 @@ from murimsim.rl.multi_env import CombatEnv
 class IPPOEnv(CombatEnv):
     """CombatEnv subclass adding a vector ``step_all`` API for IPPO training."""
 
+    def reset_all(
+        self, *, seed: int | None = None
+    ) -> tuple[np.ndarray, dict]:
+        """Reset env and return per-agent observations + initial action masks.
+
+        Returns:
+            obs        : np.ndarray, shape (n_agents, obs_dim)
+            info       : dict with
+                'action_masks' : bool[n_agents, n_actions], pre-action masks
+                                  for the first step of the new episode
+                'active_mask'  : bool[n_agents], True for slots alive at reset
+        """
+        _focal_obs, base_info = self.reset(seed=seed)
+        obs_arr = np.stack(
+            [self._build_obs(i) for i in range(self._n_agents)],
+            axis=0,
+        )
+        action_masks = np.stack(
+            [self.action_masks(i) for i in range(self._n_agents)],
+            axis=0,
+        ).astype(bool, copy=False)
+        active_mask = np.array([a.alive for a in self._agents], dtype=bool)
+        info = dict(base_info) if base_info else {}
+        info["action_masks"] = action_masks
+        info["active_mask"] = active_mask
+        return obs_arr, info
+
     def step_all(
         self, actions: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
