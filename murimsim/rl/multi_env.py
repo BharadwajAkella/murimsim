@@ -1387,6 +1387,11 @@ RECIPROCITY_BOOSTED: float = 0.85     # boosted chance if ally helped me recentl
 RECIPROCITY_WINDOW: int = 100         # steps within which past help is remembered
 REWARD_FOOD_SHARE: float = 0.04       # reward focal receives when it shares or is shared with
 
+# v21a: boss respawn — after the boss dies, wait this many ticks then spawn a new
+# boss at a random corner. Without respawn, the boss is a one-shot event per
+# episode and provides no sustained learning signal across long rollouts.
+BOSS_RESPAWN_DELAY: int = 60
+
 # Shared stash rewards
 # Foraging-outward: deposit after having been >=N tiles away from stash since last deposit
 FORAGE_OUTWARD_MIN_DIST: int = 5      # Chebyshev tiles away from stash to qualify
@@ -1516,6 +1521,10 @@ class CombatEnv(MultiAgentEnv):
         self._ep_boss_attacks_landed: int = 0
         self._ep_damage_from_boss: float = 0.0
         self._ep_agents_killed_by_boss: int = 0
+        # v21a: boss respawn countdown — -1 means no respawn pending (boss alive
+        # or never enabled). Set to BOSS_RESPAWN_DELAY when boss dies; decremented
+        # each tick; spawn fires when it reaches 0.
+        self._boss_respawn_countdown: int = -1
         # v18: qi-infused strike telemetry
         self._ep_qi_strikes_used: int = 0      # successful ATTACK_QI strikes (1 qi spent)
         self._ep_burst_strikes_used: int = 0   # successful ATTACK_BURST strikes (3 qi spent)
@@ -1959,6 +1968,25 @@ class CombatEnv(MultiAgentEnv):
                     if not va.alive:
                         self._ep_agents_killed_by_boss += 1
                     break
+
+        # v21a: boss respawn — if enabled and no live boss, run countdown and
+        # spawn a fresh boss at a random corner when it reaches 0. Provides
+        # sustained boss pressure across long IPPO rollouts.
+        if self._enable_boss:
+            no_live_boss = not any(
+                m.alive for m in self._monsters.all() if m.kind == "boss"
+            )
+            if no_live_boss:
+                if self._boss_respawn_countdown < 0:
+                    self._boss_respawn_countdown = BOSS_RESPAWN_DELAY
+                elif self._boss_respawn_countdown == 0:
+                    corner = self._random_corner()
+                    self._monsters.spawn_boss(corner)
+                    self._boss_respawn_countdown = -1
+                else:
+                    self._boss_respawn_countdown -= 1
+            else:
+                self._boss_respawn_countdown = -1
 
         # Record damage focal took this step (from all heuristic agents combined)
         self._damage_taken_last_step[self._focal_idx] = damage_taken

@@ -70,12 +70,29 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-wandb", action="store_true")
     p.add_argument("--wandb-project", default="murimsim-ippo")
     p.add_argument("--wandb-run-name", default=None)
+    p.add_argument(
+        "--enable-boss",
+        action="store_true",
+        help="Spawn boss monster per episode (v17 common-enemy emergence pressure).",
+    )
     return p.parse_args()
 
 
-def build_envs(config: dict, n_envs: int, n_agents: int, seed: int) -> list[IPPOEnv]:
+def build_envs(
+    config: dict,
+    n_envs: int,
+    n_agents: int,
+    seed: int,
+    enable_boss: bool = False,
+) -> list[IPPOEnv]:
     return [
-        IPPOEnv(config=config, n_agents=n_agents, seed=seed + i, curriculum_ramp_steps=0)
+        IPPOEnv(
+            config=config,
+            n_agents=n_agents,
+            seed=seed + i,
+            curriculum_ramp_steps=0,
+            enable_boss=enable_boss,
+        )
         for i in range(n_envs)
     ]
 
@@ -115,7 +132,10 @@ def train(args: argparse.Namespace) -> dict:
     n_actions = N_ACTIONS_PHASE6_QI
     B = args.n_envs * args.n_agents
 
-    envs = build_envs(cfg, args.n_envs, args.n_agents, args.seed)
+    envs = build_envs(
+        cfg, args.n_envs, args.n_agents, args.seed,
+        enable_boss=getattr(args, "enable_boss", False),
+    )
     obs, action_masks, active_mask = collect_initial_state(envs, args.seed)
 
     policy = RecurrentSharedActorCritic(
