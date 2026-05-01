@@ -86,6 +86,21 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="v22: round-robin arena mix (see scripts/train_ippo.py).",
     )
+    p.add_argument(
+        "--n-policy-agents",
+        type=int,
+        default=None,
+        help=(
+            "v23 FSP: number of trained slots per env (first N of n-agents). "
+            "Remaining slots use --frozen-ckpt. Defaults to n_agents (no FSP)."
+        ),
+    )
+    p.add_argument(
+        "--frozen-ckpt",
+        type=str,
+        default=None,
+        help="v23 FSP: checkpoint path for frozen baseline policy.",
+    )
     return p.parse_args()
 
 
@@ -172,7 +187,15 @@ def train(args: argparse.Namespace) -> dict:
     device = torch.device(args.device)
     obs_dim = OBS_TOTAL_SIZE
     n_actions = N_ACTIONS_PHASE6_QI
-    B = args.n_envs * args.n_agents
+
+    # v23 FSP: split slots into [0..n_policy) trained + [n_policy..n_agents) frozen.
+    n_policy = getattr(args, "n_policy_agents", None) or args.n_agents
+    n_frozen = args.n_agents - n_policy
+    if n_frozen < 0:
+        raise ValueError(f"n_policy_agents ({n_policy}) > n_agents ({args.n_agents})")
+    if n_frozen > 0 and not getattr(args, "frozen_ckpt", None):
+        raise ValueError("--frozen-ckpt required when n_policy_agents < n_agents")
+    B = args.n_envs * n_policy
 
     envs = build_envs(
         cfg, args.n_envs, args.n_agents, args.seed,
@@ -190,10 +213,31 @@ def train(args: argparse.Namespace) -> dict:
     ).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr, eps=1e-5)
 
+    frozen_policy = None
+    frozen_is_recurrent = False
+    frozen_hidden: list | None = None
+    if n_frozen > 0:
+        from scripts.eval_ippo import load_policy
+        frozen_policy, _frozen_args, frozen_is_recurrent = load_policy(
+            args.frozen_ckpt, device=device,
+        )
+        for p in frozen_policy.parameters():
+            p.requires_grad_(False)
+        frozen_policy.eval()
+        if frozen_is_recurrent:
+            frozen_hidden = [
+                frozen_policy.initial_hidden(n_frozen, device)
+                for _ in range(args.n_envs)
+            ]
+        logger.info(
+            "FSP enabled: n_policy=%d n_frozen=%d frozen_ckpt=%s recurrent=%s",
+            n_policy, n_frozen, args.frozen_ckpt, frozen_is_recurrent,
+        )
+
     buffer = RecurrentRolloutBuffer(
         rollout_length=args.rollout_length,
         n_envs=args.n_envs,
-        n_agents=args.n_agents,
+        n_agents=n_policy,
         obs_dim=obs_dim,
         n_actions=n_actions,
         hidden_dim=args.hidden_dim,
@@ -217,17 +261,20 @@ def train(args: argparse.Namespace) -> dict:
     transitions_per_iter = args.rollout_length * B
     total_iters = max(1, args.total_steps // transitions_per_iter)
     logger.info(
-        "starting recurrent IPPO: %d iters × %d transitions = %d (target: %d)",
-        total_iters, transitions_per_iter, total_iters * transitions_per_iter, args.total_steps,
+        "starting recurrent IPPO: %d iters × %d transitions = %d (target: %d) "
+        "[n_policy=%d, n_frozen=%d]",
+        total_iters, transitions_per_iter, total_iters * transitions_per_iter,
+        args.total_steps, n_policy, n_frozen,
     )
 
-    # Carried hidden across iters — detached at iter boundary.
+    # Trained-policy carried hidden — sized to policy slots only.
     carried_h, carried_c = policy.initial_hidden(B, device=device)
-    # All slots get a fresh life on iter 0 → pending_life_reset starts True.
+    # Pending life reset for ALL slots (we still need full shape for env loop)
     pending_life_reset = np.ones((args.n_envs, args.n_agents), dtype=bool)
 
-    ep_reward_sum = np.zeros((args.n_envs, args.n_agents), dtype=np.float64)
-    ep_step_count = np.zeros((args.n_envs, args.n_agents), dtype=np.int64)
+    # Episode-level accounting — policy slots only
+    ep_reward_sum = np.zeros((args.n_envs, n_policy), dtype=np.float64)
+    ep_step_count = np.zeros((args.n_envs, n_policy), dtype=np.int64)
     completed_lives_reward: list[float] = []
     completed_lives_steps: list[int] = []
 
@@ -236,30 +283,68 @@ def train(args: argparse.Namespace) -> dict:
 
     for it in range(total_iters):
         buffer.reset()
-        # Snapshot the hidden state we're about to consume — this is what
-        # the update will replay against.
         buffer.set_initial_hidden(carried_h, carried_c)
 
         for _t in range(args.rollout_length):
-            # Apply pending hidden reset BEFORE acting on obs.
-            if pending_life_reset.any():
-                reset_flat = pending_life_reset.reshape(-1)
+            # Apply pending hidden reset BEFORE acting on obs (policy slots only).
+            pending_policy = pending_life_reset[:, :n_policy]
+            if pending_policy.any():
+                reset_flat = pending_policy.reshape(-1)
                 reset_t = torch.as_tensor(reset_flat, dtype=torch.bool, device=device)
                 keep = (~reset_t).view(1, B, 1).to(carried_h.dtype)
                 carried_h = carried_h * keep
                 carried_c = carried_c * keep
 
-            with torch.no_grad():
-                obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).reshape(-1, obs_dim)
-                mask_t = torch.as_tensor(action_masks, dtype=torch.bool, device=device).reshape(-1, n_actions)
-                action_flat, logp_flat, value_flat, (carried_h, carried_c) = policy.act(
-                    obs_t, mask_t, (carried_h, carried_c)
-                )
-                action = action_flat.reshape(args.n_envs, args.n_agents)
-                logp = logp_flat.reshape(args.n_envs, args.n_agents)
-                value = value_flat.reshape(args.n_envs, args.n_agents)
+            # Frozen recurrent: zero per-env per-slot hidden columns for born slots.
+            if frozen_is_recurrent and n_frozen > 0:
+                pending_frozen = pending_life_reset[:, n_policy:]
+                if pending_frozen.any():
+                    for e_i in range(args.n_envs):
+                        if not pending_frozen[e_i].any():
+                            continue
+                        fh, fc = frozen_hidden[e_i]
+                        keep_f = torch.as_tensor(
+                            ~pending_frozen[e_i], dtype=fh.dtype, device=device,
+                        ).view(1, n_frozen, 1)
+                        frozen_hidden[e_i] = (fh * keep_f, fc * keep_f)
 
-            actions_np = action.cpu().numpy()
+            with torch.no_grad():
+                obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device)
+                mask_t = torch.as_tensor(action_masks, dtype=torch.bool, device=device)
+                # Trained policy on slots [0:n_policy]
+                pol_obs = obs_t[:, :n_policy].reshape(-1, obs_dim)
+                pol_mask = mask_t[:, :n_policy].reshape(-1, n_actions)
+                action_flat, logp_flat, value_flat, (carried_h, carried_c) = policy.act(
+                    pol_obs, pol_mask, (carried_h, carried_c)
+                )
+                pol_action = action_flat.reshape(args.n_envs, n_policy)
+                pol_logp = logp_flat.reshape(args.n_envs, n_policy)
+                pol_value = value_flat.reshape(args.n_envs, n_policy)
+
+                # Frozen policy on slots [n_policy:n_agents]
+                if n_frozen > 0:
+                    frz_obs_full = obs_t[:, n_policy:]
+                    frz_mask_full = mask_t[:, n_policy:]
+                    if frozen_is_recurrent:
+                        frz_actions_per_env = []
+                        for e_i in range(args.n_envs):
+                            f_act, _, _, f_h = frozen_policy.act(
+                                frz_obs_full[e_i], frz_mask_full[e_i],
+                                frozen_hidden[e_i],
+                            )
+                            frozen_hidden[e_i] = f_h
+                            frz_actions_per_env.append(f_act)
+                        frz_action = torch.stack(frz_actions_per_env, dim=0)
+                    else:
+                        frz_obs_flat = frz_obs_full.reshape(-1, obs_dim)
+                        frz_mask_flat = frz_mask_full.reshape(-1, n_actions)
+                        f_act, _, _ = frozen_policy.act(frz_obs_flat, frz_mask_flat)
+                        frz_action = f_act.reshape(args.n_envs, n_frozen)
+                    full_action = torch.cat([pol_action, frz_action], dim=1)
+                else:
+                    full_action = pol_action
+
+            actions_np = full_action.cpu().numpy()
             rewards = np.zeros((args.n_envs, args.n_agents), dtype=np.float32)
             dones = np.zeros((args.n_envs, args.n_agents), dtype=bool)
             next_obs = np.zeros_like(obs)
@@ -267,7 +352,7 @@ def train(args: argparse.Namespace) -> dict:
             next_active = np.zeros_like(active_mask)
             next_pending = np.zeros((args.n_envs, args.n_agents), dtype=bool)
 
-            stored_life_reset = pending_life_reset.copy()
+            stored_life_reset = pending_policy.copy()
 
             for e_i, env in enumerate(envs):
                 o, r, term, trunc, info = env.step_all(actions_np[e_i])
@@ -291,26 +376,29 @@ def train(args: argparse.Namespace) -> dict:
                     env_next_active = info["active_mask"]
                     # Force ALL of this env's slots to reset hidden next step.
                     next_pending[e_i, :] = True
+                    # Reset frozen hidden state for any frozen slots in this env.
+                    if frozen_is_recurrent and n_frozen > 0:
+                        frozen_hidden[e_i] = frozen_policy.initial_hidden(n_frozen, device)
                 next_active[e_i] = env_next_active
 
             buffer.add(
-                obs=obs,
-                action_mask=action_masks,
-                action=action,
-                logprob=logp,
-                value=value,
-                reward=rewards,
-                done=dones,
-                active=active_mask,
+                obs=obs[:, :n_policy],
+                action_mask=action_masks[:, :n_policy],
+                action=pol_action,
+                logprob=pol_logp,
+                value=pol_value,
+                reward=rewards[:, :n_policy],
+                done=dones[:, :n_policy],
+                active=active_mask[:, :n_policy],
                 life_reset=stored_life_reset,
             )
 
-            ep_reward_sum += rewards
-            ep_step_count += active_mask.astype(np.int64)
-            died = dones
+            ep_reward_sum += rewards[:, :n_policy]
+            ep_step_count += active_mask[:, :n_policy].astype(np.int64)
+            died = dones[:, :n_policy]
             if died.any():
                 for e_i in range(args.n_envs):
-                    for a_i in range(args.n_agents):
+                    for a_i in range(n_policy):
                         if died[e_i, a_i]:
                             completed_lives_reward.append(float(ep_reward_sum[e_i, a_i]))
                             completed_lives_steps.append(int(ep_step_count[e_i, a_i]))
@@ -324,21 +412,22 @@ def train(args: argparse.Namespace) -> dict:
 
         # Bootstrap value uses carried hidden — does NOT mutate it.
         with torch.no_grad():
-            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).reshape(-1, obs_dim)
-            # Apply pending reset to a SCRATCH copy so we don't disturb the
-            # actual carry forward — the trainer applies pending_life_reset
-            # again at the start of next iter's rollout loop.
+            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device)
+            pol_obs_flat = obs_t[:, :n_policy].reshape(-1, obs_dim)
             scratch_h = carried_h.clone()
             scratch_c = carried_c.clone()
-            if pending_life_reset.any():
-                reset_flat = pending_life_reset.reshape(-1)
+            pending_policy_end = pending_life_reset[:, :n_policy]
+            if pending_policy_end.any():
+                reset_flat = pending_policy_end.reshape(-1)
                 reset_t = torch.as_tensor(reset_flat, dtype=torch.bool, device=device)
                 keep = (~reset_t).view(1, B, 1).to(scratch_h.dtype)
                 scratch_h = scratch_h * keep
                 scratch_c = scratch_c * keep
-            last_value_flat = policy.value_only(obs_t, (scratch_h, scratch_c))
-            last_value = last_value_flat.reshape(args.n_envs, args.n_agents)
-            last_active = torch.as_tensor(active_mask, dtype=torch.bool, device=device)
+            last_value_flat = policy.value_only(pol_obs_flat, (scratch_h, scratch_c))
+            last_value = last_value_flat.reshape(args.n_envs, n_policy)
+            last_active = torch.as_tensor(
+                active_mask[:, :n_policy], dtype=torch.bool, device=device,
+            )
 
         adv, ret = buffer.compute_gae(
             last_value=last_value, last_active=last_active, gamma=args.gamma, lam=args.lam

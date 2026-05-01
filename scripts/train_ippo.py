@@ -83,6 +83,25 @@ def parse_args() -> argparse.Namespace:
             "If omitted, all envs use --config with global flags."
         ),
     )
+    p.add_argument(
+        "--n-policy-agents",
+        type=int,
+        default=None,
+        help=(
+            "v23 FSP: number of slots [0..N) controlled by the TRAINING policy. "
+            "Remaining slots [N..n_agents) are controlled by --frozen-ckpt. "
+            "Default = n_agents (no frozen baseline; vanilla IPPO)."
+        ),
+    )
+    p.add_argument(
+        "--frozen-ckpt",
+        type=str,
+        default=None,
+        help=(
+            "v23 FSP: checkpoint to load as the frozen baseline policy for "
+            "non-training slots. Required if n_policy_agents < n_agents."
+        ),
+    )
     return p.parse_args()
 
 
@@ -214,13 +233,43 @@ def train(args: argparse.Namespace) -> dict:
     )
     obs, action_masks, active_mask = collect_initial_state(envs, args.seed)
 
+    # v23 FSP: split agent slots into [0..n_policy) trained + [n_policy..n_agents) frozen.
+    n_policy = getattr(args, "n_policy_agents", None) or args.n_agents
+    n_frozen = args.n_agents - n_policy
+    if n_frozen < 0:
+        raise ValueError(f"n_policy_agents ({n_policy}) > n_agents ({args.n_agents})")
+    if n_frozen > 0 and not getattr(args, "frozen_ckpt", None):
+        raise ValueError("--frozen-ckpt required when n_policy_agents < n_agents")
+
     policy = SharedActorCritic(obs_dim=obs_dim, n_actions=n_actions).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr, eps=1e-5)
+
+    frozen_policy = None
+    frozen_is_recurrent = False
+    frozen_hidden = None
+    if n_frozen > 0:
+        from scripts.eval_ippo import load_policy
+        frozen_policy, _frozen_args, frozen_is_recurrent = load_policy(
+            args.frozen_ckpt, device=device,
+        )
+        for p in frozen_policy.parameters():
+            p.requires_grad_(False)
+        frozen_policy.eval()
+        if frozen_is_recurrent:
+            # Per-env per-frozen-slot hidden state.
+            frozen_hidden = [
+                frozen_policy.initial_hidden(n_frozen, device)
+                for _ in range(args.n_envs)
+            ]
+        logger.info(
+            "FSP enabled: n_policy=%d n_frozen=%d frozen_ckpt=%s recurrent=%s",
+            n_policy, n_frozen, args.frozen_ckpt, frozen_is_recurrent,
+        )
 
     buffer = RolloutBuffer(
         rollout_length=args.rollout_length,
         n_envs=args.n_envs,
-        n_agents=args.n_agents,
+        n_agents=n_policy,
         obs_dim=obs_dim,
         n_actions=n_actions,
         device=device,
@@ -240,16 +289,19 @@ def train(args: argparse.Namespace) -> dict:
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    transitions_per_iter = args.rollout_length * args.n_envs * args.n_agents
+    transitions_per_iter = args.rollout_length * args.n_envs * n_policy
     total_iters = max(1, args.total_steps // transitions_per_iter)
     logger.info(
-        "starting IPPO: %d iters × %d transitions = %d (target: %d)",
-        total_iters, transitions_per_iter, total_iters * transitions_per_iter, args.total_steps,
+        "starting IPPO: %d iters × %d transitions = %d (target: %d) "
+        "[n_policy=%d, n_frozen=%d]",
+        total_iters, transitions_per_iter, total_iters * transitions_per_iter,
+        args.total_steps, n_policy, n_frozen,
     )
 
-    # Episode-level accounting (population continuum — no real episodes)
-    ep_reward_sum = np.zeros((args.n_envs, args.n_agents), dtype=np.float64)
-    ep_step_count = np.zeros((args.n_envs, args.n_agents), dtype=np.int64)
+    # Episode-level accounting (population continuum — no real episodes).
+    # Sized to n_policy: we only track training-policy slot lives for log metrics.
+    ep_reward_sum = np.zeros((args.n_envs, n_policy), dtype=np.float64)
+    ep_step_count = np.zeros((args.n_envs, n_policy), dtype=np.int64)
     completed_lives_reward: list[float] = []
     completed_lives_steps: list[int] = []
 
@@ -262,15 +314,39 @@ def train(args: argparse.Namespace) -> dict:
             with torch.no_grad():
                 obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device)
                 mask_t = torch.as_tensor(action_masks, dtype=torch.bool, device=device)
-                # Flatten (n_envs, n_agents, ...) → (n_envs*n_agents, ...)
-                flat_obs = obs_t.reshape(-1, obs_dim)
-                flat_mask = mask_t.reshape(-1, n_actions)
-                action_flat, logp_flat, value_flat = policy.act(flat_obs, flat_mask)
-                action = action_flat.reshape(args.n_envs, args.n_agents)
-                logp = logp_flat.reshape(args.n_envs, args.n_agents)
-                value = value_flat.reshape(args.n_envs, args.n_agents)
+                # POLICY forward — only the first n_policy slots per env.
+                pol_obs = obs_t[:, :n_policy].reshape(-1, obs_dim)
+                pol_mask = mask_t[:, :n_policy].reshape(-1, n_actions)
+                action_flat, logp_flat, value_flat = policy.act(pol_obs, pol_mask)
+                pol_action = action_flat.reshape(args.n_envs, n_policy)
+                pol_logp = logp_flat.reshape(args.n_envs, n_policy)
+                pol_value = value_flat.reshape(args.n_envs, n_policy)
 
-            actions_np = action.cpu().numpy()
+                # FROZEN forward — slots [n_policy..n_agents).
+                if n_frozen > 0:
+                    frz_obs_full = obs_t[:, n_policy:]  # (n_envs, n_frozen, obs_dim)
+                    frz_mask_full = mask_t[:, n_policy:]
+                    if frozen_is_recurrent:
+                        # Step per-env so each env has its own hidden state.
+                        frz_actions_per_env = []
+                        for e_i in range(args.n_envs):
+                            f_act, _, _, f_h = frozen_policy.act(
+                                frz_obs_full[e_i], frz_mask_full[e_i],
+                                frozen_hidden[e_i],
+                            )
+                            frozen_hidden[e_i] = f_h
+                            frz_actions_per_env.append(f_act)
+                        frz_action = torch.stack(frz_actions_per_env, dim=0)
+                    else:
+                        frz_obs_flat = frz_obs_full.reshape(-1, obs_dim)
+                        frz_mask_flat = frz_mask_full.reshape(-1, n_actions)
+                        f_act, _, _ = frozen_policy.act(frz_obs_flat, frz_mask_flat)
+                        frz_action = f_act.reshape(args.n_envs, n_frozen)
+                    full_action = torch.cat([pol_action, frz_action], dim=1)
+                else:
+                    full_action = pol_action
+
+            actions_np = full_action.cpu().numpy()
             rewards = np.zeros((args.n_envs, args.n_agents), dtype=np.float32)
             dones = np.zeros((args.n_envs, args.n_agents), dtype=bool)
             next_obs = np.zeros_like(obs)
@@ -282,38 +358,37 @@ def train(args: argparse.Namespace) -> dict:
                 dones[e_i] = term | trunc
                 next_obs[e_i] = o
                 next_masks[e_i] = info["action_masks_post"]
-                # active for the NEXT step = currently alive slots
                 env_next_active = np.array([a.alive for a in env._agents], dtype=bool)
-                # Auto-reset any env where the entire population has collapsed.
-                # _try_reproduce requires >=2 survivors, so once population drops
-                # below 2 the env permanently dies out. We reset rather than
-                # leaving a dead env collecting empty rollouts.
                 if not env_next_active.any():
                     reset_seed = args.seed + e_i + 1_000_000 * (it + 1)
                     o, info = env.reset_all(seed=reset_seed)
                     next_obs[e_i] = o
                     next_masks[e_i] = info["action_masks"]
                     env_next_active = info["active_mask"]
+                    # Reset frozen hidden state for any frozen slots in this env.
+                    if frozen_is_recurrent and n_frozen > 0:
+                        frozen_hidden[e_i] = frozen_policy.initial_hidden(n_frozen, device)
                 next_active[e_i] = env_next_active
 
+            # Buffer stores ONLY policy slots — losses computed on policy slots only.
             buffer.add(
-                obs=obs,
-                action_mask=action_masks,
-                action=action,
-                logprob=logp,
-                value=value,
-                reward=rewards,
-                done=dones,
-                active=active_mask,
+                obs=obs[:, :n_policy],
+                action_mask=action_masks[:, :n_policy],
+                action=pol_action,
+                logprob=pol_logp,
+                value=pol_value,
+                reward=rewards[:, :n_policy],
+                done=dones[:, :n_policy],
+                active=active_mask[:, :n_policy],
             )
 
-            # Episode-level accounting
-            ep_reward_sum += rewards
-            ep_step_count += active_mask.astype(np.int64)
-            died = dones
+            # Episode-level accounting (policy slots only)
+            ep_reward_sum += rewards[:, :n_policy]
+            ep_step_count += active_mask[:, :n_policy].astype(np.int64)
+            died = dones[:, :n_policy]
             if died.any():
                 for e_i in range(args.n_envs):
-                    for a_i in range(args.n_agents):
+                    for a_i in range(n_policy):
                         if died[e_i, a_i]:
                             completed_lives_reward.append(float(ep_reward_sum[e_i, a_i]))
                             completed_lives_steps.append(int(ep_step_count[e_i, a_i]))
@@ -324,13 +399,15 @@ def train(args: argparse.Namespace) -> dict:
             action_masks = next_masks
             active_mask = next_active
 
-        # Bootstrap value for GAE
+        # Bootstrap value for GAE — policy slots only
         with torch.no_grad():
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device)
             mask_t = torch.as_tensor(action_masks, dtype=torch.bool, device=device)
-            _logits, last_value = policy(obs_t.reshape(-1, obs_dim))
-            last_value = last_value.reshape(args.n_envs, args.n_agents)
-            last_active = torch.as_tensor(active_mask, dtype=torch.bool, device=device)
+            _logits, last_value = policy(obs_t[:, :n_policy].reshape(-1, obs_dim))
+            last_value = last_value.reshape(args.n_envs, n_policy)
+            last_active = torch.as_tensor(
+                active_mask[:, :n_policy], dtype=torch.bool, device=device,
+            )
 
         adv, ret = buffer.compute_gae(
             last_value=last_value,
