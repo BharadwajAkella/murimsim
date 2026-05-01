@@ -387,16 +387,40 @@ def test_age_increments_per_tick():
 
 
 def test_agent_dies_of_old_age():
-    """Old age death is disabled (max_age=0 in config). tick() always returns False."""
+    """When max_age>0 the agent dies on the tick that reaches that age."""
     from murimsim.agent import Agent
     a = Agent(agent_id="x", position=(0, 0), health=1.0, hunger=0.0, strength=0.5)
-    for _ in range(20):
+    died_on_tick = -1
+    for i in range(20):
         died = a.tick(max_age=10)
-        assert not died, "tick() should always return False — old age death is removed"
-        a.hunger = 0.0  # keep alive for the test
+        if died:
+            died_on_tick = i
+            break
+        a.hunger = 0.0
         a.health = 1.0
-    assert a.alive
-    assert a.age == 20
+    assert died_on_tick == 9, f"Expected age-death on tick 9 (age=10), got tick {died_on_tick}"
+    assert not a.alive
+    assert a.death_cause == "age"
+    assert a.health == 0.0
+
+
+def test_age_death_does_not_fire_when_starvation_kills_first():
+    """If starvation kills the agent first, tick() returns False (not an age death)."""
+    from murimsim.agent import Agent
+    a = Agent(agent_id="x", position=(0, 0), health=0.001, hunger=1.0, strength=0.5)
+    died = a.tick(max_age=10)
+    assert not died
+    assert not a.alive
+    assert a.death_cause == "starvation"
+
+
+def test_age_death_idempotent_on_dead_agent():
+    """Calling tick() on an already-dead agent returns False even with max_age set."""
+    from murimsim.agent import Agent
+    a = Agent(agent_id="x", position=(0, 0), health=0.0, hunger=0.0, strength=0.5)
+    a.alive = False
+    died = a.tick(max_age=10)
+    assert not died
 
 
 def test_aging_disabled_when_max_age_zero():

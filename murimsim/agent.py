@@ -284,22 +284,24 @@ class Agent:
     # ------------------------------------------------------------------
 
     def tick(self, max_age: int = 0) -> bool:
-        """Advance one tick: hunger, starvation, and intake decay.
+        """Advance one tick: hunger, starvation, intake decay, and old-age check.
 
         Args:
-            max_age: Reserved for future use; currently ignored (old age death
-                     is disabled — set max_age=0 in config).
+            max_age: Maximum age before old-age death.  ``0`` disables old-age
+                     death entirely (legacy behaviour).  When ``max_age > 0``
+                     and the agent's age reaches ``max_age``, the agent dies
+                     with ``death_cause="age"``.
 
         Returns:
-            Always False (old age death removed; kept for API compatibility).
+            ``True`` iff this tick caused old-age death (so the caller can
+            trigger reproduction).  Starvation death does not return ``True``;
+            it is handled via :meth:`_check_death` and inspected by callers
+            via ``self.alive``/``self.death_cause``.
         """
         if not self.alive:
             return False
         self.age += 1
         self.hunger = min(1.0, self.hunger + HUNGER_PER_TICK)
-        # Escalating health drain: once hunger exceeds STARVATION_THRESHOLD,
-        # health drains at (hunger - threshold) * scale per tick.
-        # hunger_resistance reduces this drain.
         if self.hunger > STARVATION_THRESHOLD:
             excess = self.hunger - STARVATION_THRESHOLD
             drain = excess * STARVATION_HEALTH_DRAIN_SCALE * (1.0 - float(np.clip(self.hunger_resistance, 0.0, 1.0)))
@@ -307,6 +309,11 @@ class Agent:
         for stat in list(self._intakes):
             self._intakes[stat] = max(0.0, self._intakes[stat] - INTAKE_DECAY_PER_TICK)
         self._check_death("starvation")
+        if self.alive and max_age > 0 and self.age >= max_age:
+            self.health = 0.0
+            self.death_cause = "age"
+            self.alive = False
+            return True
         return False
 
     # ------------------------------------------------------------------
