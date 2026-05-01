@@ -36,9 +36,11 @@ import numpy as np
 import torch
 import yaml
 
-from murimsim.actions import N_ACTIONS_PHASE6_QI
+from murimsim.actions import N_ACTIONS_PHASE6_QI, N_BODY_ACTIONS, N_SOCIAL_ACTIONS
 from murimsim.rl.ippo import SharedActorCritic
 from murimsim.rl.ippo_env import IPPOEnv
+from murimsim.rl.ippo_joint import JointSharedActorCritic
+from murimsim.rl.ippo_joint_recurrent import JointRecurrentSharedActorCritic
 from murimsim.rl.ippo_recurrent import RecurrentSharedActorCritic
 from murimsim.rl.multi_env import OBS_TOTAL_SIZE
 
@@ -164,6 +166,36 @@ def load_policy(
     return policy, args, is_recurrent
 
 
+def is_joint_checkpoint(checkpoint_path: str | Path) -> bool:
+    """Return True if the checkpoint was written by a v24 joint-action trainer."""
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    return bool(ckpt.get("joint_action", False))
+
+
+def load_joint_policy(
+    checkpoint_path: str | Path, device: torch.device | str = "cpu"
+) -> tuple[torch.nn.Module, dict, bool]:
+    """Load a v24 joint-action checkpoint. Returns (policy, args, is_recurrent)."""
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    args = ckpt.get("args", {})
+    is_recurrent = bool(ckpt.get("recurrent", False)) or "hidden_dim" in ckpt
+    obs_dim = OBS_TOTAL_SIZE
+    if is_recurrent:
+        hidden_dim = ckpt.get("hidden_dim", args.get("hidden_dim", 128))
+        pre_lstm_dim = args.get("pre_lstm_dim", hidden_dim)
+        policy = JointRecurrentSharedActorCritic(
+            obs_dim=obs_dim,
+            hidden_dim=hidden_dim,
+            pre_lstm_dim=pre_lstm_dim,
+        )
+    else:
+        policy = JointSharedActorCritic(obs_dim=obs_dim)
+    policy.load_state_dict(ckpt["policy"])
+    policy.to(device)
+    policy.eval()
+    return policy, args, is_recurrent
+
+
 # ---------------------------------------------------------------------------
 # Main eval rollout
 # ---------------------------------------------------------------------------
@@ -203,7 +235,11 @@ def eval_checkpoint(
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 
-    policy, _train_args, is_recurrent = load_policy(checkpoint_path, device=device)
+    is_joint = is_joint_checkpoint(checkpoint_path)
+    if is_joint:
+        policy, _train_args, is_recurrent = load_joint_policy(checkpoint_path, device=device)
+    else:
+        policy, _train_args, is_recurrent = load_policy(checkpoint_path, device=device)
 
     if arena_mix:
         from scripts.train_ippo import _load_arena_config, _parse_arena_mix
@@ -229,13 +265,17 @@ def eval_checkpoint(
             )
             for i in range(n_envs)
         ]
-    obs_list, mask_list = [], []
+    obs_list, mask_list, body_mask_list, social_mask_list = [], [], [], []
     for i, env in enumerate(envs):
         o, info = env.reset_all(seed=seed + i)
         obs_list.append(o)
         mask_list.append(info["action_masks"])
+        body_mask_list.append(info["action_masks_body"])
+        social_mask_list.append(info["action_masks_social"])
     obs = np.stack(obs_list, axis=0)
     action_masks = np.stack(mask_list, axis=0)
+    body_mask = np.stack(body_mask_list, axis=0)
+    social_mask = np.stack(social_mask_list, axis=0)
 
     obs_dim = OBS_TOTAL_SIZE
     n_actions = N_ACTIONS_PHASE6_QI
@@ -266,18 +306,33 @@ def eval_checkpoint(
 
         with torch.no_grad():
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).reshape(-1, obs_dim)
-            mask_t = torch.as_tensor(action_masks, dtype=torch.bool, device=device).reshape(-1, n_actions)
-            if is_recurrent:
-                action_flat, _, _, (carried_h, carried_c) = policy.act(
-                    obs_t, mask_t, (carried_h, carried_c), deterministic=deterministic
-                )
+            if is_joint:
+                bm_t = torch.as_tensor(body_mask, dtype=torch.bool, device=device).reshape(-1, N_BODY_ACTIONS)
+                sm_t = torch.as_tensor(social_mask, dtype=torch.bool, device=device).reshape(-1, N_SOCIAL_ACTIONS)
+                if is_recurrent:
+                    ba, sa, _, _, _, (carried_h, carried_c) = policy.act(
+                        obs_t, bm_t, sm_t, (carried_h, carried_c), deterministic=deterministic
+                    )
+                else:
+                    ba, sa, _, _, _ = policy.act(obs_t, bm_t, sm_t, deterministic=deterministic)
+                ba_np = ba.cpu().numpy().reshape(n_envs, n_agents)
+                sa_np = sa.cpu().numpy().reshape(n_envs, n_agents)
             else:
-                action_flat, _, _ = policy.act(obs_t, mask_t, deterministic=deterministic)
-            actions_np = action_flat.cpu().numpy().reshape(n_envs, n_agents)
+                mask_t = torch.as_tensor(action_masks, dtype=torch.bool, device=device).reshape(-1, n_actions)
+                if is_recurrent:
+                    action_flat, _, _, (carried_h, carried_c) = policy.act(
+                        obs_t, mask_t, (carried_h, carried_c), deterministic=deterministic
+                    )
+                else:
+                    action_flat, _, _ = policy.act(obs_t, mask_t, deterministic=deterministic)
+                actions_np = action_flat.cpu().numpy().reshape(n_envs, n_agents)
 
         next_pending = np.zeros((n_envs, n_agents), dtype=bool) if is_recurrent else None
         for e_i, env in enumerate(envs):
-            o, r, term, trunc, info = env.step_all(actions_np[e_i])
+            if is_joint:
+                o, r, term, trunc, info = env.step_all_joint(ba_np[e_i], sa_np[e_i])
+            else:
+                o, r, term, trunc, info = env.step_all(actions_np[e_i])
             ep_reward_sum[e_i] += r
             ep_step_count[e_i] += active_mask[e_i].astype(np.int64)
             died = term | trunc
@@ -294,13 +349,21 @@ def eval_checkpoint(
                         next_pending[e_i, a_i] = True
 
             obs[e_i] = o
-            action_masks[e_i] = info["action_masks_post"]
+            if is_joint:
+                body_mask[e_i] = info["action_masks_body_post"]
+                social_mask[e_i] = info["action_masks_social_post"]
+            else:
+                action_masks[e_i] = info["action_masks_post"]
             env_next_active = np.array([a.alive for a in env._agents], dtype=bool)
             if not env_next_active.any():
                 reset_seed = seed + e_i + 1_000_000 * (_t + 1)
                 o, info = env.reset_all(seed=reset_seed)
                 obs[e_i] = o
-                action_masks[e_i] = info["action_masks"]
+                if is_joint:
+                    body_mask[e_i] = info["action_masks_body"]
+                    social_mask[e_i] = info["action_masks_social"]
+                else:
+                    action_masks[e_i] = info["action_masks"]
                 if is_recurrent:
                     next_pending[e_i, :] = True
 
