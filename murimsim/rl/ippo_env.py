@@ -237,7 +237,7 @@ class IPPOEnv(CombatEnv):
             if not bool(self.action_masks_social(slot)[1]):
                 continue
             formed = self._try_collaborate(slot)
-            if formed:
+            if formed and self._enable_formation_bonus:
                 rewards[slot] += REWARD_GROUP_FORMATION
 
         # Refresh per-agent info that depends on social outcomes.

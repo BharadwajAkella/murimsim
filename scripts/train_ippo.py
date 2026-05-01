@@ -149,6 +149,7 @@ def build_envs(
     enable_boss: bool = False,
     enable_carry_cost: bool = False,
     arena_mix: str | None = None,
+    enable_formation_bonus: bool = True,
 ) -> list[IPPOEnv]:
     envs: list[IPPOEnv] = []
     if arena_mix:
@@ -171,6 +172,7 @@ def build_envs(
                     arena_flags.get("enable_carry_cost", enable_carry_cost)
                 ),
                 n_minions=int(arena_flags.get("n_minions", 0)),
+                enable_formation_bonus=enable_formation_bonus,
             )
         else:
             env = IPPOEnv(
@@ -180,6 +182,7 @@ def build_envs(
                 curriculum_ramp_steps=0,
                 enable_boss=enable_boss,
                 enable_carry_cost=enable_carry_cost,
+                enable_formation_bonus=enable_formation_bonus,
             )
         envs.append(env)
     return envs

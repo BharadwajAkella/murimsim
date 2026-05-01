@@ -1551,6 +1551,7 @@ class CombatEnv(MultiAgentEnv):
         enable_boss: bool = False,
         enable_carry_cost: bool = False,
         n_minions: int = 0,
+        enable_formation_bonus: bool = True,
     ) -> None:
         super().__init__(
             config=config,
@@ -1576,6 +1577,9 @@ class CombatEnv(MultiAgentEnv):
         self._enable_carry_cost: bool = enable_carry_cost
         # v22: number of minions to spawn at episode start (and respawn after kill).
         self._n_minions: int = int(n_minions)
+        # v25: gate REWARD_GROUP_FORMATION shaping bonus. Default True for back-compat;
+        # v25 trainers set False to test whether cooperation survives without it.
+        self._enable_formation_bonus: bool = bool(enable_formation_bonus)
         self._monsters: MonsterRegistry = MonsterRegistry()
         # v17: combat-focus lock — when an agent is in combat (hostile adjacent
         # OR took damage last tick), mask out non-combat actions like TRAIN,
@@ -2256,7 +2260,7 @@ class CombatEnv(MultiAgentEnv):
             exploration_reward, damage_dealt, damage_taken, defeat_bonus,
             inv_food_prev,
         )
-        if group_formed:
+        if group_formed and self._enable_formation_bonus:
             reward += REWARD_GROUP_FORMATION
         # Per-tick cohesion reward: alive group members within range
         if focal.alive:

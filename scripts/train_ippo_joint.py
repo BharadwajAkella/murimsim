@@ -69,6 +69,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wandb-run-name", default=None)
     p.add_argument("--enable-boss", action="store_true")
     p.add_argument("--enable-carry-cost", action="store_true")
+    p.add_argument(
+        "--disable-formation-bonus",
+        action="store_true",
+        help="v25: drop the +0.05 REWARD_GROUP_FORMATION shaping bonus to test "
+             "whether cooperation survives without artificial reinforcement.",
+    )
     p.add_argument("--arena-mix", type=str, default=None)
     return p.parse_args()
 
@@ -107,6 +113,7 @@ def train(args: argparse.Namespace) -> dict:
         enable_boss=getattr(args, "enable_boss", False),
         enable_carry_cost=getattr(args, "enable_carry_cost", False),
         arena_mix=getattr(args, "arena_mix", None),
+        enable_formation_bonus=not getattr(args, "disable_formation_bonus", False),
     )
     obs, body_mask, social_mask, active_mask = _collect_initial_state_joint(
         envs, args.seed

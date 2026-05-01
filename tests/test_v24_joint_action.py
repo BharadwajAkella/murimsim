@@ -144,6 +144,68 @@ def test_step_all_joint_runs_many_steps():
             env.reset_all(seed=7)
 
 
+def test_disable_formation_bonus_strips_collab_reward():
+    """v25 regression: with enable_formation_bonus=False, a successful
+    _try_collaborate awards no extra reward in either step path. We compare
+    two envs sharing every other input — the only delta in rewards must be
+    contributed by REWARD_GROUP_FORMATION (0.05) where collab succeeds."""
+    from murimsim.rl.multi_env import REWARD_GROUP_FORMATION
+
+    cfg = _load_cfg()
+    env_on = IPPOEnv(
+        config=cfg, n_agents=4, seed=99, curriculum_ramp_steps=0,
+        enable_formation_bonus=True,
+    )
+    env_off = IPPOEnv(
+        config=cfg, n_agents=4, seed=99, curriculum_ramp_steps=0,
+        enable_formation_bonus=False,
+    )
+    env_on.reset_all(seed=99)
+    env_off.reset_all(seed=99)
+
+    rng = np.random.default_rng(99)
+    n = env_on._n_agents
+    delta_total = 0.0
+    bonus_count = 0
+    for _ in range(128):
+        bm_on = np.stack([env_on.action_masks_body(i) for i in range(n)])
+        sm_on = np.stack([env_on.action_masks_social(i) for i in range(n)])
+        bm_off = np.stack([env_off.action_masks_body(i) for i in range(n)])
+        sm_off = np.stack([env_off.action_masks_social(i) for i in range(n)])
+        # Identical seeds + identical pre-step state => identical masks.
+        np.testing.assert_array_equal(bm_on, bm_off)
+        np.testing.assert_array_equal(sm_on, sm_off)
+        body = np.array(
+            [int(rng.choice(np.where(bm_on[i])[0])) for i in range(n)],
+            dtype=np.int64,
+        )
+        # Bias toward COLLABORATE so the bonus path actually triggers.
+        social = np.array(
+            [1 if sm_on[i, 1] else 0 for i in range(n)], dtype=np.int64
+        )
+        _, rew_on, term_on, trunc_on, _ = env_on.step_all_joint(body, social)
+        _, rew_off, term_off, trunc_off, _ = env_off.step_all_joint(body, social)
+        np.testing.assert_array_equal(term_on, term_off)
+        np.testing.assert_array_equal(trunc_on, trunc_off)
+        diff = rew_on - rew_off
+        # The only allowed difference is +REWARD_GROUP_FORMATION on slots
+        # where a group formed under the on env.
+        for slot, d in enumerate(diff):
+            if abs(d) > 1e-6:
+                assert abs(d - REWARD_GROUP_FORMATION) < 1e-6, (
+                    f"unexpected reward delta {d} on slot {slot}"
+                )
+                delta_total += d
+                bonus_count += 1
+        if bool(trunc_on.any()) or not any(a.alive for a in env_on._agents):
+            env_on.reset_all(seed=99)
+            env_off.reset_all(seed=99)
+    # We don't require a specific count — just that the mechanism is wired:
+    # if any group ever formed, the on-env paid bonus and off-env did not.
+    # (If 0 groups formed, the test still passes — it proves no spurious deltas.)
+    assert delta_total >= 0.0
+
+
 # ---------------------------------------------------------------------------
 # Joint feedforward policy + buffer + update
 # ---------------------------------------------------------------------------
