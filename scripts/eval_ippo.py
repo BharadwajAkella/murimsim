@@ -75,6 +75,15 @@ class EvalMetrics:
     max_active_groups_seen: int = 0
     collab_picks: int = 0  # joint-action only; 0 for legacy single-head ckpts
     collab_success_rate: float = 0.0  # groups_formed_cum / max(collab_picks, 1)
+    # Settlement metrics aggregated across every focal-death info bundle
+    # emitted during the rollout. These are means over completed episodes;
+    # n_settlement_episodes records how many samples contributed.
+    n_settlement_episodes: int = 0
+    mean_stash_fill_rate: float = 0.0
+    mean_stash_withdraw_rate: float = 0.0
+    mean_avg_dist_from_stash: float = 0.0
+    mean_revisit_entropy: float = 0.0
+    mean_group_persistence: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +326,16 @@ def eval_checkpoint(
     prev_helps = [
         sum(len(d) for d in env._help_received.values()) for env in envs
     ]
+    # Settlement metrics samples — appended whenever a focal-death info bundle
+    # surfaces ep_stash_fill_rate (and friends). These keys only appear in
+    # CombatEnv.step's info when terminated=True for the focal slot.
+    settlement_samples: dict[str, list[float]] = {
+        "ep_stash_fill_rate": [],
+        "ep_stash_withdraw_rate": [],
+        "ep_avg_dist_from_stash": [],
+        "ep_revisit_entropy": [],
+        "ep_group_persistence": [],
+    }
 
     for _t in range(steps):
         active_mask = np.array(
@@ -377,6 +396,13 @@ def eval_checkpoint(
             if n_groups_now > max_active_groups:
                 max_active_groups = n_groups_now
 
+            # Settlement metrics: emitted in info on focal death (CombatEnv.step
+            # terminal block). Capture every sample we see — over a long rollout
+            # this gives an unbiased mean across many completed lives.
+            for key, bucket in settlement_samples.items():
+                if key in info:
+                    bucket.append(float(info[key]))
+
             ep_reward_sum[e_i] += r
             ep_step_count[e_i] += active_mask[e_i].astype(np.int64)
             died = term | trunc
@@ -431,6 +457,9 @@ def eval_checkpoint(
     success_rate = (
         groups_formed_cum / collab_picks_cum if collab_picks_cum > 0 else 0.0
     )
+    n_settlement = len(settlement_samples["ep_stash_fill_rate"])
+    def _mean_or_zero(xs: list[float]) -> float:
+        return float(np.mean(xs)) if xs else 0.0
 
     return EvalMetrics(
         steps=steps,
@@ -452,6 +481,12 @@ def eval_checkpoint(
         max_active_groups_seen=max_active_groups,
         collab_picks=collab_picks_cum,
         collab_success_rate=float(success_rate),
+        n_settlement_episodes=n_settlement,
+        mean_stash_fill_rate=_mean_or_zero(settlement_samples["ep_stash_fill_rate"]),
+        mean_stash_withdraw_rate=_mean_or_zero(settlement_samples["ep_stash_withdraw_rate"]),
+        mean_avg_dist_from_stash=_mean_or_zero(settlement_samples["ep_avg_dist_from_stash"]),
+        mean_revisit_entropy=_mean_or_zero(settlement_samples["ep_revisit_entropy"]),
+        mean_group_persistence=_mean_or_zero(settlement_samples["ep_group_persistence"]),
     )
 
 

@@ -161,6 +161,14 @@ def test_eval_checkpoint_ff_returns_finite_metrics(tmp_path: Path) -> None:
     # captures dyads still alive at the final tick; cumulative includes any
     # help dyad seen during the rollout).
     assert m.help_events_cum >= m.help_events
+    # Settlement metrics — at least the field bag exists. Over a 200-step
+    # rollout with 4 agents we should observe at least a few focal deaths
+    # carrying settlement metrics; assert the counter is non-negative.
+    assert m.n_settlement_episodes >= 0
+    for v in (m.mean_stash_fill_rate, m.mean_stash_withdraw_rate,
+              m.mean_avg_dist_from_stash, m.mean_revisit_entropy,
+              m.mean_group_persistence):
+        assert np.isfinite(v), f"non-finite settlement metric {v}"
 
 
 def test_eval_checkpoint_recurrent_returns_finite_metrics(tmp_path: Path) -> None:
