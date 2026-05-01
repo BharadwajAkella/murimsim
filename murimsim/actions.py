@@ -74,3 +74,84 @@ MOVE_DELTAS: dict[Action, tuple[int, int]] = {
     Action.MOVE_E: (1,  0),
     Action.MOVE_W: (-1, 0),
 }
+
+
+# ---------------------------------------------------------------------------
+# v24: split action space into body + social heads.
+#
+# COLLABORATE (legacy id 12) is the only action without a body cost — it's
+# purely a social signal. Splitting it into its own head means the policy can
+# pick e.g. (TRAIN, COLLABORATE) in the same tick instead of having to choose
+# between training strength and forming a group.
+#
+# IDs in BodyAction are renumbered 0..15 so the policy head outputs a clean
+# Discrete(16) over the body lane; the legacy ``Action`` enum stays unchanged
+# so all existing CombatEnv code (and tests) keep working.
+# ---------------------------------------------------------------------------
+
+
+class BodyAction(IntEnum):
+    """16 actions that consume the agent's body for one tick.
+
+    Indices are renumbered for the joint-action policy head; use
+    ``BODY_TO_LEGACY`` / ``LEGACY_TO_BODY`` to translate to the legacy
+    ``Action`` enum that ``CombatEnv.step()`` expects.
+    """
+
+    MOVE_N = 0
+    MOVE_S = 1
+    MOVE_E = 2
+    MOVE_W = 3
+    GATHER = 4
+    EAT = 5
+    REST = 6
+    ATTACK = 7
+    DEFEND = 8
+    DEPOSIT = 9
+    WITHDRAW = 10
+    STEAL = 11
+    WALK_AWAY = 12
+    TRAIN = 13
+    ATTACK_QI = 14
+    ATTACK_BURST = 15
+
+
+class SocialAction(IntEnum):
+    """2 social signals that fire alongside the body action each tick."""
+
+    NOOP = 0
+    COLLABORATE = 1
+
+
+N_BODY_ACTIONS: int = len(BodyAction)        # 16
+N_SOCIAL_ACTIONS: int = len(SocialAction)    # 2
+
+# All 16 BodyAction values map 1-to-1 with the legacy Action enum minus
+# COLLABORATE. We build the translation tables explicitly so the mapping is
+# auditable rather than relying on enum order.
+_BODY_TO_LEGACY_PAIRS: tuple[tuple[BodyAction, Action], ...] = (
+    (BodyAction.MOVE_N, Action.MOVE_N),
+    (BodyAction.MOVE_S, Action.MOVE_S),
+    (BodyAction.MOVE_E, Action.MOVE_E),
+    (BodyAction.MOVE_W, Action.MOVE_W),
+    (BodyAction.GATHER, Action.GATHER),
+    (BodyAction.EAT, Action.EAT),
+    (BodyAction.REST, Action.REST),
+    (BodyAction.ATTACK, Action.ATTACK),
+    (BodyAction.DEFEND, Action.DEFEND),
+    (BodyAction.DEPOSIT, Action.DEPOSIT),
+    (BodyAction.WITHDRAW, Action.WITHDRAW),
+    (BodyAction.STEAL, Action.STEAL),
+    (BodyAction.WALK_AWAY, Action.WALK_AWAY),
+    (BodyAction.TRAIN, Action.TRAIN),
+    (BodyAction.ATTACK_QI, Action.ATTACK_QI),
+    (BodyAction.ATTACK_BURST, Action.ATTACK_BURST),
+)
+
+BODY_TO_LEGACY: dict[int, int] = {b.value: a.value for b, a in _BODY_TO_LEGACY_PAIRS}
+LEGACY_TO_BODY: dict[int, int] = {a.value: b.value for b, a in _BODY_TO_LEGACY_PAIRS}
+
+assert len(BODY_TO_LEGACY) == N_BODY_ACTIONS
+assert Action.COLLABORATE.value not in LEGACY_TO_BODY, (
+    "COLLABORATE must NOT be in the body lane — it lives in SocialAction."
+)

@@ -1931,6 +1931,37 @@ class CombatEnv(MultiAgentEnv):
             mask[Action.COLLABORATE] = False
         return mask
 
+    def action_masks_body(self, agent_idx: int | None = None) -> np.ndarray:
+        """v24 joint-action: 16-element body-action mask.
+
+        Derived from ``action_masks(idx)`` by dropping the COLLABORATE slot,
+        re-indexed via ``LEGACY_TO_BODY``. Always non-empty since MOVE_*
+        actions are never masked.
+        """
+        from murimsim.actions import (
+            BODY_TO_LEGACY,
+            LEGACY_TO_BODY,
+            N_BODY_ACTIONS,
+        )
+        legacy = self.action_masks(agent_idx)
+        body = np.zeros(N_BODY_ACTIONS, dtype=bool)
+        for body_idx, legacy_idx in BODY_TO_LEGACY.items():
+            body[body_idx] = legacy[legacy_idx]
+        return body
+
+    def action_masks_social(self, agent_idx: int | None = None) -> np.ndarray:
+        """v24 joint-action: 2-element social-action mask.
+
+        ``[NOOP, COLLABORATE]``. NOOP is always available; COLLABORATE
+        availability mirrors the legacy mask (adjacent agent, not in combat
+        lock, not at a stash interaction).
+        """
+        from murimsim.actions import N_SOCIAL_ACTIONS
+        legacy = self.action_masks(agent_idx)
+        social = np.ones(N_SOCIAL_ACTIONS, dtype=bool)
+        social[1] = bool(legacy[Action.COLLABORATE])
+        return social
+
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
         assert self._world is not None
         self._global_step_count += 1

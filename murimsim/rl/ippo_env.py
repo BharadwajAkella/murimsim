@@ -44,8 +44,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from murimsim.actions import Action
-from murimsim.rl.multi_env import CombatEnv
+from murimsim.actions import (
+    Action,
+    BODY_TO_LEGACY,
+    BodyAction,
+    N_BODY_ACTIONS,
+    N_SOCIAL_ACTIONS,
+    SocialAction,
+)
+from murimsim.rl.multi_env import CombatEnv, REWARD_GROUP_FORMATION
 
 
 class IPPOEnv(CombatEnv):
@@ -76,6 +83,15 @@ class IPPOEnv(CombatEnv):
         info = dict(base_info) if base_info else {}
         info["action_masks"] = action_masks
         info["active_mask"] = active_mask
+        # v24 joint-action: also surface body+social masks for joint trainers.
+        info["action_masks_body"] = np.stack(
+            [self.action_masks_body(i) for i in range(self._n_agents)],
+            axis=0,
+        ).astype(bool, copy=False)
+        info["action_masks_social"] = np.stack(
+            [self.action_masks_social(i) for i in range(self._n_agents)],
+            axis=0,
+        ).astype(bool, copy=False)
         return obs_arr, info
 
     def step_all(
@@ -162,5 +178,79 @@ class IPPOEnv(CombatEnv):
         info["active_mask"] = active_mask
         info["action_masks_post"] = action_masks_post
         info["resolution_order"] = resolution_order
+
+        return obs_arr, rewards, terminated, truncated, info
+
+    def step_all_joint(
+        self,
+        body_actions: np.ndarray,
+        social_actions: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
+        """v24 joint-action step: body + social heads run side by side.
+
+        Body actions resolve through the legacy ``CombatEnv.step`` path
+        (movement, combat, gather, train, etc.). Social actions resolve
+        AFTER the body step, as free signals that don't preempt the body.
+
+        Args:
+            body_actions: int array (n_agents,) of ``BodyAction`` values.
+            social_actions: int array (n_agents,) of ``SocialAction`` values.
+
+        Returns:
+            (obs, rewards, terminated, truncated, info). info also contains
+            ``action_masks_body_post`` (n_agents, 16) and
+            ``action_masks_social_post`` (n_agents, 2).
+        """
+        body_actions = np.asarray(body_actions)
+        social_actions = np.asarray(social_actions)
+        assert body_actions.shape == (self._n_agents,), (
+            f"body_actions shape {body_actions.shape} != ({self._n_agents},)"
+        )
+        assert social_actions.shape == (self._n_agents,), (
+            f"social_actions shape {social_actions.shape} != ({self._n_agents},)"
+        )
+
+        # Translate body indices to the legacy Action ints CombatEnv.step expects.
+        legacy_actions = np.array(
+            [BODY_TO_LEGACY[int(b)] for b in body_actions],
+            dtype=np.int64,
+        )
+
+        # Run the existing body-only path.
+        obs_arr, rewards, terminated, truncated, info = self.step_all(legacy_actions)
+
+        # Resolve social actions AFTER the body step. Iterate in the same
+        # focal-first / ascending-non-focal order so any ordering effects on
+        # group formation match how body actions resolve.
+        resolution_order = info["resolution_order"]
+        for slot in resolution_order:
+            if int(social_actions[slot]) != int(SocialAction.COLLABORATE):
+                continue
+            # Skip if the slot was dead at step start (matches body semantics).
+            if not info["active_mask"][slot]:
+                continue
+            agent = self._agents[slot]
+            if not agent.alive:
+                continue
+            # Re-check mask post-body — a body action may have moved the agent
+            # away from neighbours, invalidating COLLABORATE eligibility.
+            if not bool(self.action_masks_social(slot)[1]):
+                continue
+            formed = self._try_collaborate(slot)
+            if formed:
+                rewards[slot] += REWARD_GROUP_FORMATION
+
+        # Refresh per-agent info that depends on social outcomes.
+        info["per_agent_reward"] = rewards.astype(np.float32, copy=False)
+
+        # Surface joint-action masks for next step.
+        info["action_masks_body_post"] = np.stack(
+            [self.action_masks_body(i) for i in range(self._n_agents)],
+            axis=0,
+        ).astype(bool, copy=False)
+        info["action_masks_social_post"] = np.stack(
+            [self.action_masks_social(i) for i in range(self._n_agents)],
+            axis=0,
+        ).astype(bool, copy=False)
 
         return obs_arr, rewards, terminated, truncated, info
