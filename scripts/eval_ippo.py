@@ -177,6 +177,9 @@ def eval_checkpoint(
     seed: int = 0,
     device: torch.device | str = "cpu",
     deterministic: bool = True,
+    enable_boss: bool = False,
+    enable_carry_cost: bool = False,
+    arena_mix: str | None = None,
 ) -> EvalMetrics:
     """Run a deterministic rollout with all slots policy-controlled.
 
@@ -202,10 +205,30 @@ def eval_checkpoint(
 
     policy, _train_args, is_recurrent = load_policy(checkpoint_path, device=device)
 
-    envs = [
-        IPPOEnv(config=cfg, n_agents=n_agents, seed=seed + i, curriculum_ramp_steps=0)
-        for i in range(n_envs)
-    ]
+    if arena_mix:
+        from scripts.train_ippo import _load_arena_config, _parse_arena_mix
+        arena_names = _parse_arena_mix(arena_mix)
+        envs = []
+        for i in range(n_envs):
+            arena = arena_names[i % len(arena_names)]
+            env_cfg, arena_flags = _load_arena_config(arena, cfg)
+            envs.append(IPPOEnv(
+                config=env_cfg, n_agents=n_agents, seed=seed + i,
+                curriculum_ramp_steps=0,
+                enable_boss=bool(arena_flags.get("enable_boss", enable_boss)),
+                enable_carry_cost=bool(
+                    arena_flags.get("enable_carry_cost", enable_carry_cost)
+                ),
+                n_minions=int(arena_flags.get("n_minions", 0)),
+            ))
+    else:
+        envs = [
+            IPPOEnv(
+                config=cfg, n_agents=n_agents, seed=seed + i, curriculum_ramp_steps=0,
+                enable_boss=enable_boss, enable_carry_cost=enable_carry_cost,
+            )
+            for i in range(n_envs)
+        ]
     obs_list, mask_list = [], []
     for i, env in enumerate(envs):
         o, info = env.reset_all(seed=seed + i)
@@ -317,6 +340,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stochastic", action="store_true",
                    help="Sample actions instead of argmax (default deterministic).")
     p.add_argument("--json", action="store_true", help="Emit metrics as JSON only.")
+    p.add_argument("--enable-boss", action="store_true",
+                   help="Enable boss monster in eval env (match training).")
+    p.add_argument("--enable-carry-cost", action="store_true",
+                   help="Enable v21c carry cost in eval env (match training).")
+    p.add_argument("--arena-mix", type=str, default=None,
+                   help="v22: round-robin arena mix matching training.")
     return p.parse_args()
 
 
@@ -332,6 +361,9 @@ def main() -> None:
         seed=args.seed,
         device=args.device,
         deterministic=not args.stochastic,
+        enable_boss=args.enable_boss,
+        enable_carry_cost=args.enable_carry_cost,
+        arena_mix=args.arena_mix,
     )
     if args.json:
         print(json.dumps(asdict(metrics), indent=2))
