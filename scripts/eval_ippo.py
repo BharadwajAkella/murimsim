@@ -64,6 +64,17 @@ class EvalMetrics:
     mean_lifespan: float
     help_events: int
     completed_lives: int
+    # Cumulative counters across the entire rollout. The snapshot-based
+    # ``n_active_groups`` / ``help_events`` underreport cooperation in
+    # high-mortality envs (lifespan ≪ rollout length) because most groups
+    # have already dissolved by the final tick. These cumulative metrics
+    # capture every formation / help event that occurs during the run.
+    groups_formed_cum: int = 0
+    help_events_cum: int = 0
+    mean_active_groups_per_step: float = 0.0
+    max_active_groups_seen: int = 0
+    collab_picks: int = 0  # joint-action only; 0 for legacy single-head ckpts
+    collab_success_rate: float = 0.0  # groups_formed_cum / max(collab_picks, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +304,20 @@ def eval_checkpoint(
     ep_reward_sum = np.zeros((n_envs, n_agents), dtype=np.float64)
     ep_step_count = np.zeros((n_envs, n_agents), dtype=np.int64)
 
+    # Cumulative cooperation counters (deltas tracked per-step per-env so resets
+    # don't double-count). For groups: delta in len(env._groups) ignores merges
+    # (which would temporarily decrease group count); we instead use the env's
+    # own _ep_groups_formed counter and accumulate across episode resets.
+    groups_formed_cum = 0
+    help_events_cum = 0
+    collab_picks_cum = 0
+    active_groups_seen: list[int] = []
+    max_active_groups = 0
+    prev_groups_formed = [int(env._ep_groups_formed) for env in envs]
+    prev_helps = [
+        sum(len(d) for d in env._help_received.values()) for env in envs
+    ]
+
     for _t in range(steps):
         active_mask = np.array(
             [[a.alive for a in env._agents] for env in envs], dtype=bool
@@ -317,6 +342,7 @@ def eval_checkpoint(
                     ba, sa, _, _, _ = policy.act(obs_t, bm_t, sm_t, deterministic=deterministic)
                 ba_np = ba.cpu().numpy().reshape(n_envs, n_agents)
                 sa_np = sa.cpu().numpy().reshape(n_envs, n_agents)
+                collab_picks_cum += int((sa_np == 1).sum())
             else:
                 mask_t = torch.as_tensor(action_masks, dtype=torch.bool, device=device).reshape(-1, n_actions)
                 if is_recurrent:
@@ -333,6 +359,24 @@ def eval_checkpoint(
                 o, r, term, trunc, info = env.step_all_joint(ba_np[e_i], sa_np[e_i])
             else:
                 o, r, term, trunc, info = env.step_all(actions_np[e_i])
+
+            # Accumulate cumulative cooperation deltas BEFORE any potential
+            # reset_all at end of this iteration.
+            cur_groups_formed = int(env._ep_groups_formed)
+            cur_helps = sum(len(d) for d in env._help_received.values())
+            d_groups = cur_groups_formed - prev_groups_formed[e_i]
+            d_helps = cur_helps - prev_helps[e_i]
+            if d_groups > 0:
+                groups_formed_cum += d_groups
+            if d_helps > 0:
+                help_events_cum += d_helps
+            prev_groups_formed[e_i] = cur_groups_formed
+            prev_helps[e_i] = cur_helps
+            n_groups_now = sum(1 for g in env._groups if len(g) >= 2)
+            active_groups_seen.append(n_groups_now)
+            if n_groups_now > max_active_groups:
+                max_active_groups = n_groups_now
+
             ep_reward_sum[e_i] += r
             ep_step_count[e_i] += active_mask[e_i].astype(np.int64)
             died = term | trunc
@@ -366,6 +410,14 @@ def eval_checkpoint(
                     action_masks[e_i] = info["action_masks"]
                 if is_recurrent:
                     next_pending[e_i, :] = True
+                # reset() resets _ep_groups_formed and _help_received — refresh
+                # the per-env baselines so the next-tick delta is computed
+                # against the new episode's zero state, not the prior episode's
+                # final state.
+                prev_groups_formed[e_i] = int(env._ep_groups_formed)
+                prev_helps[e_i] = sum(
+                    len(d) for d in env._help_received.values()
+                )
 
         if is_recurrent:
             pending_life_reset = next_pending
@@ -373,6 +425,12 @@ def eval_checkpoint(
     max_abs, mean_abs, recip = affinity_summary(envs)
     n_groups, mean_size = group_summary(envs)
     helps = help_event_count(envs)
+    mean_active_groups = (
+        float(np.mean(active_groups_seen)) if active_groups_seen else 0.0
+    )
+    success_rate = (
+        groups_formed_cum / collab_picks_cum if collab_picks_cum > 0 else 0.0
+    )
 
     return EvalMetrics(
         steps=steps,
@@ -388,6 +446,12 @@ def eval_checkpoint(
         mean_lifespan=float(np.mean(completed_lives_steps)) if completed_lives_steps else 0.0,
         help_events=helps,
         completed_lives=len(completed_lives_reward),
+        groups_formed_cum=groups_formed_cum,
+        help_events_cum=help_events_cum,
+        mean_active_groups_per_step=mean_active_groups,
+        max_active_groups_seen=max_active_groups,
+        collab_picks=collab_picks_cum,
+        collab_success_rate=float(success_rate),
     )
 
 

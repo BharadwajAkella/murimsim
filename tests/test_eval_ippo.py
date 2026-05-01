@@ -149,6 +149,18 @@ def test_eval_checkpoint_ff_returns_finite_metrics(tmp_path: Path) -> None:
         assert np.isfinite(v), f"non-finite metric {v}"
     assert m.help_events >= 0
     assert m.completed_lives >= 0
+    # Cumulative cooperation counters must be present and non-negative.
+    assert m.groups_formed_cum >= 0
+    assert m.help_events_cum >= 0
+    assert m.mean_active_groups_per_step >= 0.0
+    assert m.max_active_groups_seen >= 0
+    # Single-head FF ckpt is not joint, so collab_picks must remain 0.
+    assert m.collab_picks == 0
+    assert m.collab_success_rate == 0.0
+    # Cumulative help events must be ≥ snapshot help events (snapshot only
+    # captures dyads still alive at the final tick; cumulative includes any
+    # help dyad seen during the rollout).
+    assert m.help_events_cum >= m.help_events
 
 
 def test_eval_checkpoint_recurrent_returns_finite_metrics(tmp_path: Path) -> None:
