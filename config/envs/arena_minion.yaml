@@ -96,4 +96,4 @@ domain_randomization:
 # v22 per-arena overrides — read by build_envs in scripts/train_ippo*.py
 arena:
   enable_boss: false
-  n_minions: 2
+  n_minions: 1

@@ -40,13 +40,13 @@ BOSS_ATTACK_MAX_DAMAGE: float = 0.6
 # ── Minion tunables ──────────────────────────────────────────────────────────
 # v22: Easier-to-beat NPC for forcing combat in resource-rich arena maps.
 # A solo strong agent can kill one in 3-4 hits; two weak agents can co-kill.
-MINION_BASE_HEALTH: float = 1.5
-MINION_BASE_STRENGTH: float = 0.9
+MINION_BASE_HEALTH: float = 0.8
+MINION_BASE_STRENGTH: float = 0.5
 MINION_LOOT_FOOD: int = 8
 MINION_LOOT_QI: int = 2
 MINION_LOOT_MATERIALS: int = 1
-MINION_ATTACK_DAMAGE_SCALE: float = 0.25
-MINION_ATTACK_MAX_DAMAGE: float = 0.30
+MINION_ATTACK_DAMAGE_SCALE: float = 0.20
+MINION_ATTACK_MAX_DAMAGE: float = 0.18
 
 
 @dataclasses.dataclass

@@ -10,7 +10,7 @@
 #   - No hazards: boss is the only attrition source.
 
 world:
-  grid_size: 16
+  grid_size: 24
   seed: 42
   action_ticks: 5
 

@@ -109,6 +109,7 @@ AFFINITY_FLANK_BOTH: float = 0.5         # symmetric — both chose to engage sa
 # v19c: additional event sources to raise per-pair event rate above the decay floor.
 AFFINITY_COLLAB_BOTH: float = 0.4        # symmetric — voluntarily formed a group together
 AFFINITY_JOINT_KILL: float = 0.6         # symmetric — both contributed to a monster kill
+AFFINITY_CO_ATTACK_MONSTER: float = 0.10 # v23: symmetric bond per shared-target hit
 AFFINITY_PROXIMITY_PER_STEP: float = 0.015  # tiny per-tick bond for being within radius
 AFFINITY_PROXIMITY_RADIUS: int = 2       # Chebyshev radius for proximity bond
 AFFINITY_PROXIMITY_TICK_EVERY: int = 5   # apply proximity sweep every N env steps
@@ -975,6 +976,31 @@ class MultiAgentEnv(gym.Env):
         val, step = entry
         decayed = val * (AFFINITY_DECAY_PER_STEP ** max(0, self._ep_step_count - step))
         return float(np.clip(decayed / AFFINITY_NORM, -1.0, 1.0))
+
+    def _record_co_attack_bonds(
+        self, current_attacker, prior_attacker_ids: set[str] | list[str]
+    ) -> None:
+        """v23: Bond ``current_attacker`` with every other still-live agent who
+        already hit this monster. Symmetric +AFFINITY_CO_ATTACK_MONSTER per
+        pair. Skipped if the attacker is the only one on this monster.
+        """
+        if not prior_attacker_ids:
+            return
+        id_to_idx = {a.agent_id: i for i, a in enumerate(self._agents) if a.alive}
+        attacker_idx = id_to_idx.get(current_attacker.agent_id)
+        if attacker_idx is None:
+            return
+        for aid in prior_attacker_ids:
+            if aid == current_attacker.agent_id:
+                continue
+            other_idx = id_to_idx.get(aid)
+            if other_idx is None:
+                continue
+            self._record_affinity_event(
+                actor_idx=attacker_idx, other_idx=other_idx,
+                actor_to_other=AFFINITY_CO_ATTACK_MONSTER,
+                other_to_actor=AFFINITY_CO_ATTACK_MONSTER,
+            )
 
     def _record_joint_kill_bonds(self, attacker_ids: set[str] | list[str]) -> None:
         """Record symmetric joint-kill bonds between every pair of monster contributors.
@@ -2406,6 +2432,12 @@ class CombatEnv(MultiAgentEnv):
             # NB: `_combat_damage` ignores the defender unless is_defending=True,
             # so passing attacker as a stand-in is safe and keeps damage scaling
             # tied to the attacker's strength only.
+            # v23: per-damage co-attack bond — anyone else already on this
+            # monster's attacker set (and still alive in this env) gets a small
+            # symmetric affinity boost with the current attacker. Fires on every
+            # hit, not just the kill — rewards joint pressure even when the
+            # boss/minion ultimately escapes or finishes someone off.
+            self._record_co_attack_bonds(attacker, monster.attackers)
             killed = monster.take_damage(damage, attacker.agent_id)
             self._ep_boss_attacks_landed += 1
             self._ep_boss_damage_dealt += damage
