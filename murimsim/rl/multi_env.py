@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import copy
 import math
+import dataclasses
 from dataclasses import dataclass
 from typing import Any
 
@@ -57,7 +58,13 @@ from murimsim.actions import (
     N_ACTIONS_PHASE6_QI,
     ATTACK_ACTIONS,
 )
-from murimsim.agent import Agent, inherit_value  # noqa: F401 (inherit_value re-exported for tests)
+from murimsim.agent import (
+    Agent,
+    inherit_value,                          # noqa: F401 (re-exported for tests)
+    INHERIT_BIAS_TO_STRONGER,
+    random_mating_cooldown,
+    random_sex,
+)
 from murimsim.monster import (
     BOSS_LOOT_FOOD,
     BOSS_LOOT_MATERIALS,
@@ -75,16 +82,38 @@ from murimsim.rl.agent_events import AgentStepEvents, StepEventBuffer
 # ── Observation layout constants ─────────────────────────────────────────────
 OBS_VIEW_SIZE: int = 5
 
-OBS_N_RESOURCE_CH: int = 4          # food, qi, materials, poison
+OBS_N_RESOURCE_CH: int = 5          # food, qi, materials, poison, flame
 OBS_N_AGENT_CH: int = 5             # agent_present, agent_health, agent_strength, agent_sociability, affinity
 OBS_N_STASH_CH: int = 2             # my_stash, enemy_stash
-OBS_CHANNEL_ORDER: list[str] = ["food", "qi", "materials", "poison"]
+OBS_CHANNEL_ORDER: list[str] = ["food", "qi", "materials", "poison", "flame"]
 
-OBS_RESOURCE_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_RESOURCE_CH  # 100
+OBS_RESOURCE_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_RESOURCE_CH  # 125
 OBS_AGENT_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_AGENT_CH        # 100
 OBS_STASH_GRID_SIZE: int = OBS_VIEW_SIZE * OBS_VIEW_SIZE * OBS_N_STASH_CH        # 50
 OBS_STATS_SIZE: int = 14  # health, hunger, inv_food, inv_poison, pr, pi, combat_exp, terrain_fam, reward_ema, sociability, in_group, strength, hunger_resistance, damage_taken_last_step
-OBS_TOTAL_SIZE: int = OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE + OBS_STASH_GRID_SIZE + OBS_STATS_SIZE  # 264
+OBS_TOTAL_SIZE: int = OBS_RESOURCE_GRID_SIZE + OBS_AGENT_GRID_SIZE + OBS_STASH_GRID_SIZE + OBS_STATS_SIZE  # 314
+# Phase 7: when courtship is enabled the env appends two extra scalar bits
+# at the tail of the observation: [sex, has_pending_proposal_received].
+# Sex is 0.0 (male) / 1.0 (female); the proposal bit is 1.0 when somebody
+# proposed to this agent on the previous tick (ACCEPT-able now).
+OBS_COURTSHIP_EXTRA: int = 2
+OBS_TOTAL_SIZE_COURTSHIP: int = OBS_TOTAL_SIZE + OBS_COURTSHIP_EXTRA  # 291
+
+# Phase 8d: when TRADE is enabled the env appends a per-agent "best pending
+# trade offer" block summarising the most attractive incoming offer so the
+# policy can evaluate it before picking ACCEPT_TRADE / REJECT_TRADE / NOOP.
+# Block layout (14 floats):
+#   [has_offer,                                  # 1
+#    offered_res_onehot[5],                      # 5
+#    offered_qty / TRADE_OBS_QTY_MAX,            # 1
+#    asked_res_onehot[5],                        # 5
+#    asked_qty / TRADE_OBS_QTY_MAX,              # 1
+#    proposer_affinity_normalised]               # 1  (clipped to [0,1])
+# When no offer is pending all 14 values are 0.0.
+OBS_TRADE_QTY_MAX: float = 5.0
+OBS_TRADE_EXTRA: int = 14
+OBS_TOTAL_SIZE_TRADE: int = OBS_TOTAL_SIZE + OBS_TRADE_EXTRA
+OBS_TOTAL_SIZE_COURTSHIP_TRADE: int = OBS_TOTAL_SIZE_COURTSHIP + OBS_TRADE_EXTRA
 
 # ── History signal constants ──────────────────────────────────────────────────
 TERRAIN_FAM_SCALE: float = 200.0   # ticks_near_food / SCALE → [0, 1]
@@ -119,6 +148,76 @@ REWARD_MUTUAL_SHARE_BONUS: float = 0.03  # extra to focal-sharer when both sides
 REWARD_FRIENDLY_FLANK_MAX_MULT: float = 1.0  # flanking bonus scaled by (1 + min(1, max(0, mean_affinity) * MULT))
 PENALTY_BETRAYAL: float = -0.20          # extra penalty for attacking high-affinity target
 AFFINITY_BETRAY_THRESHOLD: float = 0.5   # focal's affinity-toward-target above this → betrayal
+
+# ── Phase 7: courtship constants ──────────────────────────────────────────────
+# Courtship is gated by ``CombatEnv._enable_courtship`` (set from config). When
+# disabled the env behaves byte-identically to v25.
+COURT_PROPOSAL_RANGE: int = 1            # Chebyshev distance for valid PROPOSE / ACCEPT
+COURT_PROPOSAL_TTL_TICKS: int = 1        # proposals expire after this many ticks if not accepted
+COURT_AFFINITY_BUMP: float = 0.3         # added both directions on mutual COURT success
+COURT_REWARD_BIRTH: float = 3.0          # immediate reward to both parents at birth (Phase 7.1: bumped 1.0→3.0 to push ACCEPT exploration)
+COURT_REWARD_SURVIVAL_MILESTONE: float = 2.0  # bonus to still-alive parents when child reaches age
+COURT_SURVIVAL_MILESTONE_AGE: int = 50   # age the child must reach for parents to earn the bonus
+COURT_HUNGER_COST: float = 0.2           # hunger increment to both parents on successful birth
+
+# ── Phase 8c: GIFT constants ──────────────────────────────────────────────────
+# GIFT is a one-sided social primitive: an agent transfers 1 unit of its
+# highest-value owned resource to the highest-affinity adjacent agent. The
+# receiver auto-accepts (no decision head — that lives in TRADE / Phase 8d).
+#
+# v27.1 rebalance (post-eval):
+#   - GIFT must NOT be more attractive than COLLABORATE in shaped reward.
+#     The carrot for GIFT is the *affinity bump*, not the immediate scalar.
+#   - Affinity bumps are larger than COLLABORATE's symmetric 0.4 bump, so
+#     GIFT is the strongest relationship-building primitive.
+#   - The giver pays an explicit inventory-loss cost scaled by resource
+#     value, mirroring the food-only inventory-security shaping (which does
+#     NOT see post-body GIFT transfers). Without this, giving away qi/poison/
+#     flame/materials is silent to the policy and gets spammed.
+# ── Phase 8d: TRADE constants ────────────────────────────────────────────────
+# TRADE = bilateral 1-for-1 inventory swap. Mirrors the courtship PROPOSE/
+# ACCEPT pattern: PROPOSE_TRADE registers an offer addressed to the nearest
+# adjacent agent; ACCEPT_TRADE consumes a pending offer (made on a previous
+# tick) and executes the swap.
+#
+# v1 design choices (Phase 8d.1):
+#   * Hardcoded offer content (proposer offers 1 unit of its highest-value
+#     resource, asks for 1 unit of its rarest non-zero resource — falling
+#     back to its lowest-value resource if everything is balanced). The
+#     policy learns *when to propose* and *when to accept*; the *content*
+#     is heuristic to keep action-space scope contained for v1.
+#   * No scalar reward — only affinity bumps (smaller than COLLAB's 0.4 so
+#     TRADE is "lighter touch" than COLLABORATE).
+#   * Single-slot inbox per agent; latest offer overwrites.
+#   * Same-tick PROPOSE/ACCEPT cannot pair (TTL gate).
+TRADE_RANGE: int = 1                     # Chebyshev distance for a valid trade partner
+TRADE_PROPOSAL_TTL_TICKS: int = 1        # offers expire after this many ticks if not accepted
+TRADE_QTY: int = 1                       # always 1-for-1 in v1
+TRADE_AFFINITY_BUMP_BOTH: float = 0.2    # symmetric bump on successful swap (< COLLAB's 0.4)
+# NOTE (Phase 8d.2 reversed): we briefly added a flat scalar reward on
+# successful trade (TRADE_REWARD_BOTH) to force ACCEPT_TRADE into argmax.
+# It worked but tanked life_reward and reciprocity, so it was removed.
+# Trading is intentionally limbic-unfriendly — the right pressure to
+# trade has to come from making resources genuinely scarce/useful, not
+# from a flat tip. Trade may move to the LLM lane in a later phase.
+
+GIFT_RANGE: int = 1                      # Chebyshev distance for a valid GIFT recipient
+GIFT_REWARD_GIVER: float = 0.0           # no flat scalar — affinity is the carrot
+GIFT_REWARD_RECEIVER_PER_VALUE: float = 0.0   # no scalar credit — resource utility is the carrot
+GIFT_AFFINITY_BUMP_GIVER_TO_RECEIVER: float = 0.6   # > AFFINITY_COLLAB_BOTH (0.4)
+GIFT_AFFINITY_BUMP_RECEIVER_TO_GIVER: float = 0.5   # > AFFINITY_COLLAB_BOTH (0.4)
+# Diminishing-returns curvature on affinity bumps. Both sides curve:
+#   receiver_factor  = 1 / (1 + K * receiver_qty_before)   ← gratitude diminishes
+#   giver_factor     = 1 / (1 + K * giver_qty_after)       ← sacrifice amplifies
+# Picked so that:
+#   - first unit (recv 0 → recv 1) → factor 1.0  (full gratitude)
+#   - third unit (recv 2 → recv 3) → factor 0.5  (half gratitude)
+#   - giving your last unit (giver 0 after) → factor 1.0 (full sacrifice)
+GIFT_DIMINISH_K: float = 0.5
+# NOTE: no explicit inventory-loss reward penalty. The "consequence of losing a
+# resource" already emerges from CARRY_STRENGTH_PENALTY_PER_ITEM (giver gains
+# +4% strength per shed item, receiver loses 4%) plus downstream resource
+# utility (eat, train, combat). Hardcoded shaping would double-count.
 
 # ── Heuristic constants (non-focal agents) ────────────────────────────────────
 HEURISTIC_HUNGER_EAT: float = 0.5   # eat when hunger exceeds this
@@ -178,6 +277,38 @@ def compute_power_score(agent: "Agent") -> float:
     )
 
 
+@dataclasses.dataclass
+class PendingBirth:
+    """A queued offspring waiting for the next available slot.
+
+    Phase 7 decouples reproduction from death by enqueueing successful
+    courtships; the birth materialises on the next age-death so the env's
+    fixed slot count (and IPPO recurrent-state buffers) are preserved.
+    """
+
+    parent1_idx: int
+    parent2_idx: int
+    parent1_id: str
+    parent2_id: str
+    queued_step: int  # env step when the courtship completed
+
+
+@dataclasses.dataclass
+class TradeOffer:
+    """A pending trade offer from ``proposer_idx`` addressed to one
+    receiver. Created by ``_propose_trade``, consumed by
+    ``_resolve_trade_accept``. TTL-gated so same-tick PROPOSE/ACCEPT
+    cannot pair (matches courtship semantics).
+    """
+
+    proposer_idx: int
+    offered_resource: str   # field name on Inventory (food/qi/materials/poison/flame)
+    offered_qty: int
+    asked_resource: str
+    asked_qty: int
+    created_step: int
+
+
 class MultiAgentEnv(gym.Env):
     """Multi-agent survival environment (Phase 3b/3c).
 
@@ -218,8 +349,20 @@ class MultiAgentEnv(gym.Env):
         self._n_agents = n_agents
         self.render_mode = render_mode
 
+        # Phase 7: obs grows by OBS_COURTSHIP_EXTRA when courtship enabled.
+        # Phase 8d: obs grows by OBS_TRADE_EXTRA when trade enabled.
+        _enable_courtship_for_obs = bool(
+            config.get("agent", {}).get("enable_courtship", False)
+        )
+        _enable_trade_for_obs = bool(
+            config.get("agent", {}).get("enable_trade", False)
+        )
+        base_obs = (
+            OBS_TOTAL_SIZE_COURTSHIP if _enable_courtship_for_obs else OBS_TOTAL_SIZE
+        )
+        self._obs_size: int = base_obs + (OBS_TRADE_EXTRA if _enable_trade_for_obs else 0)
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(OBS_TOTAL_SIZE,), dtype=np.float32
+            low=0.0, high=1.0, shape=(self._obs_size,), dtype=np.float32
         )
         self.action_space = spaces.Discrete(n_actions)
 
@@ -248,8 +391,7 @@ class MultiAgentEnv(gym.Env):
 
         # v19b: anonymous spawn clustering — agents start in N small clusters so
         # the focal has nearby neighbours from tick 0 (no identity tag, just
-        # spatial seeding). Replaces the sect-region spawn that was lost in
-        # commit 6b1d1f2 without re-introducing sect identity.
+        # spatial seeding).
         self._spawn_cluster_count: int = 3
         self._spawn_cluster_radius: int = 4
         self._spawn_cluster_centers: list[tuple[int, int]] | None = None
@@ -266,6 +408,45 @@ class MultiAgentEnv(gym.Env):
         self._next_life_id: int = n_agents
         self._lifecycle_died_step: list[bool] = [False] * n_agents
         self._lifecycle_born_step: list[bool] = [False] * n_agents
+
+        # ── Phase 7: courtship state ────────────────────────────────────────
+        # Courtship is opt-in via config so that v25 byte-identical replays
+        # are preserved when the feature is disabled. The feature flag is
+        # read from ``config["agent"]["enable_courtship"]`` (default False).
+        self._enable_courtship: bool = bool(
+            config.get("agent", {}).get("enable_courtship", False)
+        )
+        # Phase 8d: TRADE feature flag. When False the trade-related social
+        # actions are masked out and the obs trade-block is omitted. Default
+        # False so legacy checkpoints + golden tests stay byte-identical.
+        self._enable_trade: bool = bool(
+            config.get("agent", {}).get("enable_trade", False)
+        )
+        # Dedicated RNG substream for every Phase 7 random draw (sex,
+        # mating cooldown, biased-inheritance noise contributions). Keeping
+        # it separate from ``self._rng`` is what guarantees that toggling
+        # courtship does not shift the main env RNG stream and break the
+        # byte-identical golden tests from earlier phases.
+        self._courtship_rng: np.random.Generator | None = None
+        # Pending proposals: target_slot -> (proposer_slot, created_step).
+        # ``COURT_PROPOSAL_TTL_TICKS`` controls expiry: an entry created at
+        # step T can be ACCEPTed at step T+1 only (TTL=1 → no same-tick
+        # accept, no stale offers). Trimmed at the top of each step.
+        # Pending marriage proposals: target_slot -> list of (proposer_slot,
+        # created_step). Phase 8d: was a single tuple; now a list so a slot
+        # can receive multiple incoming offers within the TTL window and
+        # the ACCEPT handler can pick the best match (highest affinity).
+        # ``COURT_PROPOSAL_TTL_TICKS`` controls expiry; trimmed pre-step.
+        self._pending_proposals: dict[int, list[tuple[int, int]]] = {}
+        # FIFO queue of pending births that have been agreed upon but not yet
+        # materialised — drained by ``_try_reproduce`` on the next age-death.
+        # Capped at ``n_agents`` to prevent unbounded growth.
+        self._pending_births: list[PendingBirth] = []
+        # Phase 8d: pending trade offers. receiver_slot -> list of TradeOffer.
+        # Multi-offer inbox lets the receiver evaluate competing proposals;
+        # ACCEPT_TRADE picks the highest-scoring one. TTL gate (1 tick min)
+        # prevents same-tick PROPOSE/ACCEPT pairing — same as courtship.
+        self._pending_trade_offers: dict[int, list[TradeOffer]] = {}
 
     # ── Gymnasium API ────────────────────────────────────────────────────────
 
@@ -351,6 +532,20 @@ class MultiAgentEnv(gym.Env):
             for i in range(self._n_agents)
         ]
 
+        # ── Phase 7: post-spawn courtship state ─────────────────────────────
+        # Use a dedicated RNG substream derived from the main seed so toggling
+        # courtship does not perturb the byte-identical RNG stream of v25.
+        self._courtship_rng = np.random.default_rng(effective_seed ^ 0xC0FFEE)
+        if self._enable_courtship:
+            for agent in self._agents:
+                agent.sex = random_sex(self._courtship_rng)
+                agent.mating_cooldown = 0
+        # Always clear (whether enabled or not) so a partial-state stale
+        # proposals/queue from a prior episode cannot leak across resets.
+        self._pending_proposals = {}
+        self._pending_births = []
+        self._pending_trade_offers = {}
+
         self._focal_idx = 0
         self._visited_tiles = [{a.position} for a in self._agents]
         self._ticks_near_food = [0.0] * self._n_agents
@@ -411,6 +606,22 @@ class MultiAgentEnv(gym.Env):
         self._ep_betrayal_count: int = 0          # focal attacked high-affinity target
         self._ep_friendly_flank_count: int = 0    # focal flanked alongside positive-affinity ally
 
+        # Phase 7 instrumentation — courtship signals
+        self._ep_proposals_made: int = 0          # PROPOSE actions executed
+        self._ep_proposals_accepted: int = 0      # mutual courtships completed
+        self._ep_births_from_courtship: int = 0   # offspring born via the queue
+        self._ep_survival_milestones: int = 0     # parents who collected the age-50 bonus
+
+        # Phase 8c instrumentation — GIFT signals
+        self._ep_gifts_made: int = 0              # successful GIFT transfers this episode
+        self._ep_gift_value_transferred: float = 0.0  # sum of (resource value) gifted
+
+        # Phase 8d instrumentation — TRADE signals
+        self._ep_trades_proposed: int = 0         # PROPOSE_TRADE actions registered
+        self._ep_trades_accepted: int = 0         # ACCEPT_TRADE successfully executed
+        self._ep_trades_rejected: int = 0         # REJECT_TRADE actions executed (offers cleared)
+        self._ep_trade_value_transferred: float = 0.0  # sum of (offered + asked) value over all trades
+
         # Foraging-outward tracking: max Chebyshev dist from own stash since last deposit
         self._max_dist_since_deposit: list[float] = [0.0] * self._n_agents
 
@@ -425,6 +636,21 @@ class MultiAgentEnv(gym.Env):
         # and _try_reproduce; emitted in info["lifecycle"] at end of step.
         self._lifecycle_died_step = [False] * self._n_agents
         self._lifecycle_born_step = [False] * self._n_agents
+
+        # Phase 7: trim expired courtship proposals. An entry registered when
+        # ``_ep_step_count == T`` must survive into the *next* tick so the
+        # other agent can ACCEPT it (validation requires ``age_ticks >= 1``).
+        # cutoff math: keep entries with ``s > _ep_step_count - TTL - 1``
+        # i.e. ``s >= _ep_step_count - TTL``. With TTL=1, a proposal from
+        # the previous tick (``s == _ep_step_count - 1``) is still alive.
+        if self._enable_courtship and self._pending_proposals:
+            cutoff = self._ep_step_count - COURT_PROPOSAL_TTL_TICKS - 1
+            new_pending: dict[int, list[tuple[int, int]]] = {}
+            for t, lst in self._pending_proposals.items():
+                fresh = [(p, s) for (p, s) in lst if s > cutoff]
+                if fresh:
+                    new_pending[t] = fresh
+            self._pending_proposals = new_pending
 
         focal = self._agents[self._focal_idx]
         hunger_prev = focal.hunger
@@ -717,7 +943,7 @@ class MultiAgentEnv(gym.Env):
           * Empty inventory → no-op (no zero-value stash registered).
         """
         inv = agent.inventory
-        total = inv.food + inv.qi + inv.materials + inv.poison
+        total = inv.food + inv.qi + inv.materials + inv.poison + inv.flame
         if total <= 0:
             return
 
@@ -753,6 +979,7 @@ class MultiAgentEnv(gym.Env):
             qi=inv.qi,
             materials=inv.materials,
             poison=inv.poison,
+            flame=inv.flame,
             participants=sorted(eligible_heirs),
             claim_unlock_step=self._ep_step_count + LEGACY_UNLOCK_TICKS,
         )
@@ -762,6 +989,7 @@ class MultiAgentEnv(gym.Env):
         inv.qi = 0
         inv.materials = 0
         inv.poison = 0
+        inv.flame = 0
 
     def _reset_slot_state(self, idx: int) -> None:
         """Wipe all slot-keyed runtime state for slot ``idx``.
@@ -800,20 +1028,73 @@ class MultiAgentEnv(gym.Env):
         if 0 <= idx < len(self._damage_taken_last_step):
             self._damage_taken_last_step[idx] = 0.0
 
-    def _try_reproduce(self, deceased: Agent) -> None:
-        """Replace a dead (age-death) agent with an offspring of two random survivors.
+        # Phase 7: courtship state for this slot.
+        # Outgoing proposal record(s) (slot proposed to someone else).
+        for target, lst in list(self._pending_proposals.items()):
+            kept = [(p, s) for (p, s) in lst if p != idx]
+            if kept:
+                self._pending_proposals[target] = kept
+            else:
+                self._pending_proposals.pop(target, None)
+        # Incoming proposal record (someone proposed to this slot).
+        self._pending_proposals.pop(idx, None)
+        # Phase 8d: trade offers — drop entries either side of this slot.
+        # Filter outgoing offers from any inbox; pop the slot's own inbox.
+        for receiver, offers in list(self._pending_trade_offers.items()):
+            kept = [o for o in offers if o.proposer_idx != idx]
+            if kept:
+                self._pending_trade_offers[receiver] = kept
+            else:
+                self._pending_trade_offers.pop(receiver, None)
+        self._pending_trade_offers.pop(idx, None)
+        # Drop any queued births that reference this slot — the original
+        # parent agent at this slot is gone.
+        if self._pending_births:
+            self._pending_births = [
+                pb for pb in self._pending_births
+                if pb.parent1_idx != idx and pb.parent2_idx != idx
+            ]
 
-        Two living agents are chosen at random from the current population.  The
-        deceased agent's slot is revived in-place with inherited traits via
-        :meth:`Agent.spawn_from_parents`.  The offspring is placed at a random
-        empty position (or the deceased's last position if no empty cell is
-        found).  Nothing happens if fewer than 2 survivors are alive.
+    def _try_reproduce(self, deceased: Agent) -> None:
+        """Replace a dead (age-death) agent with an offspring.
+
+        Phase 7: when courtship is enabled and ``self._pending_births`` is
+        non-empty, the deceased's slot is filled by the head of the queue
+        (parents = the courting pair). Otherwise the legacy behaviour is
+        preserved — two random survivors become parents.
+
+        Nothing happens if there are no eligible parents (queue empty AND
+        fewer than 2 survivors).
         """
-        survivors = [a for a in self._agents if a.alive and a is not deceased]
-        if len(survivors) < 2:
-            return
-        parent1, parent2 = self._rng.choice(survivors, size=2, replace=False)  # type: ignore[arg-type]
-        # Find a random spawn position
+        bias = INHERIT_BIAS_TO_STRONGER if self._enable_courtship else 0.5
+        parent1 = parent2 = None
+        from_queue = False
+
+        if self._enable_courtship and self._pending_births:
+            # Drain FIFO; skip entries whose parents are no longer alive.
+            while self._pending_births:
+                pb = self._pending_births.pop(0)
+                p1 = self._agents[pb.parent1_idx]
+                p2 = self._agents[pb.parent2_idx]
+                if (
+                    p1.alive and p2.alive
+                    and p1.agent_id == pb.parent1_id
+                    and p2.agent_id == pb.parent2_id
+                    and p1 is not deceased and p2 is not deceased
+                ):
+                    parent1, parent2 = p1, p2
+                    from_queue = True
+                    break
+
+        if parent1 is None:
+            survivors = [a for a in self._agents if a.alive and a is not deceased]
+            if len(survivors) < 2:
+                return
+            # NB: ``self._rng.choice`` is called BEFORE ``_initial_position`` so
+            # the RNG draw order matches pre-Phase-7 behaviour and earlier-phase
+            # byte-identical golden tests keep passing.
+            parent1, parent2 = self._rng.choice(survivors, size=2, replace=False)  # type: ignore[arg-type]
+
         grid_size = self._world.grid_size
         pos = self._initial_position(len(self._agents), grid_size)
         offspring = Agent.spawn_from_parents(
@@ -822,20 +1103,558 @@ class MultiAgentEnv(gym.Env):
             parent1=parent1,
             parent2=parent2,
             rng=self._rng,
+            bias=bias,
         )
-        # Replace the deceased in the _agents list
         idx = self._agents.index(deceased)
         # P2.3: wipe all slot-keyed runtime state BEFORE installing the
-        # offspring so the new life starts with a clean slate (no inherited
-        # affinity, help-received, reward EMA, damage, or group membership).
+        # offspring so the new life starts with a clean slate.
         self._reset_slot_state(idx)
         self._agents[idx] = offspring
+
+        # Phase 7: assign sex and stash inheritance for queue-driven births.
+        # Drawn from the dedicated courtship RNG so the main RNG stream is
+        # unaffected — preserves byte-identical earlier-phase replays when
+        # courtship is disabled.
+        if self._enable_courtship:
+            offspring.sex = random_sex(self._courtship_rng)
+            offspring.mating_cooldown = 0
+            offspring._from_courtship = from_queue  # type: ignore[attr-defined]
+            if from_queue:
+                self._merge_parent_stashes_to_child(parent1, parent2, offspring)
+                self._ep_births_from_courtship += 1
+
         self._ep_reproductions += 1
-        # P0.3: record same-step rebirth for this slot. The slot transitions
-        # alive→dead→born within one step; trainers must reset recurrent state.
+        # P0.3: record same-step rebirth for this slot.
         self._lifecycle_born_step[idx] = True
         self._life_ids[idx] = self._next_life_id
         self._next_life_id += 1
+
+    # ── Phase 7: courtship helpers ──────────────────────────────────────────
+
+    def _merge_parent_stashes_to_child(
+        self, parent1: "Agent", parent2: "Agent", child: "Agent"
+    ) -> None:
+        """Sum-merge both parents' stashes into a new child-owned stash.
+
+        Parent stashes are emptied (zeroed in-place, NOT deleted) so existing
+        per-tick code paths that hold references to them remain valid; the
+        merged totals appear in a single fresh stash owned by the offspring
+        and placed at ``child.position``. Iteration order is sorted by
+        ``stash_id`` for determinism across runs.
+        """
+        parent_stashes = []
+        for parent in (parent1, parent2):
+            for s in self._stash_registry.get_stashes_for_owner(parent.agent_id):
+                parent_stashes.append(s)
+        if not parent_stashes:
+            return
+        parent_stashes.sort(key=lambda s: s.stash_id)
+        food = qi = materials = poison = flame = 0
+        for s in parent_stashes:
+            food += s.food
+            qi += s.qi
+            materials += s.materials
+            poison += s.poison
+            flame += s.flame
+            s.food = s.qi = s.materials = s.poison = s.flame = 0
+        if (food + qi + materials + poison + flame) == 0:
+            return
+        merged = Stash(
+            stash_id=f"{child.agent_id}_inherit_{self._ep_step_count}",
+            owner_id=child.agent_id,
+            position=child.position,
+            food=food,
+            qi=qi,
+            materials=materials,
+            poison=poison,
+            flame=flame,
+        )
+        self._stash_registry.register(merged)
+
+    def _find_court_target(self, agent_idx: int) -> int | None:
+        """Pick the highest-affinity opposite-sex agent within range.
+
+        Tie-breaks by lowest agent index for determinism. Returns ``None`` if
+        no eligible target exists. Eligibility: alive, opposite sex, mating
+        cooldown == 0, within Chebyshev range ``COURT_PROPOSAL_RANGE``.
+        """
+        agent = self._agents[agent_idx]
+        if not agent.alive or agent.mating_cooldown > 0:
+            return None
+        ax, ay = agent.position
+        best: tuple[float, int] | None = None
+        for j, other in enumerate(self._agents):
+            if j == agent_idx:
+                continue
+            if not other.alive or other.mating_cooldown > 0:
+                continue
+            if other.sex == agent.sex:
+                continue
+            ox, oy = other.position
+            if max(abs(ax - ox), abs(ay - oy)) > COURT_PROPOSAL_RANGE:
+                continue
+            aff = self._affinity(agent_idx, j)
+            score = float(aff)
+            # Tie-break on lower index for determinism.
+            if best is None or score > best[0] or (score == best[0] and j < best[1]):
+                best = (score, j)
+        return best[1] if best is not None else None
+
+    def _courtship_propose(self, agent_idx: int) -> bool:
+        """Resolve a PROPOSE action for ``agent_idx``.
+
+        Returns ``True`` if a proposal was registered. Phase 8d: each
+        receiver maintains a *list* of incoming proposals; a duplicate
+        from the same proposer is suppressed (first one wins) but
+        proposals from *different* proposers all coexist until one is
+        accepted or the TTL expires.
+        """
+        if not self._enable_courtship:
+            return False
+        target_idx = self._find_court_target(agent_idx)
+        if target_idx is None:
+            return False
+        existing = self._pending_proposals.get(target_idx, [])
+        # Suppress duplicate from same proposer (first within-TTL wins).
+        if any(p == agent_idx for (p, _s) in existing):
+            return False
+        existing.append((agent_idx, self._ep_step_count))
+        self._pending_proposals[target_idx] = existing
+        self._ep_proposals_made += 1
+        return True
+
+    def _courtship_accept(
+        self, agent_idx: int, rewards: np.ndarray | None = None
+    ) -> bool:
+        """Resolve an ACCEPT action for ``agent_idx``.
+
+        Phase 8d: with the multi-offer inbox the receiver picks the
+        *best* validated proposal (highest current affinity from the
+        receiver's POV, tie-broken by lower proposer index for
+        determinism). Other proposals to this slot are dropped on
+        success (the receiver is now in cooldown and unavailable).
+        """
+        if not self._enable_courtship:
+            return False
+        candidates = self._pending_proposals.get(agent_idx)
+        if not candidates:
+            return False
+        target = self._agents[agent_idx]
+        if not target.alive:
+            self._pending_proposals.pop(agent_idx, None)
+            return False
+        # Filter to TTL-valid + structurally valid proposals.
+        valid: list[tuple[float, int, int, int]] = []  # (affinity, -proposer_idx, proposer_idx, created_step)
+        for (proposer_idx, created_step) in candidates:
+            age_ticks = self._ep_step_count - created_step
+            if age_ticks < 1 or age_ticks > COURT_PROPOSAL_TTL_TICKS:
+                continue
+            proposer = self._agents[proposer_idx]
+            if not proposer.alive:
+                continue
+            if proposer.mating_cooldown > 0 or target.mating_cooldown > 0:
+                continue
+            if proposer.sex == target.sex:
+                continue
+            px, py = proposer.position
+            tx, ty = target.position
+            if max(abs(px - tx), abs(py - ty)) > COURT_PROPOSAL_RANGE:
+                continue
+            aff = float(self._affinity(agent_idx, proposer_idx))
+            # max-pick key: higher affinity wins; tie -> lower proposer index.
+            valid.append((aff, -proposer_idx, proposer_idx, created_step))
+        if not valid:
+            self._pending_proposals.pop(agent_idx, None)
+            return False
+        valid.sort(reverse=True)
+        _aff, _neg, proposer_idx, _created = valid[0]
+        proposer = self._agents[proposer_idx]
+        # ── Successful courtship ─────────────────────────────────────────
+        self._pending_proposals.pop(agent_idx, None)
+        proposer.mating_cooldown = random_mating_cooldown(self._courtship_rng)
+        target.mating_cooldown = random_mating_cooldown(self._courtship_rng)
+        proposer.hunger = min(1.0, proposer.hunger + COURT_HUNGER_COST)
+        target.hunger = min(1.0, target.hunger + COURT_HUNGER_COST)
+        self._record_affinity_event(
+            proposer_idx, agent_idx, COURT_AFFINITY_BUMP, COURT_AFFINITY_BUMP
+        )
+        if rewards is not None:
+            rewards[proposer_idx] = float(rewards[proposer_idx]) + COURT_REWARD_BIRTH
+            rewards[agent_idx] = float(rewards[agent_idx]) + COURT_REWARD_BIRTH
+        if len(self._pending_births) < self._n_agents:
+            self._pending_births.append(PendingBirth(
+                parent1_idx=proposer_idx,
+                parent2_idx=agent_idx,
+                parent1_id=proposer.agent_id,
+                parent2_id=target.agent_id,
+                queued_step=self._ep_step_count,
+            ))
+        self._ep_proposals_accepted += 1
+        return True
+
+    # ── Phase 8d: TRADE helpers ─────────────────────────────────────────────
+    def _trade_find_partner(self, agent_idx: int) -> int | None:
+        """Pick the highest-affinity adjacent (Chebyshev <= TRADE_RANGE) alive
+        non-self agent. Tie-broken by lower index (deterministic).
+        """
+        if self._world is None:
+            return None
+        agent = self._agents[agent_idx]
+        if not agent.alive:
+            return None
+        ax, ay = agent.position
+        best: tuple[float, int] | None = None
+        for j, other in enumerate(self._agents):
+            if j == agent_idx or not other.alive:
+                continue
+            ox, oy = other.position
+            if max(abs(ax - ox), abs(ay - oy)) > TRADE_RANGE:
+                continue
+            aff = float(self._affinity(agent_idx, j))
+            key = (aff, -j)  # higher affinity wins; tie -> lower index
+            if best is None or key > best:
+                best = (aff, j)
+        return best[1] if best is not None else None
+
+    def _trade_compose_offer(
+        self, proposer_idx: int, receiver_idx: int
+    ) -> tuple[str, str] | None:
+        """Heuristic v1 offer composer (Phase 8d.1).
+
+        Returns ``(offered_resource, asked_resource)`` or ``None`` if
+        the proposer has nothing to offer.
+
+        Rules:
+          * ``offered_resource`` = proposer's highest-value owned resource.
+          * ``asked_resource`` = the channel where the proposer's stock is
+            *lowest* AND that differs from ``offered``. Resource value
+            breaks ties.
+
+        Phase 8d.2 will replace this with a learned ``TradeHead``
+        producing MultiDiscrete (offered_res, offered_qty, asked_res,
+        asked_qty) sampled jointly with the body+social heads.
+        """
+        offered = self._gift_pick_resource(proposer_idx)
+        if offered is None:
+            return None
+        agent = self._agents[proposer_idx]
+        best: tuple[int, float, int, str] | None = None
+        for ch_idx, rid in enumerate(OBS_CHANNEL_ORDER):
+            if rid == offered:
+                continue
+            count = int(getattr(agent.inventory, rid, 0))
+            rcfg = self._world.resources.get(rid) if self._world is not None else None
+            v = float(getattr(rcfg, "value", 1.0)) if rcfg is not None else 1.0
+            key = (-count, v, -ch_idx, rid)
+            if best is None or key > best:
+                best = key
+        if best is None:
+            return None
+        return offered, best[3]
+
+    def _trade_score_offer(
+        self, receiver_idx: int, offer: TradeOffer
+    ) -> float:
+        """Receiver-perceived value of an offer (used to pick best when
+        multiple offers compete for the same ACCEPT_TRADE).
+
+        Score = (value(offered) * offered_qty - value(asked) * asked_qty)
+                + 0.1 * receiver_to_proposer_affinity
+        Higher is better. Affinity is a small tie-breaker so a friend's
+        offer is preferred when net-resource value is equal.
+        """
+        if self._world is None:
+            return 0.0
+        v_off = float(getattr(self._world.resources.get(offer.offered_resource), "value", 1.0))
+        v_ask = float(getattr(self._world.resources.get(offer.asked_resource), "value", 1.0))
+        aff = float(self._affinity(receiver_idx, offer.proposer_idx))
+        return (v_off * offer.offered_qty) - (v_ask * offer.asked_qty) + 0.1 * aff
+
+    def _propose_trade(self, agent_idx: int) -> bool:
+        """Resolve a PROPOSE_TRADE action for ``agent_idx``.
+
+        Returns True if an offer was registered. The offer is addressed to
+        the highest-affinity adjacent agent and appended to that
+        receiver's inbox. Duplicate offer from the same proposer (already
+        in the receiver's inbox) is suppressed (first within-TTL wins).
+        """
+        if not self._enable_trade:
+            return False
+        partner_idx = self._trade_find_partner(agent_idx)
+        if partner_idx is None:
+            return False
+        existing = self._pending_trade_offers.get(partner_idx, [])
+        if any(o.proposer_idx == agent_idx for o in existing):
+            return False
+        composed = self._trade_compose_offer(agent_idx, partner_idx)
+        if composed is None:
+            return False
+        offered, asked = composed
+        existing.append(TradeOffer(
+            proposer_idx=agent_idx,
+            offered_resource=offered,
+            offered_qty=TRADE_QTY,
+            asked_resource=asked,
+            asked_qty=TRADE_QTY,
+            created_step=self._ep_step_count,
+        ))
+        self._pending_trade_offers[partner_idx] = existing
+        self._ep_trades_proposed += 1
+        return True
+
+    def _resolve_trade_accept(self, agent_idx: int) -> bool:
+        """Resolve an ACCEPT_TRADE action for ``agent_idx``.
+
+        With the multi-offer inbox the receiver picks the highest-scoring
+        validated offer. Other offers in the inbox stay (the receiver may
+        accept another one next tick if it survives TTL).
+
+        No scalar reward is granted — agents only get the affinity bump
+        and the resource swap itself. If trading isn't useful enough for
+        agents to discover on their own, that's fine; we won't bribe
+        them.
+        """
+        if not self._enable_trade:
+            return False
+        offers = self._pending_trade_offers.get(agent_idx)
+        if not offers:
+            return False
+        receiver = self._agents[agent_idx]
+        if not receiver.alive:
+            self._pending_trade_offers.pop(agent_idx, None)
+            return False
+        # Filter to TTL- and structurally-valid offers.
+        valid: list[tuple[float, int, TradeOffer]] = []  # (-score for desc sort, -proposer_idx tie, offer)
+        for offer in offers:
+            age_ticks = self._ep_step_count - offer.created_step
+            if age_ticks < 1 or age_ticks > TRADE_PROPOSAL_TTL_TICKS:
+                continue
+            proposer = self._agents[offer.proposer_idx]
+            if not proposer.alive:
+                continue
+            px, py = proposer.position
+            rx, ry = receiver.position
+            if max(abs(px - rx), abs(py - ry)) > TRADE_RANGE:
+                continue
+            if int(getattr(proposer.inventory, offer.offered_resource, 0)) < offer.offered_qty:
+                continue
+            if int(getattr(receiver.inventory, offer.asked_resource, 0)) < offer.asked_qty:
+                continue
+            score = self._trade_score_offer(agent_idx, offer)
+            valid.append((score, -offer.proposer_idx, offer))
+        if not valid:
+            return False
+        valid.sort(reverse=True)
+        _score, _neg, chosen = valid[0]
+        # Remove only the chosen offer; remaining offers stay.
+        self._pending_trade_offers[agent_idx] = [
+            o for o in offers if o is not chosen
+        ]
+        if not self._pending_trade_offers[agent_idx]:
+            self._pending_trade_offers.pop(agent_idx, None)
+        # ── Execute swap ─────────────────────────────────────────────────
+        proposer = self._agents[chosen.proposer_idx]
+        setattr(proposer.inventory, chosen.offered_resource,
+                int(getattr(proposer.inventory, chosen.offered_resource)) - chosen.offered_qty)
+        setattr(proposer.inventory, chosen.asked_resource,
+                int(getattr(proposer.inventory, chosen.asked_resource)) + chosen.asked_qty)
+        setattr(receiver.inventory, chosen.offered_resource,
+                int(getattr(receiver.inventory, chosen.offered_resource)) + chosen.offered_qty)
+        setattr(receiver.inventory, chosen.asked_resource,
+                int(getattr(receiver.inventory, chosen.asked_resource)) - chosen.asked_qty)
+        self._record_affinity_event(
+            actor_idx=chosen.proposer_idx, other_idx=agent_idx,
+            actor_to_other=TRADE_AFFINITY_BUMP_BOTH,
+            other_to_actor=TRADE_AFFINITY_BUMP_BOTH,
+        )
+        self._ep_trades_accepted += 1
+        if self._world is not None:
+            v_off = float(getattr(self._world.resources.get(chosen.offered_resource), "value", 1.0))
+            v_ask = float(getattr(self._world.resources.get(chosen.asked_resource), "value", 1.0))
+            self._ep_trade_value_transferred += v_off * chosen.offered_qty + v_ask * chosen.asked_qty
+        return True
+
+    def _resolve_trade_reject(self, agent_idx: int) -> bool:
+        """Resolve a REJECT_TRADE action: clear ALL pending offers
+        addressed to this slot. Explicit refusal — distinct from TTL
+        expiry. Applies a small symmetric *negative* affinity tick from
+        the rejected proposer toward the rejecter (the proposer feels
+        slighted; the rejecter feels nothing extra). v1: keep this small
+        so REJECT remains usable without spiralling animosity.
+        """
+        if not self._enable_trade:
+            return False
+        offers = self._pending_trade_offers.pop(agent_idx, None)
+        if not offers:
+            return False
+        for o in offers:
+            self._record_affinity_event(
+                actor_idx=agent_idx, other_idx=o.proposer_idx,
+                actor_to_other=0.0,
+                other_to_actor=-TRADE_AFFINITY_BUMP_BOTH * 0.5,
+            )
+        self._ep_trades_rejected += 1
+        return True
+
+    def _decay_trade_proposals(self) -> None:
+        """Expire stale trade offers. Called once per joint step BEFORE the
+        social loop fires so the ACCEPT_TRADE mask check sees only live
+        offers and the dict cannot grow unboundedly across no-accept ticks.
+        """
+        if not self._pending_trade_offers:
+            return
+        cur = self._ep_step_count
+        new_inbox: dict[int, list[TradeOffer]] = {}
+        for receiver, offers in self._pending_trade_offers.items():
+            fresh = [o for o in offers if cur - o.created_step <= TRADE_PROPOSAL_TTL_TICKS]
+            if fresh:
+                new_inbox[receiver] = fresh
+        self._pending_trade_offers = new_inbox
+
+    def _trade_best_pending_offer(self, agent_idx: int) -> TradeOffer | None:
+        """Return the highest-scoring pending offer addressed to this
+        agent, or None. Used by the obs builder to summarise the inbox
+        for the policy."""
+        offers = self._pending_trade_offers.get(agent_idx)
+        if not offers:
+            return None
+        best: tuple[float, int, TradeOffer] | None = None
+        for o in offers:
+            score = self._trade_score_offer(agent_idx, o)
+            key = (score, -o.proposer_idx, o)
+            if best is None or key > best:
+                best = key
+        return best[2] if best is not None else None
+
+    # ── Phase 8c: GIFT helpers ───────────────────────────────────────────────
+    def _gift_pick_resource(self, agent_idx: int) -> str | None:
+        """Return the inventory field name of the highest-value resource the
+        agent currently owns, or None if the inventory is empty.
+
+        Ties broken by ``OBS_CHANNEL_ORDER`` (deterministic).
+        """
+        agent = self._agents[agent_idx]
+        if not agent.alive or agent.inventory.total() == 0:
+            return None
+        best: tuple[float, int, str] | None = None
+        for ch_idx, rid in enumerate(OBS_CHANNEL_ORDER):
+            count = getattr(agent.inventory, rid, 0)
+            if count <= 0:
+                continue
+            rcfg = self._world.resources.get(rid) if self._world is not None else None
+            v = float(getattr(rcfg, "value", 1.0)) if rcfg is not None else 1.0
+            key = (v, -ch_idx, rid)  # higher value wins; tie -> earlier channel
+            if best is None or key > best:
+                best = key
+        return best[2] if best is not None else None
+
+    def _gift_find_recipient(self, agent_idx: int) -> int | None:
+        """Pick the highest-affinity adjacent (Chebyshev<=GIFT_RANGE) alive
+        non-self agent. Tie-broken by lower index.
+        """
+        if self._world is None:
+            return None
+        agent = self._agents[agent_idx]
+        if not agent.alive:
+            return None
+        ax, ay = agent.position
+        best: tuple[float, int] | None = None
+        for j, other in enumerate(self._agents):
+            if j == agent_idx or not other.alive:
+                continue
+            ox, oy = other.position
+            if max(abs(ax - ox), abs(ay - oy)) > GIFT_RANGE:
+                continue
+            aff = self._affinity(agent_idx, j)
+            key = (float(aff), -j)  # higher affinity wins, tie -> lower index
+            if best is None or key > best:
+                best = key
+        return -best[1] if best is not None else None
+
+    def _resolve_gift(
+        self, agent_idx: int, rewards: np.ndarray | None = None
+    ) -> bool:
+        """Execute a GIFT from agent_idx. Returns True iff transfer happened.
+
+        Side effects on success:
+          * 1 unit of the highest-value owned resource moves from giver to receiver.
+          * Affinity bumps (asymmetric) recorded.
+          * Reward credit applied to both slots when ``rewards`` is provided.
+          * ``_ep_gifts_made`` and ``_ep_gift_value_transferred`` updated.
+        """
+        if self._world is None:
+            return False
+        rid = self._gift_pick_resource(agent_idx)
+        if rid is None:
+            return False
+        target_idx = self._gift_find_recipient(agent_idx)
+        if target_idx is None:
+            return False
+        giver = self._agents[agent_idx]
+        receiver = self._agents[target_idx]
+        # Re-validate (defense in depth — masks should already gate this).
+        if not giver.alive or not receiver.alive:
+            return False
+        if getattr(giver.inventory, rid, 0) <= 0:
+            return False
+        # Snapshot pre-transfer quantities for diminishing-returns scaling.
+        receiver_qty_before = int(getattr(receiver.inventory, rid, 0))
+        # Receiver capacity is unbounded by inventory dataclass — match
+        # existing transfer behaviour (steal/withdraw also do not check caps).
+        setattr(giver.inventory, rid, getattr(giver.inventory, rid) - 1)
+        setattr(receiver.inventory, rid, getattr(receiver.inventory, rid) + 1)
+        giver_qty_after = int(getattr(giver.inventory, rid, 0))
+        rcfg = self._world.resources.get(rid)
+        v = float(getattr(rcfg, "value", 1.0)) if rcfg is not None else 1.0
+        # Diminishing-returns factors. Receiver gratitude shrinks as their
+        # stock grows; giver perceived-sacrifice grows as their stock shrinks.
+        receiver_factor = 1.0 / (1.0 + GIFT_DIMINISH_K * receiver_qty_before)
+        giver_factor = 1.0 / (1.0 + GIFT_DIMINISH_K * giver_qty_after)
+        self._record_affinity_event(
+            agent_idx,
+            target_idx,
+            GIFT_AFFINITY_BUMP_GIVER_TO_RECEIVER * giver_factor,
+            GIFT_AFFINITY_BUMP_RECEIVER_TO_GIVER * receiver_factor,
+        )
+        if rewards is not None:
+            # No explicit scalar shaping for either side. The carry-penalty
+            # change (giver +4% str, receiver −4% str) and downstream resource
+            # utility (eat/train/combat) already encode the real consequences.
+            pass
+        self._ep_gifts_made += 1
+        self._ep_gift_value_transferred += v
+        return True
+
+    def _emit_survival_milestones(self, rewards: np.ndarray | None = None) -> None:
+        """Award the age-50 survival bonus to still-living parents.
+
+        Called once per step. Each agent fires its milestone exactly once,
+        guarded by ``Agent._milestone_emitted`` (set the first time the
+        bonus is awarded). Rewards skipped silently when ``rewards is None``
+        (used by non-RL replay paths).
+        """
+        if not self._enable_courtship:
+            return
+        for child in self._agents:
+            if not child.alive or not child.parent_ids:
+                continue
+            # Phase 7.1: only courtship-driven births qualify for the
+            # survival milestone — legacy random-pair offspring should not
+            # leak the bonus and dilute the courtship reward signal.
+            if not getattr(child, "_from_courtship", False):
+                continue
+            if child.age < COURT_SURVIVAL_MILESTONE_AGE:
+                continue
+            if getattr(child, "_milestone_emitted", False):
+                continue
+            child._milestone_emitted = True  # type: ignore[attr-defined]
+            self._ep_survival_milestones += 1
+            if rewards is None:
+                continue
+            for parent_id in child.parent_ids:
+                for j, other in enumerate(self._agents):
+                    if other.alive and other.agent_id == parent_id:
+                        rewards[j] = float(rewards[j]) + COURT_REWARD_SURVIVAL_MILESTONE
 
     def _stash_proximity_reward(self, agent_idx: int) -> float:
         """Per-tick stash proximity bonus — currently disabled (REWARD_STASH_PROXIMITY=0.0).
@@ -1142,7 +1961,65 @@ class MultiAgentEnv(gym.Env):
             min(1.0, self._damage_taken_last_step[agent_idx] / COMBAT_MAX_DAMAGE),
         ], dtype=np.float32)
 
-        return np.concatenate([flat_resources, flat_agents, flat_stashes, stats])
+        obs = np.concatenate([flat_resources, flat_agents, flat_stashes, stats])
+        if self._enable_courtship:
+            sex_bit = 1.0 if getattr(agent, "sex", "M") == "F" else 0.0
+            has_proposal = 1.0 if self._pending_proposals.get(agent_idx) else 0.0
+            obs = np.concatenate([obs, np.array([sex_bit, has_proposal], dtype=np.float32)])
+        if self._enable_trade:
+            obs = np.concatenate([obs, self._build_trade_obs_block(agent_idx)])
+        return obs
+
+    def _build_trade_obs_block(self, agent_idx: int) -> np.ndarray:
+        """Emit the 14-float TRADE observation block for a slot.
+
+        Layout (all in [0, 1] after normalisation):
+          [0]   has_pending_offer (0/1)
+          [1]   inbox_size / 4 (clipped to 1)
+          [2]   best_offer.proposer_affinity, normalised by tanh
+          [3]   best_offer.is_in_range (0/1)
+          [4]   best_offer.proposer_alive (0/1)
+          [5..9]  one-hot offered_resource over OBS_CHANNEL_ORDER (5 dims)
+          [10]  best_offer.offered_qty / OBS_TRADE_QTY_MAX
+          [11..12]  asked_resource encoded as: one_hot top-2 channels packed,
+                    actually: we collapse to a 2-dim signal:
+                    [11] = receiver_has_enough_asked (0/1),
+                    [12] = asked_value normalised (value / 5.0, clipped)
+          [13]  TTL_remaining / TRADE_PROPOSAL_TTL_TICKS
+        """
+        block = np.zeros(OBS_TRADE_EXTRA, dtype=np.float32)
+        offers = self._pending_trade_offers.get(agent_idx)
+        if not offers:
+            return block
+        block[0] = 1.0
+        block[1] = min(1.0, len(offers) / 4.0)
+        best = self._trade_best_pending_offer(agent_idx)
+        if best is None:
+            return block
+        receiver = self._agents[agent_idx]
+        proposer = self._agents[best.proposer_idx]
+        aff = float(self._affinity(agent_idx, best.proposer_idx))
+        block[2] = float(np.tanh(aff))
+        ax, ay = receiver.position
+        px, py = proposer.position
+        block[3] = 1.0 if max(abs(ax - px), abs(ay - py)) <= TRADE_RANGE else 0.0
+        block[4] = 1.0 if proposer.alive else 0.0
+        try:
+            off_ch = OBS_CHANNEL_ORDER.index(best.offered_resource)
+            block[5 + off_ch] = 1.0
+        except ValueError:
+            pass
+        block[10] = min(1.0, best.offered_qty / OBS_TRADE_QTY_MAX)
+        receiver_has = int(getattr(receiver.inventory, best.asked_resource, 0)) >= best.asked_qty
+        block[11] = 1.0 if receiver_has else 0.0
+        if self._world is not None:
+            ask_val = float(getattr(self._world.resources.get(best.asked_resource), "value", 1.0))
+        else:
+            ask_val = 1.0
+        block[12] = float(np.clip(ask_val / 5.0, 0.0, 1.0))
+        ttl_remaining = max(0, TRADE_PROPOSAL_TTL_TICKS - (self._ep_step_count - best.created_step))
+        block[13] = ttl_remaining / max(1, TRADE_PROPOSAL_TTL_TICKS)
+        return block
 
     # ── Reward ───────────────────────────────────────────────────────────────
 
@@ -1936,34 +2813,130 @@ class CombatEnv(MultiAgentEnv):
         return mask
 
     def action_masks_body(self, agent_idx: int | None = None) -> np.ndarray:
-        """v24 joint-action: 16-element body-action mask.
+        """v24 joint-action: body-action mask (Phase 8c.2: 17 slots).
 
-        Derived from ``action_masks(idx)`` by dropping the COLLABORATE slot,
-        re-indexed via ``LEGACY_TO_BODY``. Always non-empty since MOVE_*
-        actions are never masked.
+        First 16 slots derived from ``action_masks(idx)`` by dropping the
+        COLLABORATE slot, re-indexed via ``LEGACY_TO_BODY``. Slot 16 is GIFT
+        (Phase 8c.2: moved from social to body lane). Always non-empty since
+        MOVE_* actions are never masked.
         """
         from murimsim.actions import (
             BODY_TO_LEGACY,
+            BodyAction,
             LEGACY_TO_BODY,
             N_BODY_ACTIONS,
         )
         legacy = self.action_masks(agent_idx)
         body = np.zeros(N_BODY_ACTIONS, dtype=bool)
+        # Map all non-GIFT body slots from the legacy mask.
         for body_idx, legacy_idx in BODY_TO_LEGACY.items():
+            if body_idx == BodyAction.GIFT:
+                continue  # GIFT mask computed separately below
             body[body_idx] = legacy[legacy_idx]
+        # GIFT mask: independent of legacy lane. Eligible iff alive ∧ inv>0
+        # ∧ at least one alive non-self agent within GIFT_RANGE.
+        idx = self._focal_idx if agent_idx is None else agent_idx
+        agent = self._agents[idx]
+        gift_ok = (
+            agent.alive
+            and agent.inventory.total() > 0
+            and self._gift_find_recipient(idx) is not None
+        )
+        body[BodyAction.GIFT] = bool(gift_ok)
         return body
 
     def action_masks_social(self, agent_idx: int | None = None) -> np.ndarray:
-        """v24 joint-action: 2-element social-action mask.
+        """v24 / Phase 7 / Phase 8d: 6-element social-action mask.
 
-        ``[NOOP, COLLABORATE]``. NOOP is always available; COLLABORATE
-        availability mirrors the legacy mask (adjacent agent, not in combat
-        lock, not at a stash interaction).
+        ``[NOOP, COLLABORATE, PROPOSE, ACCEPT, PROPOSE_TRADE, ACCEPT_TRADE]``.
+        NOOP is always available; COLLABORATE availability mirrors the
+        legacy mask. PROPOSE/ACCEPT availability requires courtship to be
+        enabled and an eligible counterparty in range. PROPOSE_TRADE
+        requires inventory + adjacent partner. ACCEPT_TRADE requires a
+        pending offer addressed to this slot whose asked resource is
+        currently in inventory.
+
+        Phase 8c.2: GIFT lives in BodyAction.GIFT, not here.
+        Phase 8d.1: TRADE pair appended; offer content is heuristic.
         """
-        from murimsim.actions import N_SOCIAL_ACTIONS
+        from murimsim.actions import N_SOCIAL_ACTIONS, SocialAction
         legacy = self.action_masks(agent_idx)
         social = np.ones(N_SOCIAL_ACTIONS, dtype=bool)
-        social[1] = bool(legacy[Action.COLLABORATE])
+        social[SocialAction.COLLABORATE] = bool(legacy[Action.COLLABORATE])
+        idx = self._focal_idx if agent_idx is None else agent_idx
+        agent = self._agents[idx]
+        # ── Phase 8d: TRADE mask ────────────────────────────────────────
+        if not self._enable_trade:
+            social[SocialAction.PROPOSE_TRADE] = False
+            social[SocialAction.ACCEPT_TRADE] = False
+            social[SocialAction.REJECT_TRADE] = False
+        else:
+            # PROPOSE_TRADE: alive, has inventory, adjacent partner exists.
+            trade_propose_ok = (
+                agent.alive
+                and agent.inventory.total() > 0
+                and self._trade_find_partner(idx) is not None
+            )
+            social[SocialAction.PROPOSE_TRADE] = bool(trade_propose_ok)
+            # ACCEPT_TRADE: ANY pending offer targeting this slot is
+            # structurally accept-able (in range, proposer alive, receiver
+            # has the asked resource). The TTL gate inside
+            # ``_resolve_trade_accept`` blocks within-tick acceptance.
+            trade_accept_ok = False
+            offers = self._pending_trade_offers.get(idx, []) if agent.alive else []
+            for offer in offers:
+                proposer = self._agents[offer.proposer_idx]
+                if not proposer.alive:
+                    continue
+                ax, ay = agent.position
+                px, py = proposer.position
+                if max(abs(ax - px), abs(ay - py)) > TRADE_RANGE:
+                    continue
+                if int(getattr(agent.inventory, offer.asked_resource, 0)) < offer.asked_qty:
+                    continue
+                trade_accept_ok = True
+                break
+            social[SocialAction.ACCEPT_TRADE] = bool(trade_accept_ok)
+            # REJECT_TRADE: any pending offer addressed to this slot is
+            # rejectable (no feasibility check — refusal works regardless).
+            social[SocialAction.REJECT_TRADE] = bool(agent.alive and offers)
+        # ── Phase 7: COURTSHIP mask ─────────────────────────────────────
+        if not self._enable_courtship:
+            social[SocialAction.PROPOSE] = False
+            social[SocialAction.ACCEPT] = False
+            return social
+        if not agent.alive or agent.mating_cooldown > 0:
+            social[SocialAction.PROPOSE] = False
+            social[SocialAction.ACCEPT] = False
+            return social
+        # PROPOSE eligible if at least one valid target exists in range.
+        social[SocialAction.PROPOSE] = self._find_court_target(idx) is not None
+        # ACCEPT eligible only if a valid pending proposal targets this slot.
+        # Note: the mask permits ANY pending entry — the same-tick ``age >= 1``
+        # rule is enforced inside ``_courtship_accept``. Permitting the action
+        # at mask time is required because the mask is computed at the end of
+        # the registering tick, before ``_ep_step_count`` advances for the
+        # next step where validation will see ``age == 1`` and succeed.
+        if not self._pending_proposals.get(idx):
+            social[SocialAction.ACCEPT] = False
+        else:
+            # Multi-offer inbox: ACCEPT mask is on if ANY pending proposal
+            # against this slot is structurally valid. The actual best-pick
+            # selection happens in ``_courtship_accept``.
+            ok = False
+            for (proposer_idx, _created_step) in self._pending_proposals[idx]:
+                proposer = self._agents[proposer_idx]
+                ax, ay = agent.position
+                px, py = proposer.position
+                if (
+                    proposer.alive
+                    and proposer.mating_cooldown == 0
+                    and proposer.sex != agent.sex
+                    and max(abs(ax - px), abs(ay - py)) <= COURT_PROPOSAL_RANGE
+                ):
+                    ok = True
+                    break
+            social[SocialAction.ACCEPT] = ok
         return social
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
@@ -2847,10 +3820,25 @@ class CombatEnv(MultiAgentEnv):
                 allies.append(ally_idx)
         return allies
 
-    def _try_collaborate(self, focal_idx: int) -> bool:
+    def _try_collaborate(
+        self,
+        focal_idx: int,
+        consent_set: set[int] | None = None,
+    ) -> bool:
         """Attempt to form a group with the nearest adjacent agent.
 
-        Succeeds if the neighbour's sociability meets the collaboration threshold.
+        Two acceptance modes:
+
+        * ``consent_set is None`` (legacy single-action path): succeeds if the
+          neighbour's ``sociability`` exceeds ``HEURISTIC_COLLAB_THRESHOLD``.
+          Preserved for the legacy ``CombatEnv.step`` path and direct unit
+          tests that exercise this method without a joint scheduler.
+        * ``consent_set`` provided (Phase 8c.3 bilateral path): succeeds iff
+          the neighbour also picked ``SocialAction.COLLABORATE`` this tick
+          (i.e. ``neighbour_idx in consent_set``). The hardcoded sociability
+          gate is bypassed — consent is a learned policy decision rather
+          than a fixed trait threshold.
+
         Returns True if a new group was formed.
         """
         focal = self._agents[focal_idx]
@@ -2858,14 +3846,15 @@ class CombatEnv(MultiAgentEnv):
         if neighbour is None:
             return False
         neighbour_idx = self._agents.index(neighbour)
-        # Already in the same group — collaboration already established
         if (self._get_group(focal_idx) is not None
                 and self._get_group(focal_idx) == self._get_group(neighbour_idx)):
             return False
-        # Form a group only if the neighbour is also social enough
-        if neighbour.sociability >= HEURISTIC_COLLAB_THRESHOLD:
+        if consent_set is not None:
+            accepts = neighbour_idx in consent_set
+        else:
+            accepts = neighbour.sociability >= HEURISTIC_COLLAB_THRESHOLD
+        if accepts:
             self._form_group(focal_idx, neighbour_idx)
-            # v19c: voluntary group formation creates a symmetric bond.
             self._record_affinity_event(
                 actor_idx=focal_idx, other_idx=neighbour_idx,
                 actor_to_other=AFFINITY_COLLAB_BOTH,

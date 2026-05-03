@@ -47,6 +47,7 @@ class Stash:
     qi: int = 0
     materials: int = 0
     poison: int = 0
+    flame: int = 0
     # Extra agent_ids allowed to withdraw from this stash alongside the owner.
     # Used for shared loot drops (e.g. boss-kill rewards split across attackers).
     # Empty list (default) means owner-only access.
@@ -56,7 +57,7 @@ class Stash:
 
     def total(self) -> int:
         """Return the total number of items in this stash."""
-        return self.food + self.qi + self.materials + self.poison
+        return self.food + self.qi + self.materials + self.poison + self.flame
 
     def is_accessible_to(self, agent_id: str, current_step: int | None = None) -> bool:
         """True if ``agent_id`` is the owner, a registered participant, or the
@@ -79,6 +80,7 @@ class Stash:
             "qi": self.qi,
             "materials": self.materials,
             "poison": self.poison,
+            "flame": self.flame,
         }
 
     def to_replay_dict(self) -> dict:
@@ -91,6 +93,7 @@ class Stash:
             "qi": self.qi,
             "materials": self.materials,
             "poison": self.poison,
+            "flame": self.flame,
             "participants": list(self.participants),
             "claim_unlock_step": self.claim_unlock_step,
         }
@@ -160,12 +163,14 @@ class StashRegistry:
             qi=agent.inventory.qi,
             materials=agent.inventory.materials,
             poison=agent.inventory.poison,
+            flame=agent.inventory.flame,
         )
 
         agent.inventory.food = 0
         agent.inventory.qi = 0
         agent.inventory.materials = 0
         agent.inventory.poison = 0
+        agent.inventory.flame = 0
 
         self._stashes[stash_id] = stash
         logger.debug("Agent %s deposited stash %s at %s", owner_id, stash_id, stash.position)
@@ -194,6 +199,7 @@ class StashRegistry:
             agent.inventory.qi += stash.qi
             agent.inventory.materials += stash.materials
             agent.inventory.poison += stash.poison
+            agent.inventory.flame += stash.flame
             del self._stashes[stash.stash_id]
             logger.debug("Agent %s withdrew stash %s", agent.agent_id, stash.stash_id)
 
@@ -257,6 +263,7 @@ class StashRegistry:
         agent.inventory.qi += stash.qi
         agent.inventory.materials += stash.materials
         agent.inventory.poison += stash.poison
+        agent.inventory.flame += stash.flame
         del self._stashes[stash.stash_id]
         logger.debug("Agent %s stole stash %s from %s", agent.agent_id, stash.stash_id, stash.owner_id)
         return stash

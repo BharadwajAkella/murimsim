@@ -27,6 +27,7 @@ resources:
       hunger_restore: 0.3
     traversal_effects: []
 
+    value: 1.0
   - id: qi
     display_name: "Qi Crystal"
     regen_ticks: 400
@@ -37,6 +38,7 @@ resources:
       qi_restore: 0.5
     traversal_effects: []
 
+    value: 2.0
   - id: materials
     display_name: "Materials"
     regen_ticks: 300
@@ -46,6 +48,7 @@ resources:
     effect_params: {}
     traversal_effects: []
 
+    value: 1.5
   - id: poison
     display_name: "Poison"
     regen_ticks: 150
@@ -56,6 +59,7 @@ resources:
       potency: 0.4
     traversal_effects: []
 
+    value: 2.5
   - id: mountain
     display_name: "Mountain Pass"
     regen_ticks: 0
@@ -73,6 +77,26 @@ resources:
         delta: -0.04
         resistance_stat: qi_drain
 
+    value: 1.0
+  - id: flame
+    display_name: "Flame Crystal"
+    regen_ticks: 250
+    gatherable: true
+    spawn_density: 0.0
+    spawn_clusters: true
+    cluster_count: 1
+    cluster_radius: 2
+    cluster_fill_prob: 0.5
+    effect: negative
+    effect_params:
+      potency: 0.6
+    traversal_effects:
+      - trigger: on_enter
+        attribute: health
+        delta: -0.08
+        resistance_stat: flame
+
+    value: 3.0
 agent:
   poison_resistance_min: 0.05
   poison_resistance_max: 0.30

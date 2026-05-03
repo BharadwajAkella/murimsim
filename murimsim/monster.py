@@ -1,7 +1,7 @@
 """Monsters — non-agent hostile entities that share the world with agents.
 
 A `Monster` lives on the world grid alongside agents but is NOT an `Agent`:
-it has no hunger, cultivation, sect, reproduction, or learning. It runs a
+it has no hunger, cultivation, reproduction, or learning. It runs a
 hand-coded `step()` heuristic and exists primarily as an environmental
 pressure for agents to react to (e.g. forming groups around a common enemy).
 

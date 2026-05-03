@@ -114,21 +114,44 @@ class BodyAction(IntEnum):
     TRAIN = 13
     ATTACK_QI = 14
     ATTACK_BURST = 15
+    GIFT = 16  # Phase 8c.2: physical resource transfer — moved from social to body lane
 
 
 class SocialAction(IntEnum):
-    """2 social signals that fire alongside the body action each tick."""
+    """4 social signals that fire alongside the body action each tick.
+
+    Phase 7 added ``PROPOSE`` and ``ACCEPT`` for the courtship system. The two
+    new values are appended (NOT inserted) so existing checkpoints whose social
+    head was Discrete(2) can be warm-started by zero-padding the policy/value
+    head — see ``trainer-zero-init-expand`` ticket.
+
+    Phase 8c.2: GIFT was briefly here (Phase 8c) but moved to the body lane
+    because it's a physical action (transfers inventory) — competing with
+    pure social signals like COLLABORATE was a category error.
+    """
 
     NOOP = 0
     COLLABORATE = 1
+    PROPOSE = 2  # Phase 7: signal courtship intent toward an adjacent opposite-sex agent
+    ACCEPT = 3   # Phase 7: accept (one of) the pending courtship proposal(s) against this agent
+    PROPOSE_TRADE = 4  # Phase 8d: offer a 1-for-1 inventory swap to nearest adjacent agent
+    ACCEPT_TRADE = 5   # Phase 8d: accept the best pending trade offer addressed to this agent
+    REJECT_TRADE = 6   # Phase 8d: explicitly clear all pending trade offers addressed to this agent
 
 
-N_BODY_ACTIONS: int = len(BodyAction)        # 16
-N_SOCIAL_ACTIONS: int = len(SocialAction)    # 2
+N_BODY_ACTIONS: int = len(BodyAction)        # 17 (Phase 8c.2: was 16 — added GIFT)
+N_SOCIAL_ACTIONS: int = len(SocialAction)    # 7 (Phase 8d: NOOP/COLLAB/PROPOSE/ACCEPT/PROPOSE_TRADE/ACCEPT_TRADE/REJECT_TRADE)
+N_BODY_ACTIONS_PRE_PHASE8C2: int = 16        # pre-GIFT body width — used by warm-start padding
+N_SOCIAL_ACTIONS_PRE_PHASE7: int = 2         # legacy social head width — used by warm-start padding
+N_SOCIAL_ACTIONS_PRE_PHASE8C: int = 4        # post-Phase 7 / pre-Phase 8c width — used by warm-start padding
+N_SOCIAL_ACTIONS_PRE_PHASE8D: int = 4        # post-8c.2 / pre-8d width (GIFT moved out, TRADE not yet in)
+# Phase 8c.2 social width happens to equal pre-8c width (both 4) — GIFT round-tripped.
 
-# All 16 BodyAction values map 1-to-1 with the legacy Action enum minus
-# COLLABORATE. We build the translation tables explicitly so the mapping is
-# auditable rather than relying on enum order.
+# Body actions map 1-to-1 with the legacy Action enum minus COLLABORATE.
+# GIFT (BodyAction.GIFT) has no legacy Action equivalent: the legacy single-
+# action step path doesn't dispatch it. In joint mode, GIFT is intercepted
+# from body_actions and routed to ``_resolve_gift`` after the body step;
+# the slot's body translation falls back to REST so step_all is a safe no-op.
 _BODY_TO_LEGACY_PAIRS: tuple[tuple[BodyAction, Action], ...] = (
     (BodyAction.MOVE_N, Action.MOVE_N),
     (BodyAction.MOVE_S, Action.MOVE_S),
@@ -146,10 +169,14 @@ _BODY_TO_LEGACY_PAIRS: tuple[tuple[BodyAction, Action], ...] = (
     (BodyAction.TRAIN, Action.TRAIN),
     (BodyAction.ATTACK_QI, Action.ATTACK_QI),
     (BodyAction.ATTACK_BURST, Action.ATTACK_BURST),
+    (BodyAction.GIFT, Action.REST),   # GIFT body slot is a no-op in legacy step; joint path dispatches
 )
 
 BODY_TO_LEGACY: dict[int, int] = {b.value: a.value for b, a in _BODY_TO_LEGACY_PAIRS}
-LEGACY_TO_BODY: dict[int, int] = {a.value: b.value for b, a in _BODY_TO_LEGACY_PAIRS}
+# LEGACY_TO_BODY only round-trips the 16 legacy actions; GIFT has no inverse.
+LEGACY_TO_BODY: dict[int, int] = {
+    a.value: b.value for b, a in _BODY_TO_LEGACY_PAIRS if b is not BodyAction.GIFT
+}
 
 assert len(BODY_TO_LEGACY) == N_BODY_ACTIONS
 assert Action.COLLABORATE.value not in LEGACY_TO_BODY, (

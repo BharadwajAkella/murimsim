@@ -222,23 +222,99 @@ class IPPOEnv(CombatEnv):
         # Resolve social actions AFTER the body step. Iterate in the same
         # focal-first / ascending-non-focal order so any ordering effects on
         # group formation match how body actions resolve.
+        # Phase 7: PROPOSE actions are processed in pass 1 (so their entries
+        # exist before ACCEPTs are checked). ACCEPT can only succeed against
+        # a proposal made on a PREVIOUS tick (TTL gate enforces this), so
+        # within-tick ordering is safe — same-tick PROPOSE+ACCEPT cannot pair.
         resolution_order = info["resolution_order"]
+        # Phase 8d: expire stale trade offers BEFORE the social loop so the
+        # ACCEPT_TRADE mask check sees only live offers (and so unbounded
+        # accumulation is prevented across no-accept ticks).
+        self._decay_trade_proposals()
+        # Phase 8c.3: bilateral COLLABORATE. Build the consent set up-front
+        # (every alive slot whose social action this tick is COLLAB and
+        # whose mask permits it). _try_collaborate then accepts only if the
+        # neighbour is in this set — group formation becomes a learned
+        # mutual decision rather than a one-sided heuristic gate.
+        collab_consent: set[int] = set()
         for slot in resolution_order:
             if int(social_actions[slot]) != int(SocialAction.COLLABORATE):
                 continue
-            # Skip if the slot was dead at step start (matches body semantics).
             if not info["active_mask"][slot]:
                 continue
-            agent = self._agents[slot]
-            if not agent.alive:
+            if not self._agents[slot].alive:
                 continue
-            # Re-check mask post-body — a body action may have moved the agent
-            # away from neighbours, invalidating COLLABORATE eligibility.
-            if not bool(self.action_masks_social(slot)[1]):
+            if not bool(self.action_masks_social(slot)[int(SocialAction.COLLABORATE)]):
                 continue
-            formed = self._try_collaborate(slot)
-            if formed and self._enable_formation_bonus:
-                rewards[slot] += REWARD_GROUP_FORMATION
+            collab_consent.add(slot)
+        for slot in resolution_order:
+            sa = int(social_actions[slot])
+            if sa == int(SocialAction.COLLABORATE):
+                if slot not in collab_consent:
+                    continue
+                formed = self._try_collaborate(slot, consent_set=collab_consent)
+                if formed and self._enable_formation_bonus:
+                    rewards[slot] += REWARD_GROUP_FORMATION
+            elif sa == int(SocialAction.PROPOSE):
+                if not info["active_mask"][slot]:
+                    continue
+                if not self._agents[slot].alive:
+                    continue
+                if not bool(self.action_masks_social(slot)[int(SocialAction.PROPOSE)]):
+                    continue
+                self._courtship_propose(slot)
+            elif sa == int(SocialAction.ACCEPT):
+                if not info["active_mask"][slot]:
+                    continue
+                if not self._agents[slot].alive:
+                    continue
+                if not bool(self.action_masks_social(slot)[int(SocialAction.ACCEPT)]):
+                    continue
+                self._courtship_accept(slot, rewards=rewards)
+            elif sa == int(SocialAction.PROPOSE_TRADE):
+                if not info["active_mask"][slot]:
+                    continue
+                if not self._agents[slot].alive:
+                    continue
+                if not bool(self.action_masks_social(slot)[int(SocialAction.PROPOSE_TRADE)]):
+                    continue
+                self._propose_trade(slot)
+            elif sa == int(SocialAction.ACCEPT_TRADE):
+                if not info["active_mask"][slot]:
+                    continue
+                if not self._agents[slot].alive:
+                    continue
+                if not bool(self.action_masks_social(slot)[int(SocialAction.ACCEPT_TRADE)]):
+                    continue
+                self._resolve_trade_accept(slot)
+            elif sa == int(SocialAction.REJECT_TRADE):
+                if not info["active_mask"][slot]:
+                    continue
+                if not self._agents[slot].alive:
+                    continue
+                if not bool(self.action_masks_social(slot)[int(SocialAction.REJECT_TRADE)]):
+                    continue
+                self._resolve_trade_reject(slot)
+
+        # Phase 8c.2: GIFT is now a body action. Dispatch it AFTER the body
+        # step (the body slot was translated to REST so step_all did nothing
+        # combat-wise for these slots). Keeping the dispatch in this method
+        # rather than inside step_all preserves the body-step invariants and
+        # keeps reward credit centralised.
+        for slot in resolution_order:
+            ba = int(body_actions[slot])
+            if ba != int(BodyAction.GIFT):
+                continue
+            if not info["active_mask"][slot]:
+                continue
+            if not self._agents[slot].alive:
+                continue
+            if not bool(self.action_masks_body(slot)[int(BodyAction.GIFT)]):
+                continue
+            self._resolve_gift(slot, rewards=rewards)
+
+        # Phase 7: emit any age-50 survival-milestone bonuses (idempotent).
+        self._emit_survival_milestones(rewards=rewards)
 
         # Refresh per-agent info that depends on social outcomes.
         info["per_agent_reward"] = rewards.astype(np.float32, copy=False)

@@ -21,3 +21,23 @@ resource_overrides:
     spawn_corners: 2
     corner_radius: 8
     corner_density: 0.60
+    value: 1.0
+  - id: flame
+    display_name: "Flame Crystal"
+    regen_ticks: 250
+    gatherable: true
+    spawn_density: 0.0
+    spawn_clusters: true
+    cluster_count: 1
+    cluster_radius: 2
+    cluster_fill_prob: 0.5
+    effect: negative
+    effect_params:
+      potency: 0.6
+    traversal_effects:
+      - trigger: on_enter
+        attribute: health
+        delta: -0.08
+        resistance_stat: flame
+
+    value: 3.0

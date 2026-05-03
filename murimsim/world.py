@@ -40,6 +40,9 @@ class ResourceConfig:
     spawn_corners: int = 0           # number of corners (1-4) to place dense patches
     corner_radius: int = 5           # Chebyshev radius of each corner patch
     corner_density: float = 0.5      # fill probability within corner patch
+    # Phase 8c: economic value used by GIFT shaping and any future trade head.
+    # 1.0 = baseline (food). Heavier/rarer resources should be > 1.0.
+    value: float = 1.0
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ResourceConfig:
@@ -61,6 +64,7 @@ class ResourceConfig:
             spawn_corners=int(d.get("spawn_corners", 0)),
             corner_radius=int(d.get("corner_radius", 5)),
             corner_density=float(d.get("corner_density", 0.5)),
+            value=float(d.get("value", 1.0)),
         )
 
 

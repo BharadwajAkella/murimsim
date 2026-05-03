@@ -30,7 +30,6 @@ resources:
       hunger_restore: 0.3
     traversal_effects: []
 
-    value: 1.0
   - id: qi
     display_name: "Qi Crystal"
     regen_ticks: 400
@@ -41,7 +40,6 @@ resources:
       qi_restore: 0.5
     traversal_effects: []
 
-    value: 2.0
   - id: materials
     display_name: "Materials"
     regen_ticks: 300
@@ -51,7 +49,6 @@ resources:
     effect_params: {}
     traversal_effects: []
 
-    value: 1.5
   - id: poison
     display_name: "Poison"
     regen_ticks: 150
@@ -64,13 +61,8 @@ resources:
     cluster_fill_prob: 0.55
     effect_params:
       potency: 0.4
-    traversal_effects:
-      - trigger: on_enter
-        attribute: health
-        delta: -0.05
-        resistance_stat: poison
+    traversal_effects: []
 
-    value: 2.5
   - id: mountain
     display_name: "Mountain Pass"
     regen_ticks: 0
@@ -88,26 +80,23 @@ resources:
         delta: -0.04
         resistance_stat: qi_drain
 
-    value: 1.0
   - id: flame
-    display_name: "Flame Crystal"
-    regen_ticks: 250
-    gatherable: true
+    display_name: "Flame Zone"
+    regen_ticks: 0
+    gatherable: false
     spawn_density: 0.0
     spawn_clusters: true
     cluster_count: 2
     cluster_radius: 3
     cluster_fill_prob: 0.65
     effect: negative
-    effect_params:
-      potency: 0.6
+    effect_params: {}
     traversal_effects:
       - trigger: on_enter
         attribute: health
         delta: -0.08
         resistance_stat: flame
 
-    value: 3.0
 # Agent trait ranges — randomised at spawn time.
 agent:
   poison_resistance_min: 0.05
@@ -135,7 +124,7 @@ agent:
   #   * Obs grows by 2 bits at the tail (sex, has_pending_proposal_received).
   #   * Social action head grows from 2 → 4 (PROPOSE, ACCEPT added).
   # Disabled by default to preserve byte-identical v25 replays.
-  enable_courtship: false
+  enable_courtship: true
 
 # Domain randomisation — disabled here; enabled via training.yaml during RL training.
 domain_randomization:

@@ -17,8 +17,7 @@ from murimsim.replay import ReplayLogger
 # ---------------------------------------------------------------------------
 
 _AGENT = {
-    "id": "iron_fang_00",
-    "sect": "iron_fang",
+    "id": "agent_00",
     "pos": [5, 10],
     "health": 0.9,
     "hunger": 0.2,
@@ -36,7 +35,7 @@ _RESOURCES = {
 }
 
 _EVENTS = [
-    {"type": "combat", "attacker": "iron_fang_00", "defender": "jade_lotus_01", "damage": 0.12},
+    {"type": "combat", "attacker": "agent_00", "defender": "agent_01", "damage": 0.12},
 ]
 
 
@@ -83,7 +82,7 @@ def test_replay_format_valid(tmp_path: Path) -> None:
 def test_replay_agent_fields(tmp_path: Path) -> None:
     """Agent dicts in the log include all required fields, incl. poison_resistance."""
     required_agent_keys = {
-        "id", "sect", "pos", "health", "hunger",
+        "id", "pos", "health", "hunger",
         "poison_resistance", "action", "action_detail", "alive",
     }
 

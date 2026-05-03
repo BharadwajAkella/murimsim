@@ -75,6 +75,22 @@ class EvalMetrics:
     max_active_groups_seen: int = 0
     collab_picks: int = 0  # joint-action only; 0 for legacy single-head ckpts
     collab_success_rate: float = 0.0  # groups_formed_cum / max(collab_picks, 1)
+    # Phase 8c: GIFT activity. ``gift_picks`` counts every social-head GIFT
+    # selection (whether or not it succeeded — masking already filters most
+    # invalid attempts). ``gifts_executed_cum`` and ``gift_value_cum`` come
+    # from env._ep_gifts_made / env._ep_gift_value_transferred deltas.
+    gift_picks: int = 0
+    gifts_executed_cum: int = 0
+    gift_value_cum: float = 0.0
+    # Phase 8d.1: TRADE activity. Picks count the social-head selecting
+    # PROPOSE_TRADE / ACCEPT_TRADE / REJECT_TRADE. Executed/rejected and
+    # trade_value_cum read from env._ep_trades_* deltas.
+    trade_propose_picks: int = 0
+    trade_accept_picks: int = 0
+    trade_reject_picks: int = 0
+    trades_executed_cum: int = 0
+    trades_rejected_cum: int = 0
+    trade_value_cum: float = 0.0
     # Settlement metrics aggregated across every focal-death info bundle
     # emitted during the rollout. These are means over completed episodes;
     # n_settlement_episodes records how many samples contributed.
@@ -199,7 +215,18 @@ def load_joint_policy(
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     args = ckpt.get("args", {})
     is_recurrent = bool(ckpt.get("recurrent", False)) or "hidden_dim" in ckpt
-    obs_dim = OBS_TOTAL_SIZE
+    # Detect obs_dim from the checkpoint's first-layer weight rather than
+    # assuming the env's current default. Phase 7+ courtship adds 2 obs bits;
+    # using the wrong dim breaks state_dict loading.
+    sd = ckpt["policy"]
+    in_layer_key = (
+        "pre_lstm.0.weight" if is_recurrent else "trunk.0.weight"
+    )
+    obs_dim = (
+        int(sd[in_layer_key].shape[1])
+        if in_layer_key in sd
+        else OBS_TOTAL_SIZE
+    )
     if is_recurrent:
         hidden_dim = ckpt.get("hidden_dim", args.get("hidden_dim", 128))
         pre_lstm_dim = args.get("pre_lstm_dim", hidden_dim)
@@ -301,6 +328,10 @@ def eval_checkpoint(
     n_actions = N_ACTIONS_PHASE6_QI
     B = n_envs * n_agents
 
+    # Phase 7+: courtship enables 2 extra obs bits → obs_dim=316. Detect from
+    # the constructed env's observation_space rather than the global default.
+    obs_dim = int(envs[0].observation_space.shape[0])
+
     if is_recurrent:
         carried_h, carried_c = policy.initial_hidden(B, device=device)
         pending_life_reset = np.ones((n_envs, n_agents), dtype=bool)
@@ -320,6 +351,21 @@ def eval_checkpoint(
     groups_formed_cum = 0
     help_events_cum = 0
     collab_picks_cum = 0
+    gift_picks_cum = 0
+    gifts_executed_cum = 0
+    gift_value_cum = 0.0
+    # Phase 8d.1: TRADE counters.
+    trade_propose_picks_cum = 0
+    trade_accept_picks_cum = 0
+    trade_reject_picks_cum = 0
+    trades_executed_cum = 0
+    trades_rejected_cum = 0
+    trade_value_cum = 0.0
+    prev_gifts_made = [int(env._ep_gifts_made) for env in envs]
+    prev_gift_value = [float(env._ep_gift_value_transferred) for env in envs]
+    prev_trades_acc = [int(getattr(env, "_ep_trades_accepted", 0)) for env in envs]
+    prev_trades_rej = [int(getattr(env, "_ep_trades_rejected", 0)) for env in envs]
+    prev_trade_value = [float(getattr(env, "_ep_trade_value_transferred", 0.0)) for env in envs]
     active_groups_seen: list[int] = []
     max_active_groups = 0
     prev_groups_formed = [int(env._ep_groups_formed) for env in envs]
@@ -362,6 +408,12 @@ def eval_checkpoint(
                 ba_np = ba.cpu().numpy().reshape(n_envs, n_agents)
                 sa_np = sa.cpu().numpy().reshape(n_envs, n_agents)
                 collab_picks_cum += int((sa_np == 1).sum())
+                # Phase 8c.2: GIFT moved to body lane (BodyAction.GIFT == 16).
+                gift_picks_cum += int((ba_np == 16).sum())
+                # Phase 8d.1: TRADE picks (social-head slots 4/5/6).
+                trade_propose_picks_cum += int((sa_np == 4).sum())
+                trade_accept_picks_cum += int((sa_np == 5).sum())
+                trade_reject_picks_cum += int((sa_np == 6).sum())
             else:
                 mask_t = torch.as_tensor(action_masks, dtype=torch.bool, device=device).reshape(-1, n_actions)
                 if is_recurrent:
@@ -389,6 +441,32 @@ def eval_checkpoint(
                 groups_formed_cum += d_groups
             if d_helps > 0:
                 help_events_cum += d_helps
+            cur_gifts_made = int(env._ep_gifts_made)
+            cur_gift_value = float(env._ep_gift_value_transferred)
+            d_gifts = cur_gifts_made - prev_gifts_made[e_i]
+            d_gift_v = cur_gift_value - prev_gift_value[e_i]
+            if d_gifts > 0:
+                gifts_executed_cum += d_gifts
+            if d_gift_v > 0:
+                gift_value_cum += d_gift_v
+            prev_gifts_made[e_i] = cur_gifts_made
+            prev_gift_value[e_i] = cur_gift_value
+            # Phase 8d.1: TRADE deltas.
+            cur_t_acc = int(getattr(env, "_ep_trades_accepted", 0))
+            cur_t_rej = int(getattr(env, "_ep_trades_rejected", 0))
+            cur_t_val = float(getattr(env, "_ep_trade_value_transferred", 0.0))
+            d_t_acc = cur_t_acc - prev_trades_acc[e_i]
+            d_t_rej = cur_t_rej - prev_trades_rej[e_i]
+            d_t_val = cur_t_val - prev_trade_value[e_i]
+            if d_t_acc > 0:
+                trades_executed_cum += d_t_acc
+            if d_t_rej > 0:
+                trades_rejected_cum += d_t_rej
+            if d_t_val > 0:
+                trade_value_cum += d_t_val
+            prev_trades_acc[e_i] = cur_t_acc
+            prev_trades_rej[e_i] = cur_t_rej
+            prev_trade_value[e_i] = cur_t_val
             prev_groups_formed[e_i] = cur_groups_formed
             prev_helps[e_i] = cur_helps
             n_groups_now = sum(1 for g in env._groups if len(g) >= 2)
@@ -444,6 +522,11 @@ def eval_checkpoint(
                 prev_helps[e_i] = sum(
                     len(d) for d in env._help_received.values()
                 )
+                prev_gifts_made[e_i] = int(env._ep_gifts_made)
+                prev_gift_value[e_i] = float(env._ep_gift_value_transferred)
+                prev_trades_acc[e_i] = int(getattr(env, "_ep_trades_accepted", 0))
+                prev_trades_rej[e_i] = int(getattr(env, "_ep_trades_rejected", 0))
+                prev_trade_value[e_i] = float(getattr(env, "_ep_trade_value_transferred", 0.0))
 
         if is_recurrent:
             pending_life_reset = next_pending
@@ -481,6 +564,15 @@ def eval_checkpoint(
         max_active_groups_seen=max_active_groups,
         collab_picks=collab_picks_cum,
         collab_success_rate=float(success_rate),
+        gift_picks=gift_picks_cum,
+        gifts_executed_cum=gifts_executed_cum,
+        gift_value_cum=float(gift_value_cum),
+        trade_propose_picks=trade_propose_picks_cum,
+        trade_accept_picks=trade_accept_picks_cum,
+        trade_reject_picks=trade_reject_picks_cum,
+        trades_executed_cum=trades_executed_cum,
+        trades_rejected_cum=trades_rejected_cum,
+        trade_value_cum=float(trade_value_cum),
         n_settlement_episodes=n_settlement,
         mean_stash_fill_rate=_mean_or_zero(settlement_samples["ep_stash_fill_rate"]),
         mean_stash_withdraw_rate=_mean_or_zero(settlement_samples["ep_stash_withdraw_rate"]),

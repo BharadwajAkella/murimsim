@@ -223,7 +223,6 @@ lstm_v18:
 
 # lstm_v19: emergent allegiance via pairwise affinity matrix
 #   Key changes from v18:
-#   - Sect identity removed entirely (no more sect_id, no sect-region spawn).
 #   - Pairwise affinity matrix: directional, exponentially-decaying scalar per
 #     ordered (i, j) agent pair, updated on share/attack/steal/flank events.
 #     Asymmetric magnitudes — victim builds more hostility than attacker, etc.
@@ -262,7 +261,6 @@ lstm_v19:
 
 # lstm_v19b: v19 + anonymous spawn-clustering (commit 7a4d5b7)
 #   3 clusters, radius 4, centres resampled per reset; no identity tags.
-#   Restores collab opportunities lost when sect-region spawn was removed.
 #   Same hyperparams as v19; clean from-scratch training (obs unchanged: 289).
 lstm_v19b:
   total_timesteps: 1_500_000
@@ -347,3 +345,34 @@ lstm_v14:
   clip_range: 0.15
   clip_range_final: 0.05
   ent_coef: 0.02
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ippo_v26 — Phase 7 courtship & hereditary propagation.
+#
+# Warm-start path: v25b_rec → v26
+#   1. Train v25b_rec to convergence (ippo_v25b_rec/...).
+#   2. Run scripts/expand_checkpoint_v25_to_v26.py to zero-pad
+#      pre_lstm.0.weight (obs 289 → 291) and social_head (out 2 → 4).
+#   3. Toggle config/default.yaml ``agent.enable_courtship: true``.
+#   4. Train v26 with the expanded checkpoint as warm-start.
+#
+# Architectural deltas relative to v25:
+#   * obs_dim:        289 → 291 (sex bit + pending-proposal bit)
+#   * social actions: 2   → 4   (NOOP, COLLABORATE, PROPOSE, ACCEPT)
+#
+# Reward shaping additions (constants in murimsim.rl.multi_env):
+#   * COURT_REWARD_BIRTH               = +1.0 to both parents on success.
+#   * COURT_REWARD_SURVIVAL_MILESTONE  = +2.0 to both parents at child age 50.
+#   * COURT_HUNGER_COST                = +0.2 hunger to both parents on success.
+#   * COURT_AFFINITY_BUMP              = +0.3 mutual affinity on success.
+#
+# Recommended hyperparameters (CLI args for train_ippo_joint_recurrent.py):
+ippo_v26:
+  total_timesteps: 2_000_000
+  checkpoint_interval: 20
+  hidden_dim: 128
+  pre_lstm_dim: 128
+  learning_rate: 0.0001
+  ent_coef: 0.01
+  warm_start: checkpoints/ippo_v26_courtship_init/ippo_joint_recurrent_iter_000000.pt

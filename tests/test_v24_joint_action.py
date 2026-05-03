@@ -52,15 +52,24 @@ def _load_cfg() -> dict:
 # ---------------------------------------------------------------------------
 
 def test_body_social_enum_sizes():
-    assert N_BODY_ACTIONS == 16
-    assert N_SOCIAL_ACTIONS == 2
+    assert N_BODY_ACTIONS == 17  # Phase 8c.2: was 16 — added GIFT
+    assert N_SOCIAL_ACTIONS == 7  # Phase 8d.1: PROPOSE_TRADE/ACCEPT_TRADE/REJECT_TRADE
     assert int(SocialAction.NOOP) == 0
     assert int(SocialAction.COLLABORATE) == 1
+    assert int(SocialAction.PROPOSE) == 2
+    assert int(SocialAction.ACCEPT) == 3
 
 
 def test_lookup_tables_round_trip():
+    from murimsim.actions import BodyAction
     assert len(BODY_TO_LEGACY) == N_BODY_ACTIONS
     for body_idx, legacy_idx in BODY_TO_LEGACY.items():
+        if body_idx == int(BodyAction.GIFT):
+            # GIFT has no legacy equivalent — body→legacy maps to REST as a
+            # safe no-op for the legacy step path. The reverse mapping is
+            # NOT injective for REST: LEGACY_TO_BODY[REST] = BodyAction.REST.
+            assert legacy_idx == int(Action.REST)
+            continue
         assert LEGACY_TO_BODY[legacy_idx] == body_idx
     # COLLABORATE must NOT exist in body lane.
     assert Action.COLLABORATE.value not in LEGACY_TO_BODY
@@ -77,12 +86,17 @@ def _make_env(seed=0):
 
 
 def test_action_masks_body_drops_collaborate():
+    from murimsim.actions import BodyAction
     env = _make_env()
     for i in range(env._n_agents):
         legacy = env.action_masks(i)
         body = env.action_masks_body(i)
         assert body.shape == (N_BODY_ACTIONS,)
         for body_idx, legacy_idx in BODY_TO_LEGACY.items():
+            if body_idx == int(BodyAction.GIFT):
+                # GIFT body slot has independent eligibility (inventory + neighbour);
+                # it does NOT mirror the legacy REST mask.
+                continue
             assert bool(body[body_idx]) == bool(legacy[legacy_idx])
 
 
@@ -470,3 +484,68 @@ def test_train_ippo_joint_recurrent_smoke(tmp_path):
         cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=240,
     )
     assert out2.returncode == 0, f"eval failed:\n{out2.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 8c.3 — bilateral COLLABORATE
+# ---------------------------------------------------------------------------
+
+def _place_two_adjacent(env, low_socia: bool = False) -> None:
+    """Place agents 0 and 1 on adjacent cells; optionally make agent 1 unsocial."""
+    a, b = env._agents[0], env._agents[1]
+    a.position = (5, 5)
+    b.position = (5, 6)
+    a.alive = True
+    b.alive = True
+    if low_socia:
+        b.sociability = 0.0
+    else:
+        b.sociability = 0.0  # Phase 8c.3: trait should NOT matter in joint path
+    a.sociability = 0.0
+
+
+def test_bilateral_collab_succeeds_when_both_pick_collaborate():
+    """Phase 8c.3: in the joint path, group formation requires bilateral
+    consent (both agents pick SocialAction.COLLABORATE in the same tick).
+    The hardcoded sociability gate is bypassed."""
+    env = _make_env(seed=303)
+    _place_two_adjacent(env)
+    body = np.full(env._n_agents, int(BodyAction.REST), dtype=np.int64)
+    social = np.full(env._n_agents, int(SocialAction.NOOP), dtype=np.int64)
+    social[0] = int(SocialAction.COLLABORATE)
+    social[1] = int(SocialAction.COLLABORATE)
+    env.step_all_joint(body, social)
+    g0 = env._get_group(0)
+    g1 = env._get_group(1)
+    assert g0 is not None and g0 == g1, (
+        "bilateral COLLAB on adjacent agents must form a shared group, "
+        "regardless of the trait sociability gate"
+    )
+
+
+def test_bilateral_collab_fails_when_only_one_picks_collaborate():
+    """Phase 8c.3: a single-sided COLLAB no longer forms a group, even when
+    the neighbour has high sociability — the gate is now bilateral consent."""
+    env = _make_env(seed=304)
+    _place_two_adjacent(env)
+    env._agents[1].sociability = 1.0  # would have passed the heuristic
+    body = np.full(env._n_agents, int(BodyAction.REST), dtype=np.int64)
+    social = np.full(env._n_agents, int(SocialAction.NOOP), dtype=np.int64)
+    social[0] = int(SocialAction.COLLABORATE)
+    social[1] = int(SocialAction.NOOP)
+    env.step_all_joint(body, social)
+    assert env._get_group(0) is None, (
+        "single-sided COLLAB must NOT form a group in the joint path"
+    )
+
+
+def test_legacy_step_collab_still_uses_heuristic_gate():
+    """Phase 8c.3 backward-compat: the legacy single-action CombatEnv path
+    (env.step with Action.COLLABORATE) still uses the trait-based
+    sociability gate, since there is no joint scheduler to coordinate
+    bilateral consent there."""
+    env = _make_env(seed=305)
+    _place_two_adjacent(env)
+    env._agents[1].sociability = 1.0  # heuristic must pass
+    formed = env._try_collaborate(0)  # no consent_set → legacy path
+    assert formed is True

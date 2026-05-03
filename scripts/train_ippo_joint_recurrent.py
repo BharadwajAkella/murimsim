@@ -28,7 +28,7 @@ from murimsim.rl.ippo_joint_recurrent import (
     JointRecurrentSharedActorCritic,
     joint_recurrent_ppo_update,
 )
-from murimsim.rl.multi_env import OBS_TOTAL_SIZE
+from murimsim.rl.multi_env import OBS_TOTAL_SIZE, OBS_TOTAL_SIZE_COURTSHIP, OBS_TRADE_EXTRA
 from scripts.train_ippo import affinity_l1, build_envs
 
 logger = logging.getLogger("train_ippo_joint_recurrent")
@@ -69,6 +69,12 @@ def parse_args() -> argparse.Namespace:
              "whether cooperation survives without artificial reinforcement.",
     )
     p.add_argument("--arena-mix", type=str, default=None)
+    p.add_argument(
+        "--warm-start",
+        type=str,
+        default=None,
+        help="Path to a checkpoint .pt to warm-start the policy weights from.",
+    )
     return p.parse_args()
 
 
@@ -97,7 +103,12 @@ def train(args: argparse.Namespace) -> dict:
         cfg = yaml.safe_load(f)
 
     device = torch.device(args.device)
-    obs_dim = OBS_TOTAL_SIZE
+    enable_courtship = bool(cfg.get("agent", {}).get("enable_courtship", False))
+    enable_trade = bool(cfg.get("agent", {}).get("enable_trade", False))
+    obs_dim = OBS_TOTAL_SIZE_COURTSHIP if enable_courtship else OBS_TOTAL_SIZE
+    if enable_trade:
+        obs_dim += OBS_TRADE_EXTRA
+    n_social_actions = N_SOCIAL_ACTIONS  # 7 post-Phase 8d.1 (PROPOSE/ACCEPT/REJECT_TRADE)
     B = args.n_envs * args.n_agents
 
     envs = build_envs(
@@ -111,9 +122,75 @@ def train(args: argparse.Namespace) -> dict:
 
     policy = JointRecurrentSharedActorCritic(
         obs_dim=obs_dim,
+        n_social_actions=n_social_actions,
         hidden_dim=args.hidden_dim,
         pre_lstm_dim=args.pre_lstm_dim,
     ).to(device)
+    if args.warm_start:
+        ws_path = Path(args.warm_start)
+        logger.info("warm-starting policy from: %s", ws_path)
+        ws_ckpt = torch.load(ws_path, map_location=device, weights_only=False)
+        ws_state = ws_ckpt["policy"]
+        # Phase 8c.2 head-shape adaptation: old checkpoints have body_head =
+        # Linear(hidden, 16) and social_head = Linear(hidden, 5) where slot 4
+        # was GIFT. New shapes are body=17, social=4. We zero-init the new
+        # GIFT row in body_head and DROP the old GIFT row from social_head
+        # (the policy must re-learn GIFT logits from scratch in the body
+        # lane; trained social-GIFT preferences are intentionally discarded).
+        bh_w = ws_state.get("body_head.weight")
+        bh_b = ws_state.get("body_head.bias")
+        sh_w = ws_state.get("social_head.weight")
+        sh_b = ws_state.get("social_head.bias")
+        if bh_w is not None and bh_w.shape[0] == 16 and policy.body_head.weight.shape[0] == 17:
+            logger.info(
+                "warm-start: expanding body_head 16 -> 17 (new GIFT row zero-init)"
+            )
+            new_w = torch.zeros_like(policy.body_head.weight)
+            new_b = torch.zeros_like(policy.body_head.bias)
+            new_w[:16] = bh_w
+            new_b[:16] = bh_b
+            ws_state["body_head.weight"] = new_w
+            ws_state["body_head.bias"] = new_b
+        if sh_w is not None and sh_w.shape[0] == 5 and policy.social_head.weight.shape[0] == 4:
+            logger.info(
+                "warm-start: shrinking social_head 5 -> 4 (dropping legacy GIFT row at idx 4)"
+            )
+            ws_state["social_head.weight"] = sh_w[:4].clone()
+            ws_state["social_head.bias"] = sh_b[:4].clone()
+        # Phase 8d.1 head-shape adaptation: social_head 4 -> 7 (append zero
+        # rows for PROPOSE_TRADE / ACCEPT_TRADE / REJECT_TRADE so the policy
+        # learns trade logits from scratch without disturbing learned
+        # NOOP / COLLABORATE / PROPOSE / ACCEPT preferences).
+        if sh_w is not None and sh_w.shape[0] == 4 and policy.social_head.weight.shape[0] == 7:
+            logger.info(
+                "warm-start: expanding social_head 4 -> 7 (new TRADE rows zero-init)"
+            )
+            new_sw = torch.zeros_like(policy.social_head.weight)
+            new_sb = torch.zeros_like(policy.social_head.bias)
+            new_sw[:4] = sh_w
+            new_sb[:4] = sh_b
+            ws_state["social_head.weight"] = new_sw
+            ws_state["social_head.bias"] = new_sb
+        # Phase 8d.1 obs-dim adaptation: pre_lstm.0 input axis grows by
+        # OBS_TRADE_EXTRA when enable_trade flips on. Pad zero columns at
+        # the tail so the existing learned features remain centred and the
+        # new trade-block dims start with no influence.
+        pl_w = ws_state.get("pre_lstm.0.weight")
+        pl_b = ws_state.get("pre_lstm.0.bias")
+        if pl_w is not None and pl_w.shape[1] != policy.pre_lstm[0].weight.shape[1]:
+            old_in = pl_w.shape[1]
+            new_in = policy.pre_lstm[0].weight.shape[1]
+            if new_in > old_in:
+                logger.info(
+                    "warm-start: expanding pre_lstm.0 input axis %d -> %d (new dims zero-init)",
+                    old_in, new_in,
+                )
+                new_pw = torch.zeros_like(policy.pre_lstm[0].weight)
+                new_pw[:, :old_in] = pl_w
+                ws_state["pre_lstm.0.weight"] = new_pw
+                # bias unchanged in shape but reload to be safe
+                ws_state["pre_lstm.0.bias"] = pl_b
+        policy.load_state_dict(ws_state, strict=True)
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr, eps=1e-5)
 
     buffer = JointRecurrentRolloutBuffer(
